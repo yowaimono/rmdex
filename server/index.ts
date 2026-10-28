@@ -24,6 +24,18 @@ const liveTurns = new Map<string, LiveTurn>()
 const approvals = new Map<string, { id: string | number; method: string; params: Record<string, unknown> }>()
 const sending = new Set<string>()
 const newThreads = new Map<string, Record<string, unknown>>()
+type CodexModel = {
+  id: string
+  model: string
+  displayName: string
+  description: string
+  hidden: boolean
+  isDefault: boolean
+  defaultReasoningEffort: string
+  supportedReasoningEfforts: Array<{ reasoningEffort: string; description: string }>
+  [key: string]: unknown
+}
+let modelCache: { expiresAt: number; data: CodexModel[] } | undefined
 const port = Number(process.env.RMDEX_AGENT_PORT || 18787)
 const imageTypes: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' }
 
@@ -118,6 +130,20 @@ function rpc(method: string, params: unknown): Promise<unknown> {
   })
 }
 
+async function listModels() {
+  if (modelCache && modelCache.expiresAt > Date.now()) return modelCache.data
+  const data: CodexModel[] = []
+  let cursor: string | null = null
+  for (let page = 0; page < 20; page += 1) {
+    const result = await rpc('model/list', { limit: 100, includeHidden: false, cursor }) as { data?: CodexModel[]; nextCursor?: string | null }
+    if (Array.isArray(result.data)) data.push(...result.data.filter(model => model && typeof model.id === 'string'))
+    if (!result.nextCursor || result.nextCursor === cursor) break
+    cursor = result.nextCursor
+  }
+  modelCache = { expiresAt: Date.now() + 5000, data }
+  return data
+}
+
 const ready = rpc('initialize', { clientInfo: { name: 'rmdex', version: '0.0.1' } })
   .then(() => { codex.stdin.write(JSON.stringify({ method: 'initialized', params: {} }) + '\n') })
 ready.catch((error) => console.error('Codex initialization failed:', error.message))
@@ -161,6 +187,10 @@ const server = createServer(async (req, res) => {
         const threadId = sendMatch[1]!
         if (typeof data.text !== 'string' || !data.text.trim() || data.text.length > 32000) throw new Error('消息不能为空或超过长度限制')
         if (!['ask', 'auto', 'full'].includes(data.permissionMode)) throw new Error('请选择有效的权限模式')
+        const models = (data.model !== undefined || data.effort !== undefined) ? await listModels() : []
+        const selectedModel = typeof data.model === 'string' && data.model.trim() ? models.find(model => model.id === data.model) : undefined
+        if (data.model !== undefined && !selectedModel) throw new Error('所选模型不在当前 Codex 主机的模型列表中')
+        if (data.effort !== undefined && (typeof data.effort !== 'string' || !selectedModel?.supportedReasoningEfforts?.some(option => option.reasoningEffort === data.effort))) throw new Error('所选推理强度不受当前模型支持')
         if (sending.has(threadId) || activeTurns.has(threadId)) throw new Error('此会话正在执行，请等待结束')
         sending.add(threadId)
         try {
@@ -168,7 +198,8 @@ const server = createServer(async (req, res) => {
           const options = data.permissionMode === 'full'
             ? { approvalPolicy: 'never', approvalsReviewer: 'user', sandboxPolicy: { type: 'dangerFullAccess' } }
             : { approvalPolicy: 'on-request', approvalsReviewer: data.permissionMode === 'auto' ? 'auto_review' : 'user', sandboxPolicy: { type: 'workspaceWrite' } }
-          const started = await rpc('turn/start', { threadId, input: [{ type: 'text', text: data.text, text_elements: [] }], ...options }) as { turn?: { id: string; status?: string } }
+          const modelOptions = selectedModel ? { model: selectedModel.id, effort: data.effort } : {}
+          const started = await rpc('turn/start', { threadId, input: [{ type: 'text', text: data.text, text_elements: [] }], ...modelOptions, ...options }) as { turn?: { id: string; status?: string } }
           newThreads.delete(threadId)
           if (started.turn?.id) {
             let live = liveTurns.get(threadId)
@@ -190,6 +221,8 @@ const server = createServer(async (req, res) => {
         codex.stdin.write(JSON.stringify({ id: request.id, result: { decision: data.decision } }) + '\n')
         result = { ok: true }
       } else { res.writeHead(404).end(JSON.stringify({ error: 'Not found' })); return }
+    } else if (url.pathname === '/api/models') {
+      result = { data: await listModels() }
     } else if (url.pathname === '/api/threads') {
       const list = await rpc('thread/list', { limit: 100, sortKey: 'updated_at' }) as { data: Array<{ id: string }> }
       const listed = new Set(list.data.map(thread => thread.id))

@@ -21,7 +21,7 @@ if (relayUrl && deviceToken) {
               if (message.type === 'ready') { clearTimeout(timeout); resolve(); return }
               if (message.type !== 'request' || typeof message.id !== 'string' || typeof message.path !== 'string' || !['GET', 'POST'].includes(String(message.method))) return
               const allowed = message.method === 'GET'
-                ? /^\/api\/(?:threads(?:\/[a-zA-Z0-9-]+)?|images\/[a-f0-9-]+)$/.test(message.path)
+                ? /^\/api\/(?:models|threads(?:\/[a-zA-Z0-9-]+)?|images\/[a-f0-9-]+)$/.test(message.path)
                 : /^\/api\/(?:threads|threads\/[a-zA-Z0-9-]+\/(?:send|stop)|approvals\/[a-zA-Z0-9-]+)$/.test(message.path)
               if (!allowed) { socket?.send(JSON.stringify({ type: 'response', id: message.id, error: 'Forbidden' })); return }
               try {

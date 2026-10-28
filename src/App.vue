@@ -6,6 +6,7 @@ import QRCode from 'qrcode'
 import logoUrl from './assets/rmdex-logo.jpg'
 import ToolEvent from './components/ToolEvent.vue'
 import PermissionMenu from './components/PermissionMenu.vue'
+import ModelMenu, { type ModelOption } from './components/ModelMenu.vue'
 import { timeline, type ContentPart, type Turn } from './conversation'
 
 type Thread = { id: string; name?: string | null; preview?: string; cwd?: string; updatedAt?: number; status?: { type: string }; turns?: Turn[] }
@@ -48,6 +49,10 @@ const sendingThreadId = ref<string | null>(null)
 const activeTurnId = ref<string | null>(null)
 const pendingMessages = ref<Record<string, { text: string; previousCount: number }>>({})
 const permissionMode = ref<'ask' | 'auto' | 'full'>('ask')
+const models = ref<ModelOption[]>([])
+const selectedModel = ref<string | null>(null)
+const selectedEffort = ref<string | null>(null)
+const modelLoading = ref(false)
 const lastTurn = ref<{ status: string; error?: { message?: string } } | null>(null)
 type Approval = { id: string; method: string; params: { command?: string; reason?: string; cwd?: string; grantRoot?: string } }
 const pendingApprovals = ref<Approval[]>([])
@@ -130,6 +135,35 @@ async function bindOnlineDevice() {
   localStorage.setItem('rmdex-client-token', result.clientToken)
   return true
 }
+async function loadModels() {
+  modelLoading.value = true
+  try {
+    const result = await get<{ data: ModelOption[] }>('/api/models')
+    models.value = result.data.filter(model => !model.hidden)
+    const deviceKey = remoteDevice.value?.id || 'local'
+    const savedModel = localStorage.getItem(`rmdex-model:${deviceKey}`)
+    const savedEffort = localStorage.getItem(`rmdex-effort:${deviceKey}`)
+    const nextModel = models.value.find(model => model.id === savedModel) || models.value.find(model => model.isDefault) || models.value[0]
+    selectedModel.value = nextModel?.id || null
+    const nextEffort = nextModel?.supportedReasoningEfforts.some(item => item.reasoningEffort === savedEffort)
+      ? savedEffort
+      : nextModel?.defaultReasoningEffort || nextModel?.supportedReasoningEfforts[0]?.reasoningEffort || null
+    selectedEffort.value = nextEffort
+  } catch (e) {
+    models.value = []; selectedModel.value = null; selectedEffort.value = null
+    throw e
+  } finally { modelLoading.value = false }
+}
+function rememberModel(value: string) {
+  selectedModel.value = value
+  const deviceKey = remoteDevice.value?.id || 'local'
+  localStorage.setItem(`rmdex-model:${deviceKey}`, value)
+}
+function rememberEffort(value: string) {
+  selectedEffort.value = value
+  const deviceKey = remoteDevice.value?.id || 'local'
+  localStorage.setItem(`rmdex-effort:${deviceKey}`, value)
+}
 async function refresh() {
   loading.value = true; error.value = ''
   try {
@@ -157,7 +191,10 @@ async function refresh() {
         remoteDevice.value = client.device
       }
     }
-    const result = await get<{ data: Thread[] }>('/api/threads')
+    const [result] = await Promise.all([
+      get<{ data: Thread[] }>('/api/threads'),
+      loadModels(),
+    ])
     threads.value = [...new Map(result.data.map((thread) => [thread.id, thread])).values()]
     connected.value = true
   }
@@ -317,7 +354,12 @@ async function send() {
   sending.value = true; sendingThreadId.value = id; pendingMessages.value[id] = { text, previousCount: messages.value.filter(entry => entry.role === 'user' && entry.text === text).length }; error.value = ''; lastTurn.value = null
   await scrollToLatest()
   try {
-    const result = await post(`/api/threads/${id}/send`, { text, permissionMode: permissionMode.value })
+    const result = await post(`/api/threads/${id}/send`, {
+      text,
+      permissionMode: permissionMode.value,
+      model: selectedModel.value,
+      effort: selectedEffort.value,
+    })
     if (drafts.value[id]?.trim() === text) drafts.value[id] = ''
     if (selected.value?.id === id) { activeTurnId.value = result.turn?.id || null; await updateThread(); await scrollToLatest() }
   } catch (e) { delete pendingMessages.value[id]; if (selected.value?.id === id) error.value = e instanceof Error ? e.message : String(e) }
@@ -365,7 +407,7 @@ onUnmounted(() => { if (poll) clearInterval(poll) })
       <div v-else ref="conversation" class="conversation"><div class="conversation-inner"><div class="conversation-header"><h2>{{ selected.name || selected.preview || '未命名会话' }}</h2><p>{{ selected.cwd }}</p></div><div v-if="!messages.length && !pendingMessages[selected.id]" class="empty-messages">此会话暂无可显示的消息。</div><template v-for="(message, i) in messages" :key="i"><details v-if="message.role === 'tools'" class="tool-group"><summary><Wrench :size="14" /><span>{{ toolSummary(message.items) }}</span><span v-if="message.items.some(item => item.status === 'failed' || item.status === 'declined' || item.success === false || (typeof item.exitCode === 'number' && item.exitCode !== 0))" class="group-failed">含失败</span><ChevronRight :size="14" class="group-chevron" /></summary><div class="tool-group-content"><ToolEvent v-for="(item, index) in message.items" :key="item.id || index" :item="item" /></div></details><article v-else class="message" :class="`message--${message.role}`" :aria-label="message.role === 'user' ? '用户消息' : 'Codex 回复'"><div class="message-body"><div v-if="message.images.length" class="attachments"><template v-for="(image, index) in message.images" :key="index"><a v-if="imageSource(image)" :href="imageSource(image)" target="_blank" rel="noopener noreferrer" class="attachment"><img :src="imageSource(image)" alt="图片附件" loading="lazy" /></a><span v-else class="attachment-unavailable">图片附件不可用</span></template></div><div v-if="message.text" class="message-text markdown" v-html="markdown.render(message.text)"></div></div></article></template><article v-if="pendingMessages[selected.id]" class="message message--user" aria-label="待显示的用户消息"><div class="message-body"><div class="message-text markdown" v-html="markdown.render(pendingMessages[selected.id]!.text)"></div></div></article><div v-if="working" class="working" role="status" aria-live="polite"><LoaderCircle :size="16" class="working-spinner" /><span>{{ workLabel }}</span></div><div v-else-if="lastTurn?.status === 'failed'" class="turn-failure" role="alert">执行失败<span v-if="lastTurn.error?.message">：{{ lastTurn.error.message }}</span></div></div></div>
       <div v-if="selected" class="compose-area">
         <div v-for="approval in pendingApprovals" :key="approval.id" class="approval"><strong>{{ approval.method.includes('commandExecution') ? '命令执行需要确认' : '文件修改需要确认' }}</strong><p v-if="approval.params.reason">{{ approval.params.reason }}</p><pre v-if="approval.params.command">{{ approval.params.command }}</pre><p v-if="approval.params.cwd">工作目录：{{ approval.params.cwd }}</p><p v-if="approval.params.grantRoot">授权目录：{{ approval.params.grantRoot }}</p><details><summary>完整请求信息</summary><pre>{{ JSON.stringify(approval.params, null, 2) }}</pre></details><p v-if="approval.method.includes('fileChange')">请先在上方工具调用中查看文件变更，再决定是否允许。</p><div class="approval-actions"><button @click="decide(approval, 'decline')">拒绝</button><button @click="decide(approval, 'accept')">允许本次</button></div></div>
-        <form class="composer" @submit.prevent="send"><textarea v-model="drafts[selected.id]" placeholder="给 Codex 发送消息" aria-label="消息" rows="2" :disabled="sending || !!activeTurnId" @keydown.enter.exact="onEnter"></textarea><div class="compose-actions"><PermissionMenu v-model="permissionMode" :disabled="working" /><button v-if="activeTurnId" type="button" class="send-button stop-button" title="停止任务" aria-label="停止任务" @click="stop"><Square :size="14" fill="currentColor" /></button><button v-else type="submit" class="send-button" title="发送消息" aria-label="发送消息" :disabled="sending || !drafts[selected.id]?.trim()"><ArrowUp :size="18" /></button></div></form>
+        <form class="composer" @submit.prevent="send"><textarea v-model="drafts[selected.id]" placeholder="给 Codex 发送消息" aria-label="消息" rows="2" :disabled="sending || !!activeTurnId" @keydown.enter.exact="onEnter"></textarea><div class="compose-actions"><div class="compose-selectors"><ModelMenu :models="models" :model-value="selectedModel" :effort="selectedEffort" :loading="modelLoading" :disabled="working || sending" @update:model-value="rememberModel" @update:effort="rememberEffort" /><PermissionMenu v-model="permissionMode" :disabled="working" /></div><button v-if="activeTurnId" type="button" class="send-button stop-button" title="停止任务" aria-label="停止任务" @click="stop"><Square :size="14" fill="currentColor" /></button><button v-else type="submit" class="send-button" title="发送消息" aria-label="发送消息" :disabled="sending || !drafts[selected.id]?.trim()"><ArrowUp :size="18" /></button></div></form>
       </div>
     </main>
     <div v-if="showCreate" class="modal-backdrop" @click.self="!creating && (showCreate = false)"><section class="create-dialog" role="dialog" aria-modal="true" aria-labelledby="create-title" @keydown.esc="!creating && (showCreate = false)"><header><h2 id="create-title">新建对话</h2><button class="icon-button" type="button" title="关闭" aria-label="关闭" :disabled="creating" @click="showCreate = false"><X :size="18" /></button></header><form @submit.prevent="createThread"><label for="working-directory">工作目录</label><input id="working-directory" v-model="createPath" required autocomplete="off" placeholder="例如 D:\WorkSpace\rmdex" /><p v-if="createError" class="create-error" role="alert">{{ createError }}</p><div class="dialog-actions"><button type="button" class="cancel-button" :disabled="creating" @click="showCreate = false">取消</button><button type="submit" class="create-button" :disabled="creating || !createPath.trim()">{{ creating ? '创建中…' : '创建对话' }}</button></div></form></section></div>
