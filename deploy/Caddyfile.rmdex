@@ -1,0 +1,78 @@
+ai.kyeai.xyz {
+    encode zstd gzip
+
+    handle /brand/* {
+        root * /etc/caddy/www
+        file_server
+    }
+
+    handle /api/v1/gen/* {
+        reverse_proxy gpt2api-api:17180
+    }
+
+    handle_path /gpt2api-openai/* {
+        reverse_proxy gpt2api-openai:17200
+    }
+
+    handle {
+        reverse_proxy new-api:3000
+    }
+}
+
+www.kyeai.xyz {
+    encode zstd gzip
+
+    handle /api/* {
+        reverse_proxy kye-ai-backend:3099 {
+            transport http {
+                read_timeout 600s
+                write_timeout 600s
+            }
+        }
+    }
+
+    handle /uploads/* {
+        reverse_proxy kye-ai-backend:3099 {
+            transport http {
+                read_timeout 600s
+                write_timeout 600s
+            }
+        }
+    }
+
+    handle {
+        root * /etc/caddy/www/kye-app
+        try_files {path} /index.html
+        file_server
+    }
+}
+
+admin425.kyeai.xyz {
+    encode zstd gzip
+
+    handle /api/* {
+        reverse_proxy kye-ai-backend:3099 {
+            transport http {
+                read_timeout 600s
+                write_timeout 600s
+            }
+        }
+    }
+
+    handle {
+        root * /etc/caddy/www/kye-admin
+        try_files {path} /index.html
+        file_server
+    }
+}
+
+code.kyeai.xyz {
+    encode zstd gzip
+
+    reverse_proxy rmdex-relay:8787 {
+        transport http {
+            read_timeout 60s
+            write_timeout 60s
+        }
+    }
+}
