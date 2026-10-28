@@ -102,6 +102,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .tool-group > summary { display: flex; align-items: center; gap: 8px; min-height: 32px; list-style: none; cursor: pointer; }
 .tool-group > summary::-webkit-details-marker { display: none; }
 .tool-group > summary:hover { color: #0879f9; }
+.tool-group > summary > span:first-of-type { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .group-chevron { transition: transform .15s ease; }
 .tool-group[open] > summary .group-chevron { transform: rotate(90deg); }
 .group-failed { color: #b55d52; }
@@ -113,6 +114,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .tool-icon, .tool-chevron { flex: none; }
 .tool-title { flex: none; color: #607080; font-weight: 600; }
 .tool-preview { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #93a0ad; }
+.tool-output-preview { min-width: 0; max-width: 34%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #a3adb7; font-family: Consolas, monospace; font-size: 11px; }
 .tool-status { margin-left: auto; flex: none; color: #7e9a88; white-space: nowrap; }
 .tool-status.failed { color: #c05d52; }
 .tool-duration { flex: none; color: #a5b0ba; white-space: nowrap; }

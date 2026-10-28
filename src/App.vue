@@ -91,10 +91,21 @@ function applyRead(result: ReadResult) {
   const pending = pendingMessages.value[result.thread.id]
   if (pending && timeline(result.thread.turns || []).filter(entry => entry.role === 'user' && entry.text === pending.text).length > pending.previousCount) delete pendingMessages.value[result.thread.id]
 }
-function toolSummary(items: { type: string }[]) {
+function toolSummary(items: { type: string; command?: unknown; commandActions?: unknown; tool?: unknown; name?: unknown; server?: unknown; namespace?: unknown; query?: unknown; path?: unknown }[]) {
   const names: Record<string, string> = { commandExecution: '执行命令', mcpToolCall: '调用工具', dynamicToolCall: '调用工具', fileChange: '修改文件', webSearch: '搜索网页', imageView: '查看图片' }
   const labels = [...new Set(items.map(item => names[item.type] || '其他操作'))]
-  return labels.join('、') + (items.length > 1 ? ` · ${items.length} 项` : '')
+  const first = items.find(item => ['commandExecution', 'mcpToolCall', 'dynamicToolCall', 'webSearch', 'fileChange', 'imageView'].includes(item.type))
+  let preview = ''
+  if (first?.type === 'commandExecution') {
+    const actions = Array.isArray(first.commandActions) ? first.commandActions : [first.commandActions]
+    const action = actions.find(value => value && typeof value === 'object') as Record<string, unknown> | undefined
+    preview = String(first.command || action?.command || action?.name || '')
+  } else if (first?.type === 'mcpToolCall' || first?.type === 'dynamicToolCall') {
+    preview = [first.server || first.namespace, first.tool || first.name].filter(Boolean).join(' · ')
+  } else if (first?.type === 'webSearch') preview = String(first.query || '')
+  else if (first) preview = String(first.path || '')
+  if (preview.length > 140) preview = `${preview.slice(0, 140)}…`
+  return labels.join('、') + (items.length > 1 ? ` · ${items.length} 项` : '') + (preview ? ` · ${preview}` : '')
 }
 function imageSource(part: ContentPart) {
   if (part.assetUrl) return authenticatedImages.value[part.assetUrl]

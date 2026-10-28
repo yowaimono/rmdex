@@ -2,7 +2,8 @@
 import { computed } from 'vue'
 import { ChevronRight, FileCode2, Globe, Image, TerminalSquare, Wrench } from 'lucide-vue-next'
 
-const props = defineProps<{ item: { type: string; [key: string]: unknown } }>()
+type ToolItem = { type: string; [key: string]: unknown }
+const props = defineProps<{ item: ToolItem }>()
 const names: Record<string, string> = {
   commandExecution: '执行命令', fileChange: '文件变更', mcpToolCall: '工具调用',
   dynamicToolCall: '工具调用', functionCallOutput: '工具结果', webSearch: '搜索网页',
@@ -11,11 +12,11 @@ const names: Record<string, string> = {
   enteredReviewMode: '进入审查', exitedReviewMode: '结束审查', contextCompaction: '上下文压缩',
 }
 const fieldNames: Record<string, string> = {
-  command: '命令', cwd: '工作目录', aggregatedOutput: '输出', exitCode: '退出码',
-  arguments: '参数', result: '结果', error: '错误', contentItems: '结果内容',
-  changes: '变更', query: '搜索内容', action: '搜索操作', results: '搜索结果',
-  path: '路径', savedPath: '保存路径', prompt: '任务', text: '内容', review: '审查内容',
-  agentsStates: '任务状态', receiverThreadIds: '会话', failure: '错误',
+  command: '命令', commandActions: '命令步骤', cwd: '工作目录', aggregatedOutput: '输出',
+  output: '输出', exitCode: '退出码', arguments: '参数', result: '结果', error: '错误',
+  contentItems: '结果内容', changes: '变更', query: '搜索内容', action: '搜索操作',
+  results: '搜索结果', path: '路径', savedPath: '保存路径', prompt: '任务', text: '内容',
+  review: '审查内容', agentsStates: '任务状态', receiverThreadIds: '会话', failure: '错误',
 }
 const title = computed(() => names[props.item.type] || `事件 · ${props.item.type}`)
 const icon = computed(() => {
@@ -25,14 +26,33 @@ const icon = computed(() => {
   if (props.item.type === 'imageView' || props.item.type === 'imageGeneration') return Image
   return Wrench
 })
+function textValue(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (value === undefined || value === null) return ''
+  try { return JSON.stringify(value) } catch { return String(value) }
+}
+function commandActionText(value: unknown): string {
+  const actions = Array.isArray(value) ? value : [value]
+  return actions.map(action => {
+    if (!action || typeof action !== 'object') return textValue(action)
+    const item = action as Record<string, unknown>
+    return [item.command, item.name, item.path].find(entry => typeof entry === 'string' && entry.trim()) as string || ''
+  }).filter(Boolean).join(' · ')
+}
 const summary = computed(() => {
   const item = props.item
-  if (item.type === 'mcpToolCall' || item.type === 'dynamicToolCall') return [item.server || item.namespace, item.tool].filter(Boolean).join(' · ')
-  if (item.type === 'commandExecution') return typeof item.command === 'string' ? item.command : ''
-  if (item.type === 'webSearch') return typeof item.query === 'string' ? item.query : ''
-  if (item.type === 'imageView') return typeof item.path === 'string' ? item.path : ''
+  if (item.type === 'mcpToolCall' || item.type === 'dynamicToolCall') return [item.server || item.namespace, item.tool || item.name].filter(Boolean).join(' · ')
+  if (item.type === 'commandExecution') return textValue(item.command) || commandActionText(item.commandActions)
+  if (item.type === 'webSearch') return textValue(item.query) || textValue(item.action)
+  if (item.type === 'imageView') return textValue(item.path)
   if (item.type === 'functionCallOutput') return [item.namespace, item.name].filter(Boolean).join(' · ')
-  return ''
+  return textValue(item.path) || textValue(item.name)
+})
+const outputPreview = computed(() => {
+  const item = props.item
+  const value = item.error || item.failure || item.aggregatedOutput || item.output
+  const text = textValue(value).replace(/\s+/g, ' ').trim()
+  return text.length > 180 ? `${text.slice(0, 180)}…` : text
 })
 const status = computed(() => {
   const value = props.item.status
@@ -54,7 +74,8 @@ const raw = computed(() => JSON.stringify(props.item, null, 2))
     <summary class="tool-summary">
       <component :is="icon" :size="15" class="tool-icon" />
       <span class="tool-title">{{ title }}</span>
-      <span v-if="summary" class="tool-preview">{{ summary }}</span>
+      <span v-if="summary" class="tool-preview" :title="summary">{{ summary }}</span>
+      <span v-if="outputPreview" class="tool-output-preview" :title="outputPreview">{{ outputPreview }}</span>
       <span v-if="status" class="tool-status" :class="{ failed: status === '失败' || status === '已拒绝' }">{{ status }}</span>
       <span v-if="duration" class="tool-duration">{{ duration }}</span>
       <ChevronRight :size="15" class="tool-chevron" />
