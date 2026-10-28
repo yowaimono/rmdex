@@ -171,6 +171,16 @@ const server = createServer(async (req, res) => {
       if (!adminFor(req)) { json(res, 401, { error: '需要管理员登录' }); return }
       json(res, 200, { data: state.devices.filter(device => !device.revoked).map(({ id, name, createdAt }) => ({ id, name, createdAt, online: deviceSockets.get(id)?.readyState === WebSocket.OPEN })) }); return
     }
+    const webClientMatch = url.pathname.match(/^\/api\/devices\/([\w-]+)\/web-client$/)
+    if (req.method === 'POST' && webClientMatch) {
+      if (!adminFor(req)) { json(res, 401, { error: '需要管理员登录' }); return }
+      const device = state.devices.find(item => item.id === webClientMatch[1] && !item.revoked)
+      if (!device) { json(res, 404, { error: '设备不存在' }); return }
+      const clientToken = randomToken()
+      state.clients.push({ tokenHash: hash(clientToken), deviceId: device.id, name: '管理网页', createdAt: Date.now() })
+      await persist()
+      json(res, 201, { clientToken, device: { id: device.id, name: device.name, online: deviceSockets.get(device.id)?.readyState === WebSocket.OPEN } }); return
+    }
     if (req.method === 'GET' && url.pathname === '/api/pair-requests') {
       if (!adminFor(req)) { json(res, 401, { error: '需要管理员登录' }); return }
       json(res, 200, { data: state.pairRequests.filter(pair => pair.status === 'pending' && pair.expiresAt > Date.now()).map(({ id, deviceId, name, createdAt }) => ({ id, deviceId, name, createdAt })) }); return

@@ -15,6 +15,7 @@ const query = ref('')
 const loading = ref(false)
 const error = ref('')
 const connected = ref(false)
+const remoteDevice = ref<{ id: string; name: string; online: boolean } | null>(null)
 const authenticatedImages = ref<Record<string, string>>({})
 const imageLoads = new Map<string, Promise<string | undefined>>()
 const showDevices = ref(false)
@@ -61,6 +62,7 @@ markdown.renderer.rules.link_open = (tokens, idx, options, env, renderer) => {
   return defaultLink(tokens, idx, options, env, renderer)
 }
 const filtered = computed(() => threads.value.filter((t) => `${t.name || ''} ${t.preview || ''} ${t.cwd || ''}`.toLowerCase().includes(query.value.toLowerCase())))
+const remoteMode = computed(() => !!clientToken.value || !['localhost', '127.0.0.1'].includes(location.hostname))
 const messages = computed(() => timeline(selected.value?.turns || []))
 const working = computed(() => !!activeTurnId.value || sendingThreadId.value === selected.value?.id)
 const workLabel = computed(() => {
@@ -106,9 +108,44 @@ async function get<T>(path: string): Promise<T> {
   if (!response.ok) throw new Error(data.error || 'Request failed')
   return data as T
 }
+async function bindOnlineDevice() {
+  if (!adminToken.value) return false
+  await loadDevices()
+  const device = devices.value.find(item => item.online)
+  if (!device) return false
+  const result = await adminFetch<{ clientToken: string; device: { id: string; name: string; online: boolean } }>(`/api/devices/${device.id}/web-client`, 'POST', {})
+  clientToken.value = result.clientToken
+  remoteDevice.value = result.device
+  localStorage.setItem('rmdex-client-token', result.clientToken)
+  return true
+}
 async function refresh() {
   loading.value = true; error.value = ''
   try {
+    if (remoteMode.value) {
+      let client: { device: { id: string; name: string; online: boolean } }
+      if (!clientToken.value) {
+        if (!(await bindOnlineDevice())) throw new Error(adminToken.value ? '没有在线的本地 Codex 设备，请先启动电脑端代理' : '请先在“连接设备”中绑定这台电脑')
+        client = await get('/api/client')
+      } else {
+        try {
+          client = await get('/api/client')
+        } catch (firstError) {
+          localStorage.removeItem('rmdex-client-token')
+          clientToken.value = ''
+          if (!(await bindOnlineDevice())) throw firstError
+          client = await get('/api/client')
+        }
+      }
+      remoteDevice.value = client.device
+      if (!client.device.online) {
+        localStorage.removeItem('rmdex-client-token')
+        clientToken.value = ''
+        if (!(await bindOnlineDevice())) throw new Error(adminToken.value ? '本地 Codex 设备当前离线，请先启动电脑端代理' : '当前绑定的电脑已离线，请在“连接设备”中重新选择在线电脑')
+        client = await get('/api/client')
+        remoteDevice.value = client.device
+      }
+    }
     const result = await get<{ data: Thread[] }>('/api/threads')
     threads.value = [...new Map(result.data.map((thread) => [thread.id, thread])).values()]
     connected.value = true
@@ -116,6 +153,7 @@ async function refresh() {
   catch (e) { connected.value = false; error.value = e instanceof Error ? e.message : String(e) }
   finally { loading.value = false }
 }
+
 async function openThread(thread: Thread) {
   const version = ++selectionVersion
   selected.value = thread; activeTurnId.value = null; pendingApprovals.value = []; lastTurn.value = null; mobileDetail.value = true; error.value = ''
@@ -162,6 +200,12 @@ async function loginAdmin() {
     if (!response.ok) throw new Error(result.error || '登录失败')
     adminToken.value = result.token; sessionStorage.setItem('rmdex-admin-token', result.token); adminPassword.value = ''
     await loadDevices()
+    if (!clientToken.value) {
+      const device = devices.value.find(item => item.online)
+      if (device) await connectDevice(device.id)
+    } else {
+      await refresh()
+    }
   } catch (e) { pairError.value = e instanceof Error ? e.message : String(e) }
 }
 async function loadDevices() {
@@ -174,6 +218,17 @@ async function loadDevices() {
     devices.value = deviceResult.data; pairRequests.value = requestResult.data
   }
   catch (e) { adminToken.value = ''; sessionStorage.removeItem('rmdex-admin-token'); pairError.value = e instanceof Error ? e.message : String(e) }
+}
+async function connectDevice(deviceId: string) {
+  pairError.value = ''
+  try {
+    const result = await adminFetch<{ clientToken: string; device: { id: string; name: string; online: boolean } }>(`/api/devices/${deviceId}/web-client`, 'POST', {})
+    clientToken.value = result.clientToken
+    remoteDevice.value = result.device
+    localStorage.setItem('rmdex-client-token', result.clientToken)
+    showDevices.value = false
+    await refresh()
+  } catch (e) { pairError.value = e instanceof Error ? e.message : String(e) }
 }
 async function registerDevice() {
   pairError.value = ''; newDeviceToken.value = ''; pairCode.value = ''; pairQr.value = ''
@@ -284,13 +339,13 @@ onUnmounted(() => { if (poll) clearInterval(poll) })
         <button class="icon-button collapse-button" title="收起侧栏" aria-label="收起侧栏" aria-controls="thread-panel" :aria-expanded="sidebarOpen" @click="sidebarOpen = false"><PanelLeftClose :size="19" /></button>
       </div>
       <button class="new-thread" @click="openCreate"><Plus :size="17" /><span>新建对话</span></button>
-      <div class="device"><span class="device-icon"><Monitor :size="16" /></span><div class="device-copy"><strong>本机设备</strong><small>{{ connected ? '已连接' : '未连接' }}</small></div><span class="online" :class="{ offline: !connected }"></span></div>
+      <div class="device"><span class="device-icon"><Monitor :size="16" /></span><div class="device-copy"><strong>{{ remoteDevice?.name || (remoteMode ? '未连接 Codex 设备' : '本机设备') }}</strong><small>{{ connected ? '已连接' : (remoteMode ? '等待远程设备' : '未连接') }}</small></div><span class="online" :class="{ offline: !connected }"></span></div>
       <button class="pair-entry" type="button" @click="showDevices = true"><QrCode :size="16" /><span>连接设备</span><span class="pair-entry-hint">扫码配对</span></button>
       <label class="search"><Search :size="16" /><input v-model="query" placeholder="搜索会话" aria-label="搜索会话" /></label>
       <div class="section-label"><span>会话 <span class="count">{{ filtered.length }}</span></span><button class="icon-button" title="刷新会话" aria-label="刷新会话" :disabled="loading" @click="refresh"><RefreshCw :size="15" /></button></div>
-      <div v-if="error && !connected" class="sidebar-error">连接失败，请检查本地服务。</div>
+      <div v-if="error && !connected" class="sidebar-error">{{ error }}</div>
       <div class="thread-list"><button v-for="thread in filtered" :key="thread.id" class="thread" :class="{ selected: selected?.id === thread.id }" @click="openThread(thread)"><span class="thread-title">{{ thread.name || thread.preview || '未命名会话' }}</span><span class="thread-meta">{{ date(thread.updatedAt) }}</span></button><div v-if="!filtered.length && !loading" class="empty-list">暂无会话</div></div>
-      <footer class="side-footer"><span class="online" :class="{ offline: !connected }"></span> 本地模式 <span class="footer-label">{{ connected ? '已连接' : '未连接' }}</span></footer>
+      <footer class="side-footer"><span class="online" :class="{ offline: !connected }"></span> {{ remoteMode ? '远程设备' : '本机模式' }} <span class="footer-label">{{ connected ? '已连接' : '未连接' }}</span></footer>
     </aside>
     <main class="main" :class="{ hiddenMobile: !mobileDetail }">
       <header class="main-head"><button class="icon-button back" title="返回会话" aria-label="返回会话" @click="mobileDetail = false"><ArrowLeft :size="19" /></button><button v-if="!sidebarOpen" class="icon-button expand-button" title="展开侧栏" aria-label="展开侧栏" aria-controls="thread-panel" :aria-expanded="sidebarOpen" @click="sidebarOpen = true"><Menu :size="19" /></button><div class="heading"><strong>{{ selected?.name || selected?.preview || '会话' }}</strong><span v-if="selected">本机设备</span></div><span v-if="activeTurnId" class="readonly">执行中</span><button v-if="!sidebarOpen" class="icon-button expand-button" title="新建对话" aria-label="新建对话" @click="openCreate"><Plus :size="19" /></button></header>
@@ -308,7 +363,7 @@ onUnmounted(() => { if (poll) clearInterval(poll) })
       <template v-else-if="adminToken"><form class="register-device" @submit.prevent="registerDevice"><input v-model="deviceName" aria-label="设备名称" maxlength="80" /><button class="create-button" type="submit"><Plus :size="15" />注册此电脑</button></form>
         <div v-if="newDeviceToken" class="device-secret"><strong>设备密钥只显示这一次</strong><p>将它配置在运行 Codex Desktop 的电脑上。不要发送给其他人。</p><code>{{ newDeviceToken }}</code><button class="copy-button" type="button" @click="copyValue(newDeviceToken)"><Copy :size="15" />复制密钥</button><small>电脑代理环境变量：RMDEX_RELAY_URL=wss://code.kyeai.xyz/agent，RMDEX_DEVICE_TOKEN=上方密钥</small></div>
         <div v-if="pairRequests.length" class="pair-requests"><strong>等待确认的手机</strong><div v-for="request in pairRequests" :key="request.id" class="pair-request"><span>{{ request.name }}</span><button type="button" @click="decidePair(request.id, 'deny')">拒绝</button><button type="button" class="approve-pair" @click="decidePair(request.id, 'approve')">允许</button></div></div>
-        <div class="device-list"><div v-for="device in devices" :key="device.id" class="device-row"><span class="device-icon"><Monitor :size="16" /></span><div class="device-copy"><strong>{{ device.name }}</strong><small>{{ device.online ? '在线' : '离线' }}</small></div><span class="online" :class="{ offline: !device.online }"></span><button class="icon-button" title="生成手机配对码" aria-label="生成手机配对码" @click="createPair(device.id)"><Smartphone :size="16" /></button><button class="icon-button revoke-button" title="撤销设备" aria-label="撤销设备" @click="revokeDevice(device.id)"><Trash2 :size="15" /></button></div><p v-if="!devices.length" class="device-empty">尚未注册 Codex 电脑</p></div>
+        <div class="device-list"><div v-for="device in devices" :key="device.id" class="device-row"><span class="device-icon"><Monitor :size="16" /></span><div class="device-copy"><strong>{{ device.name }}</strong><small>{{ device.online ? '在线' : '离线' }}</small></div><span class="online" :class="{ offline: !device.online }"></span><button class="icon-button" :class="{ 'connect-device-button': remoteDevice?.id !== device.id }" title="连接此设备" aria-label="连接此设备" :disabled="!device.online" @click="connectDevice(device.id)"><MessageSquare :size="16" /></button><button class="icon-button" title="生成手机配对码" aria-label="生成手机配对码" @click="createPair(device.id)"><Smartphone :size="16" /></button><button class="icon-button revoke-button" title="撤销设备" aria-label="撤销设备" @click="revokeDevice(device.id)"><Trash2 :size="15" /></button></div><p v-if="!devices.length" class="device-empty">尚未注册 Codex 电脑</p></div>
         <div v-if="pairCode" class="pair-result"><img :src="pairQr" alt="手机扫码配对二维码" /><div><strong>手机扫码配对</strong><p>二维码和配对码 3 分钟内有效，只能使用一次。</p><code>{{ pairCode }}</code><button class="copy-button" type="button" @click="copyValue(pairUrl)"><Copy :size="15" />复制配对链接</button></div></div>
       </template>
       <form v-if="!clientToken && !pairLanding" class="claim-pair" @submit.prevent="claimPair()"><label for="pair-code">手机扫码后无法自动打开时，输入配对码</label><div><input id="pair-code" v-model="pairInput" maxlength="32" placeholder="输入配对码" /><button class="create-button" type="submit" :disabled="pairInput.length !== 32">配对</button></div></form>

@@ -27,3 +27,4 @@ dist-relay
 .deploy-admin-password
 .device-token
 .device-id
+.web-client-token

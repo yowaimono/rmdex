@@ -190,6 +190,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .pair-request .approve-pair { border-color: #0879f9; background: #0879f9; color: white; }
 .pair-waiting { display: flex; align-items: center; gap: 8px; color: #59758d; font-size: 12px; }
 .revoke-button:hover { color: #bf554e; background: #fff1ef; }
+.connect-device-button { color: #0879f9; background: #edf5ff; }
 .device-secret, .pair-result { margin-top: 16px; padding: 13px; border: 1px solid #dbeafa; border-radius: 6px; background: #f6faff; font-size: 12px; }
 .device-secret strong, .pair-result strong { color: #263b50; font-size: 13px; }
 .device-secret p, .pair-result p { margin: 6px 0; color: #6b7e90; line-height: 1.5; }
