@@ -230,7 +230,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
   .message--user .message-body { max-width: 88%; }
   .compose-area { width: calc(100% - 44px); }
 }
-.compose-selectors { display: flex; align-items: center; gap: 2px; min-width: 0; }
+.compose-right { display: flex; align-items: center; gap: 2px; min-width: 0; margin-left: auto; }
 .model-menu { position: relative; min-width: 0; }
 .model-trigger { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 260px; height: 32px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: #6c7c8b; text-align: left; }
 .model-trigger:hover, .model-trigger.is-open { background: #f0f5fb; color: #0879f9; }
