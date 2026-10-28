@@ -10,9 +10,15 @@
     "build:relay": "esbuild server/relay/index.ts --bundle --platform=node --format=esm --packages=external --outfile=dist-relay/index.js",
     "test:relay": "tsx server/relay/relay.test.ts",
     "build": "vue-tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "android:sync": "npm run build && cap sync android",
+    "android:open": "cap open android",
+    "android:apk": "npm run android:sync && cd android && gradlew.bat assembleDebug"
   },
   "dependencies": {
+    "@capacitor/android": "^8.5.3",
+    "@capacitor/app": "^8.1.2",
+    "@capacitor/core": "^8.5.3",
     "lucide-vue-next": "^0.577.0",
     "markdown-it": "^15.0.3",
     "qrcode": "^1.5.4",
@@ -20,6 +26,7 @@
     "ws": "^8.22.0"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.5.3",
     "@types/markdown-it": "^14.2.0",
     "@types/node": "^24.19.2",
     "@types/qrcode": "^1.5.6",

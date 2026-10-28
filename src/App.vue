@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { Capacitor } from '@capacitor/core'
+import { App as NativeApp } from '@capacitor/app'
 import MarkdownIt from 'markdown-it'
 import { ArrowLeft, ArrowUp, ChevronRight, CircleAlert, LoaderCircle, Menu, MessageSquare, Monitor, PanelLeftClose, Plus, RefreshCw, Search, Square, Wrench, X, QrCode, Copy, Smartphone, Trash2 } from 'lucide-vue-next'
 import QRCode from 'qrcode'
@@ -10,6 +12,9 @@ import ModelMenu, { type ModelOption } from './components/ModelMenu.vue'
 import { timeline, type ContentPart, type Turn } from './conversation'
 
 type Thread = { id: string; name?: string | null; preview?: string; cwd?: string; updatedAt?: number; status?: { type: string }; turns?: Turn[] }
+const apiBase = Capacitor.isNativePlatform() ? 'https://code.kyeai.xyz' : ''
+const apiUrl = (path: string) => path.startsWith('http://') || path.startsWith('https://') ? path : `${apiBase}${path}`
+let appUrlListener: { remove: () => Promise<void> } | undefined
 const threads = ref<Thread[]>([])
 const selected = ref<Thread | null>(null)
 const query = ref('')
@@ -47,6 +52,8 @@ const drafts = ref<Record<string, string>>({})
 const sending = ref(false)
 const sendingThreadId = ref<string | null>(null)
 const activeTurnId = ref<string | null>(null)
+const stopRequested = ref(false)
+const stopping = ref(false)
 const pendingMessages = ref<Record<string, { text: string; previousCount: number }>>({})
 const permissionMode = ref<'ask' | 'auto' | 'full'>('ask')
 const models = ref<ModelOption[]>([])
@@ -67,7 +74,7 @@ markdown.renderer.rules.link_open = (tokens, idx, options, env, renderer) => {
   return defaultLink(tokens, idx, options, env, renderer)
 }
 const filtered = computed(() => threads.value.filter((t) => `${t.name || ''} ${t.preview || ''} ${t.cwd || ''}`.toLowerCase().includes(query.value.toLowerCase())))
-const remoteMode = computed(() => !!clientToken.value || !['localhost', '127.0.0.1'].includes(location.hostname))
+const remoteMode = computed(() => Capacitor.isNativePlatform() || !!clientToken.value || !['localhost', '127.0.0.1'].includes(location.hostname))
 const messages = computed(() => timeline(selected.value?.turns || []))
 const working = computed(() => !!activeTurnId.value || sendingThreadId.value === selected.value?.id)
 const workLabel = computed(() => {
@@ -83,7 +90,7 @@ function applyRead(result: ReadResult) {
     const assetUrl = part.assetUrl
     const request = (async () => {
       try {
-        const response = await fetch(assetUrl, { headers: clientToken.value ? { Authorization: `Bearer ${clientToken.value}` } : {} })
+        const response = await fetch(apiUrl(assetUrl), { headers: clientToken.value ? { Authorization: `Bearer ${clientToken.value}` } : {} })
         if (!response.ok) return undefined
         const objectUrl = URL.createObjectURL(await response.blob())
         authenticatedImages.value[assetUrl] = objectUrl
@@ -119,7 +126,7 @@ function imageSource(part: ContentPart) {
 }
 
 async function get<T>(path: string): Promise<T> {
-  const response = await fetch(path, { headers: clientToken.value ? { Authorization: `Bearer ${clientToken.value}` } : {} })
+  const response = await fetch(apiUrl(path), { headers: clientToken.value ? { Authorization: `Bearer ${clientToken.value}` } : {} })
   const data = await response.json()
   if (!response.ok) throw new Error(data.error || 'Request failed')
   return data as T
@@ -227,7 +234,7 @@ async function updateThread() {
 async function post(path: string, body: unknown) {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (clientToken.value) headers.Authorization = `Bearer ${clientToken.value}`
-  const response = await fetch(path, { method: 'POST', headers, body: JSON.stringify(body) })
+  const response = await fetch(apiUrl(path), { method: 'POST', headers, body: JSON.stringify(body) })
   const result = await response.json()
   if (!response.ok) throw new Error(result.error || '请求失败')
   return result
@@ -235,7 +242,7 @@ async function post(path: string, body: unknown) {
 async function adminFetch<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
   const headers: Record<string, string> = { Authorization: `Bearer ${adminToken.value}` }
   if (body !== undefined) headers['Content-Type'] = 'application/json'
-  const response = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
+  const response = await fetch(apiUrl(path), { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
   const data = await response.json()
   if (!response.ok) throw new Error(data.error || '请求失败')
   return data as T
@@ -243,7 +250,7 @@ async function adminFetch<T>(path: string, method = 'GET', body?: unknown): Prom
 async function loginAdmin() {
   pairError.value = ''
   try {
-    const response = await fetch('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: adminPassword.value }) })
+    const response = await fetch(apiUrl('/api/auth/login'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: adminPassword.value }) })
     const result = await response.json()
     if (!response.ok) throw new Error(result.error || '登录失败')
     adminToken.value = result.token; sessionStorage.setItem('rmdex-admin-token', result.token); adminPassword.value = ''
@@ -299,13 +306,13 @@ async function claimPair(code = pairInput.value) {
   pairError.value = ''
   mobilePairing.value = true
   try {
-    const response = await fetch('/api/pair/claim', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) })
+    const response = await fetch(apiUrl('/api/pair/claim'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) })
     const result = await response.json()
     if (response.status !== 202) throw new Error(result.error || '配对失败')
     history.replaceState({}, '', location.pathname)
     pairInput.value = ''
     for (let attempt = 0; attempt < 150; attempt++) {
-      const status = await fetch('/api/pair/status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestId: result.requestId }) })
+      const status = await fetch(apiUrl('/api/pair/status'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestId: result.requestId }) })
       const state = await status.json()
       if (state.status === 'approved' && state.token) {
         clientToken.value = state.token; localStorage.setItem('rmdex-client-token', state.token)
@@ -351,7 +358,7 @@ async function send() {
   const text = (drafts.value[id] || '').trim()
   if (!text) return
   if (permissionMode.value === 'full' && !window.confirm('完全访问允许 Codex 不经审批执行操作，并访问电脑上的文件和网络。确认使用此权限发送？')) return
-  sending.value = true; sendingThreadId.value = id; pendingMessages.value[id] = { text, previousCount: messages.value.filter(entry => entry.role === 'user' && entry.text === text).length }; error.value = ''; lastTurn.value = null
+  sending.value = true; sendingThreadId.value = id; stopRequested.value = false; stopping.value = false; pendingMessages.value[id] = { text, previousCount: messages.value.filter(entry => entry.role === 'user' && entry.text === text).length }; error.value = ''; lastTurn.value = null
   await scrollToLatest()
   try {
     const result = await post(`/api/threads/${id}/send`, {
@@ -361,8 +368,14 @@ async function send() {
       effort: selectedEffort.value,
     })
     if (drafts.value[id]?.trim() === text) drafts.value[id] = ''
-    if (selected.value?.id === id) { activeTurnId.value = result.turn?.id || null; await updateThread(); await scrollToLatest() }
-  } catch (e) { delete pendingMessages.value[id]; if (selected.value?.id === id) error.value = e instanceof Error ? e.message : String(e) }
+    if (selected.value?.id === id) activeTurnId.value = result.turn?.id || activeTurnId.value
+    if (stopRequested.value) {
+      try { if (result.turn?.id) await post(`/api/threads/${id}/stop`, {}) }
+      catch (e) { if (selected.value?.id === id) error.value = e instanceof Error ? e.message : String(e) }
+      finally { stopRequested.value = false; stopping.value = false }
+    }
+    if (selected.value?.id === id) { await updateThread(); await scrollToLatest() }
+  } catch (e) { delete pendingMessages.value[id]; stopRequested.value = false; stopping.value = false; if (selected.value?.id === id) error.value = e instanceof Error ? e.message : String(e) }
   finally { sending.value = false; sendingThreadId.value = null }
 }
 function onEnter(event: KeyboardEvent) {
@@ -371,17 +384,49 @@ function onEnter(event: KeyboardEvent) {
   void send()
 }
 async function stop() {
-  if (!selected.value) return
+  if (!selected.value || stopping.value) return
+  if (sending.value && !activeTurnId.value) {
+    stopRequested.value = true
+    stopping.value = true
+    return
+  }
+  if (!activeTurnId.value) return
+  stopping.value = true
   try { await post(`/api/threads/${selected.value.id}/stop`, {}); await updateThread() }
   catch (e) { error.value = e instanceof Error ? e.message : String(e) }
+  finally { stopping.value = false }
 }
 async function decide(approval: Approval, decision: 'accept' | 'decline') {
   try { await post(`/api/approvals/${approval.id}`, { decision }); pendingApprovals.value = pendingApprovals.value.filter(item => item.id !== approval.id) }
   catch (e) { error.value = e instanceof Error ? e.message : String(e) }
 }
 function date(value?: number) { return value ? new Date(value * 1000).toLocaleDateString() : '' }
-onMounted(() => { const code = new URLSearchParams(location.hash.slice(1)).get('pair'); if (code) { pairLanding.value = true; showDevices.value = true; history.replaceState({}, '', location.pathname); void claimPair(code) } else void refresh(); poll = setInterval(() => { updateThread(); if (adminToken.value && showDevices.value) void loadDevices() }, 2000); if (adminToken.value) void loadDevices() })
-onUnmounted(() => { if (poll) clearInterval(poll) })
+async function handlePairLink(rawUrl: string) {
+  const url = new URL(rawUrl)
+  const code = new URLSearchParams(url.hash.slice(1)).get('pair')
+  if (!code) return
+  pairLanding.value = true
+  showDevices.value = true
+  if (!Capacitor.isNativePlatform()) history.replaceState({}, '', location.pathname)
+  await claimPair(code)
+}
+onMounted(async () => {
+  let handledLaunch = false
+  if (Capacitor.isNativePlatform()) {
+    appUrlListener = await NativeApp.addListener('appUrlOpen', ({ url }) => { void handlePairLink(url) })
+    const launch = await NativeApp.getLaunchUrl()
+    if (launch?.url) { handledLaunch = true; await handlePairLink(launch.url) }
+  }
+  if (!handledLaunch) {
+    const code = new URLSearchParams(location.hash.slice(1)).get('pair')
+    if (code) await handlePairLink(location.href)
+    else if (Capacitor.isNativePlatform() && !clientToken.value) { pairLanding.value = true; showDevices.value = true }
+    else void refresh()
+  }
+  poll = setInterval(() => { updateThread(); if (adminToken.value && showDevices.value) void loadDevices() }, 2000)
+  if (adminToken.value) void loadDevices()
+})
+onUnmounted(() => { if (poll) clearInterval(poll); void appUrlListener?.remove() })
 </script>
 
 <template>
@@ -407,7 +452,7 @@ onUnmounted(() => { if (poll) clearInterval(poll) })
       <div v-else ref="conversation" class="conversation"><div class="conversation-inner"><div class="conversation-header"><h2>{{ selected.name || selected.preview || '未命名会话' }}</h2><p>{{ selected.cwd }}</p></div><div v-if="!messages.length && !pendingMessages[selected.id]" class="empty-messages">此会话暂无可显示的消息。</div><template v-for="(message, i) in messages" :key="i"><details v-if="message.role === 'tools'" class="tool-group"><summary><Wrench :size="14" /><span>{{ toolSummary(message.items) }}</span><span v-if="message.items.some(item => item.status === 'failed' || item.status === 'declined' || item.success === false || (typeof item.exitCode === 'number' && item.exitCode !== 0))" class="group-failed">含失败</span><ChevronRight :size="14" class="group-chevron" /></summary><div class="tool-group-content"><ToolEvent v-for="(item, index) in message.items" :key="item.id || index" :item="item" /></div></details><article v-else class="message" :class="`message--${message.role}`" :aria-label="message.role === 'user' ? '用户消息' : 'Codex 回复'"><div class="message-body"><div v-if="message.images.length" class="attachments"><template v-for="(image, index) in message.images" :key="index"><a v-if="imageSource(image)" :href="imageSource(image)" target="_blank" rel="noopener noreferrer" class="attachment"><img :src="imageSource(image)" alt="图片附件" loading="lazy" /></a><span v-else class="attachment-unavailable">图片附件不可用</span></template></div><div v-if="message.text" class="message-text markdown" v-html="markdown.render(message.text)"></div></div></article></template><article v-if="pendingMessages[selected.id]" class="message message--user" aria-label="待显示的用户消息"><div class="message-body"><div class="message-text markdown" v-html="markdown.render(pendingMessages[selected.id]!.text)"></div></div></article><div v-if="working" class="working" role="status" aria-live="polite"><LoaderCircle :size="16" class="working-spinner" /><span>{{ workLabel }}</span></div><div v-else-if="lastTurn?.status === 'failed'" class="turn-failure" role="alert">执行失败<span v-if="lastTurn.error?.message">：{{ lastTurn.error.message }}</span></div></div></div>
       <div v-if="selected" class="compose-area">
         <div v-for="approval in pendingApprovals" :key="approval.id" class="approval"><strong>{{ approval.method.includes('commandExecution') ? '命令执行需要确认' : '文件修改需要确认' }}</strong><p v-if="approval.params.reason">{{ approval.params.reason }}</p><pre v-if="approval.params.command">{{ approval.params.command }}</pre><p v-if="approval.params.cwd">工作目录：{{ approval.params.cwd }}</p><p v-if="approval.params.grantRoot">授权目录：{{ approval.params.grantRoot }}</p><details><summary>完整请求信息</summary><pre>{{ JSON.stringify(approval.params, null, 2) }}</pre></details><p v-if="approval.method.includes('fileChange')">请先在上方工具调用中查看文件变更，再决定是否允许。</p><div class="approval-actions"><button @click="decide(approval, 'decline')">拒绝</button><button @click="decide(approval, 'accept')">允许本次</button></div></div>
-        <form class="composer" @submit.prevent="send"><textarea v-model="drafts[selected.id]" placeholder="给 Codex 发送消息" aria-label="消息" rows="2" :disabled="sending || !!activeTurnId" @keydown.enter.exact="onEnter"></textarea><div class="compose-actions"><PermissionMenu v-model="permissionMode" :disabled="working" /><div class="compose-right"><ModelMenu :models="models" :model-value="selectedModel" :effort="selectedEffort" :loading="modelLoading" :disabled="working || sending" @update:model-value="rememberModel" @update:effort="rememberEffort" /><button v-if="activeTurnId" type="button" class="send-button stop-button" title="停止任务" aria-label="停止任务" @click="stop"><Square :size="14" fill="currentColor" /></button><button v-else type="submit" class="send-button" title="发送消息" aria-label="发送消息" :disabled="sending || !drafts[selected.id]?.trim()"><ArrowUp :size="18" /></button></div></div></form>
+        <form class="composer" @submit.prevent="send"><textarea v-model="drafts[selected.id]" placeholder="给 Codex 发送消息" aria-label="消息" rows="2" :disabled="sending || !!activeTurnId" @keydown.enter.exact="onEnter"></textarea><div class="compose-actions"><PermissionMenu v-model="permissionMode" :disabled="working" /><div class="compose-right"><ModelMenu :models="models" :model-value="selectedModel" :effort="selectedEffort" :loading="modelLoading" :disabled="working || sending" @update:model-value="rememberModel" @update:effort="rememberEffort" /><button v-if="working" type="button" class="send-button stop-button" :class="{ 'is-stopping': stopping }" :title="stopping ? '正在暂停' : '暂停任务'" :aria-label="stopping ? '正在暂停' : '暂停任务'" :disabled="stopping && !!activeTurnId" @click="stop"><Square :size="14" fill="currentColor" /></button><button v-else type="submit" class="send-button" title="发送消息" aria-label="发送消息" :disabled="sending || !drafts[selected.id]?.trim()"><ArrowUp :size="18" /></button></div></div></form>
       </div>
     </main>
     <div v-if="showCreate" class="modal-backdrop" @click.self="!creating && (showCreate = false)"><section class="create-dialog" role="dialog" aria-modal="true" aria-labelledby="create-title" @keydown.esc="!creating && (showCreate = false)"><header><h2 id="create-title">新建对话</h2><button class="icon-button" type="button" title="关闭" aria-label="关闭" :disabled="creating" @click="showCreate = false"><X :size="18" /></button></header><form @submit.prevent="createThread"><label for="working-directory">工作目录</label><input id="working-directory" v-model="createPath" required autocomplete="off" placeholder="例如 D:\WorkSpace\rmdex" /><p v-if="createError" class="create-error" role="alert">{{ createError }}</p><div class="dialog-actions"><button type="button" class="cancel-button" :disabled="creating" @click="showCreate = false">取消</button><button type="submit" class="create-button" :disabled="creating || !createPath.trim()">{{ creating ? '创建中…' : '创建对话' }}</button></div></form></section></div>

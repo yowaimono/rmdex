@@ -21,3 +21,19 @@ guaranteed.
 ## Remote relay
 
 Build the relay image with `docker build -t rmdex-relay:local .`. Production configuration must provide `PUBLIC_ORIGIN=https://code.kyeai.xyz`, `RMDEX_ADMIN_HASH` (SHA-256 hex of an admin password of at least 24 characters), and a persistent `/data` volume. Put the relay behind HTTPS/WSS; never publish port 8787 directly. The computer agent requires `RMDEX_RELAY_URL=wss://code.kyeai.xyz/agent` and its one-time `RMDEX_DEVICE_TOKEN`. Pairing codes expire after three minutes and must be explicitly approved in the desktop device panel before the phone receives a client credential.
+
+
+## Android app
+
+The Android app uses Capacitor and packages the same Vue interface; the web build remains supported. Native builds send API requests to `https://code.kyeai.xyz` using Capacitor's native HTTP bridge, and pairing links can be opened by the installed app.
+
+Requirements: Node.js 22+, Android Studio 2025.2.1+, and Android SDK Platform 36. Install/accept the Android SDK licenses in Android Studio before building.
+
+```sh
+npm install
+npm run android:sync
+cd android
+./gradlew assembleDebug
+```
+
+On Windows, use `gradlew.bat assembleDebug`. The debug APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`. Use `npx cap open android` to open the native project in Android Studio.

@@ -139,7 +139,9 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .compose-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #9ca9b7; font-size: 11px; }
 .send-button { width: 32px; height: 32px; border: 0; border-radius: 50%; display: grid; place-items: center; color: white; background: #0879f9; }
 .send-button:disabled { opacity: 1; background: #d3dce5; cursor: default; }
-.stop-button { background: #374759; }
+.stop-button { background: #191a1c; }
+.stop-button:hover { background: #303236; }
+.stop-button:disabled { opacity: .72; cursor: wait; }
 .permission-menu { position: relative; min-width: 0; }
 .permission-trigger { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 9px; border: 0; border-radius: 6px; background: transparent; color: #6c7c8b; font-size: 12px; font-weight: 500; }
 .permission-trigger:hover, .permission-trigger.is-open { background: #f0f5fb; color: #0879f9; }
