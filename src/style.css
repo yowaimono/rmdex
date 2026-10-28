@@ -65,7 +65,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .conversation-header { padding-bottom: 26px; border-bottom: 1px solid #edf0f4; }
 .conversation-header h2 { margin: 0 0 8px; font-size: 20px; font-weight: 650; overflow-wrap: anywhere; }
 .conversation-header p { margin: 0; color: #9aa7b5; font-size: 12px; overflow-wrap: anywhere; }
-.message { display: flex; padding: 12px 0; }
+.message { display: flex; padding: 8px 0; }
 .message--agent { justify-content: flex-start; }
 .message--user { justify-content: flex-end; }
 .message-body { min-width: 0; font-size: 14px; }
@@ -99,18 +99,18 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .attachment-unavailable { color: #8997a5; font-size: 12px; }
 .attachments + .message-text { margin-top: 10px; }
 .tool-group { margin: 0; color: #8b96a1; font-size: 12px; }
-.tool-group > summary { display: flex; align-items: center; gap: 8px; min-height: 28px; padding: 2px 0; list-style: none; cursor: pointer; }
+.tool-group > summary { display: flex; align-items: center; gap: 7px; min-height: 22px; padding: 0; list-style: none; cursor: pointer; }
 .tool-group > summary::-webkit-details-marker { display: none; }
 .tool-group > summary:hover { color: #0879f9; }
 .tool-group > summary > span:first-of-type { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tool-group + .message { padding-top: 8px; }
-.message + .tool-group { margin-top: -2px; }
+.tool-group + .message { padding-top: 3px; padding-bottom: 3px; }
+.message + .tool-group { margin-top: -4px; }
 .group-chevron { transition: transform .15s ease; }
 .tool-group[open] > summary .group-chevron { transform: rotate(90deg); }
 .group-failed { color: #b55d52; }
 .tool-group-content { padding-left: 22px; border-left: 1px solid #e9edf2; }
 .tool-event { margin: 0; color: #788796; font-size: 12px; }
-.tool-summary { min-width: 0; display: flex; align-items: center; gap: 8px; min-height: 26px; padding: 2px 0; list-style: none; cursor: pointer; }
+.tool-summary { min-width: 0; display: flex; align-items: center; gap: 7px; min-height: 22px; padding: 0; list-style: none; cursor: pointer; }
 .tool-summary::-webkit-details-marker { display: none; }
 .tool-summary:hover { color: #0879f9; }
 .tool-icon, .tool-chevron { flex: none; }
