@@ -11,7 +11,7 @@ if (relayUrl && deviceToken) {
   const connect = async () => {
     while (!stopped) {
       try {
-        socket = new WebSocket(relayUrl, { handshakeTimeout: 10000, maxPayload: 65536 })
+        socket = new WebSocket(relayUrl, { handshakeTimeout: 10000, maxPayload: 32 * 1024 * 1024 })
         await new Promise<void>((resolve, reject) => {
           const timeout = setTimeout(() => reject(new Error('relay authentication timeout')), 10000)
           socket!.once('open', () => socket!.send(JSON.stringify({ type: 'auth', token: deviceToken })))
@@ -22,7 +22,7 @@ if (relayUrl && deviceToken) {
               if (message.type !== 'request' || typeof message.id !== 'string' || typeof message.path !== 'string' || !['GET', 'POST'].includes(String(message.method))) return
               const allowed = message.method === 'GET'
                 ? /^\/api\/(?:models|threads(?:\/[a-zA-Z0-9-]+)?|images\/[a-f0-9-]+)$/.test(message.path)
-                : /^\/api\/(?:threads|threads\/[a-zA-Z0-9-]+\/(?:send|stop)|approvals\/[a-zA-Z0-9-]+)$/.test(message.path)
+                : /^\/api\/(?:threads|threads\/[a-zA-Z0-9-]+\/(?:send|stop|history)|approvals\/[a-zA-Z0-9-]+)$/.test(message.path)
               if (!allowed) { socket?.send(JSON.stringify({ type: 'response', id: message.id, error: 'Forbidden' })); return }
               try {
                 const response = await fetch(`http://127.0.0.1:${process.env.RMDEX_AGENT_PORT || 18787}${message.path}`, {
@@ -40,7 +40,11 @@ if (relayUrl && deviceToken) {
                   socket?.send(JSON.stringify({ type: 'response', id: message.id, result: { __rmdexBinary: true, contentType, data: bytes.toString('base64') } }))
                   return
                 }
-                const result = await response.json() as unknown
+                const text = await response.text()
+                if (!text.trim()) throw new Error(`本机代理返回空响应（HTTP ${response.status}）`)
+                let result: unknown
+                try { result = JSON.parse(text) as unknown }
+                catch { throw new Error(`本机代理返回无效 JSON（HTTP ${response.status}）`) }
                 socket?.send(JSON.stringify(response.ok ? { type: 'response', id: message.id, result } : { type: 'response', id: message.id, error: (result as { error?: string }).error || '本机代理请求失败' }))
               } catch (error) {
                 socket?.send(JSON.stringify({ type: 'response', id: message.id, error: error instanceof Error ? error.message : '本机代理请求失败' }))

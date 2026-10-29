@@ -28,3 +28,6 @@ dist-relay
 .device-token
 .device-id
 .web-client-token
+
+# Local diagnostics and generated handoff artifacts
+work/

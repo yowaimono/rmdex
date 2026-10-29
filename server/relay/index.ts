@@ -55,7 +55,9 @@ async function load() {
 }
 function json(res: import('node:http').ServerResponse, status: number, data: unknown) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' })
-  res.end(JSON.stringify(data))
+  // Never emit an empty HTTP body for an API response. JSON.stringify(undefined)
+  // would make the browser fail with an opaque "Unexpected end of JSON input".
+  res.end(JSON.stringify(data === undefined ? { error: 'Relay returned no data' } : data))
 }
 async function body(req: import('node:http').IncomingMessage) {
   let raw = ''
@@ -238,7 +240,7 @@ const server = createServer(async (req, res) => {
     if (!['GET', 'POST'].includes(req.method || '')) { json(res, 405, { error: 'Method not allowed' }); return }
     const allowed = req.method === 'GET'
       ? /^\/api\/(?:models|threads(?:\/[a-zA-Z0-9-]+)?|images\/[a-f0-9-]+)$/.test(url.pathname)
-      : /^\/api\/(?:threads|threads\/[a-zA-Z0-9-]+\/(?:send|stop)|approvals\/[a-zA-Z0-9-]+)$/.test(url.pathname)
+      : /^\/api\/(?:threads|threads\/[a-zA-Z0-9-]+\/(?:send|stop|history)|approvals\/[a-zA-Z0-9-]+)$/.test(url.pathname)
     if (!allowed || url.search) { json(res, 404, { error: 'Not found' }); return }
     const result = await rpc(device.id, url.pathname + url.search, req.method!, req.method === 'POST' ? await body(req) : undefined)
     if (url.pathname.startsWith('/api/images/') && result && typeof result === 'object' && (result as { __rmdexBinary?: boolean }).__rmdexBinary) {
@@ -252,7 +254,7 @@ const server = createServer(async (req, res) => {
   }
 })
 
-const sockets = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024 })
+const sockets = new WebSocketServer({ noServer: true, maxPayload: 32 * 1024 * 1024 })
 server.on('upgrade', (req, socket, head) => {
   if (new URL(req.url || '/', publicOrigin).pathname !== '/agent') { socket.destroy(); return }
   sockets.handleUpgrade(req, socket, head, ws => sockets.emit('connection', ws, req))

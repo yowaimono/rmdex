@@ -61,6 +61,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .welcome h2 { margin: 17px 0 7px; font-size: 17px; font-weight: 600; }
 .welcome p { margin: 0; color: #9aa7b5; font-size: 13px; }
 .conversation { flex: 1; overflow: auto; }
+.thread-load-state { flex: 1; display: flex; align-items: center; justify-content: center; gap: 10px; padding: 24px; color: #8191a1; font-size: 13px; text-align: center; overflow-wrap: anywhere; }
+.thread-load-state button { border: 0; padding: 5px 8px; background: transparent; color: #0879f9; }
 .conversation-inner { max-width: 830px; margin: auto; padding: 44px 42px 24px; }
 .conversation-header { padding-bottom: 26px; border-bottom: 1px solid #edf0f4; }
 .conversation-header h2 { margin: 0 0 8px; font-size: 20px; font-weight: 650; overflow-wrap: anywhere; }
@@ -259,3 +261,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .effort-option { display: inline-flex; align-items: center; gap: 4px; padding: 5px 7px; border: 1px solid #e2e9f0; border-radius: 5px; background: #fff; color: #71808e; font-size: 11px; text-transform: capitalize; }
 .effort-option:hover, .effort-option.is-selected { border-color: #b5d2f5; background: #eef5ff; color: #0879f9; }
 @media (max-width: 520px) { .model-trigger { max-width: 180px; } .model-popup { width: min(340px, calc(100vw - 32px)); } }
+.desktop-hint { margin: 0 0 8px; color: #77869a; font-size: 12px; line-height: 1.5; }
+.history-button { display: flex; align-items: center; gap: 6px; margin: 0 auto 20px; padding: 6px 12px; border: 1px solid #dce8f5; border-radius: 16px; background: #f5f9ff; color: #4775a8; font: inherit; font-size: 12px; cursor: pointer; }
+.desktop-project-options { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 18px; }
+.desktop-project-options button { padding: 7px 12px; background: #f7faff; border: 1px solid #dce8f5; border-radius: 10px; font: inherit; font-size: 13px; color: #55708f; cursor: pointer; }
+.desktop-project-options button.chosen { color: #2371d0; background: #ebf4ff; border-color: #75adeb; }

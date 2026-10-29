@@ -34,7 +34,7 @@ function chooseModel(model: ModelOption) {
   const effort = model.supportedReasoningEfforts.some(item => item.reasoningEffort === props.effort)
     ? props.effort
     : model.defaultReasoningEffort || model.supportedReasoningEfforts[0]?.reasoningEffort
-  if (effort) emit('update:effort', effort)
+  emit('update:effort', effort || '')
   open.value = false
 }
 function chooseEffort(effort: string) {
@@ -55,7 +55,7 @@ onUnmounted(() => document.removeEventListener('mousedown', closeOnOutside))
   <div ref="menu" class="model-menu">
     <button type="button" class="model-trigger" :class="{ 'is-open': open }" :disabled="disabled || loading || !models.length" title="选择模型" @click="open = !open">
       <Cpu :size="14" />
-      <span class="model-trigger-copy"><strong>{{ loading ? '加载模型…' : (selected?.displayName || '选择模型') }}</strong><small v-if="selected">{{ selectedEffort }}</small></span>
+      <span class="model-trigger-copy"><strong>{{ loading ? '加载模型…' : (selected?.displayName || '选择模型') }}</strong><small v-if="selectedEffort">{{ selectedEffort }}</small></span>
       <ChevronDown :size="14" class="model-trigger-chevron" />
     </button>
     <div v-if="open" class="model-popup">
@@ -69,7 +69,7 @@ onUnmounted(() => document.removeEventListener('mousedown', closeOnOutside))
       </div>
       <div v-if="efforts.length" class="effort-section">
         <div class="model-popup-heading effort-heading"><Gauge :size="13" />推理强度</div>
-        <div class="effort-options"><button v-for="item in efforts" :key="item.reasoningEffort" type="button" class="effort-option" :class="{ 'is-selected': item.reasoningEffort === selectedEffort }" :title="item.description" @click="chooseEffort(item.reasoningEffort)">{{ item.reasoningEffort }}<Check v-if="item.reasoningEffort === selectedEffort" :size="13" /></button></div>
+        <div class="effort-options"><button v-for="item in efforts" :key="item.reasoningEffort" type="button" class="effort-option" :class="{ 'is-selected': item.reasoningEffort === selectedEffort }" :title="item.description" @click="chooseEffort(item.reasoningEffort)">{{ item.reasoningEffort || '默认' }}<Check v-if="item.reasoningEffort === selectedEffort" :size="13" /></button></div>
       </div>
     </div>
   </div>

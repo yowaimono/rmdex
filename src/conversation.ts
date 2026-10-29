@@ -3,6 +3,18 @@ export type Item = { id?: string; type: string; text?: string; content?: Content
 export type Turn = { id: string; status: string; items: Item[] }
 export type Entry = { role: 'user' | 'agent'; text: string; images: ContentPart[]; item: Item } | { role: 'tools'; items: Item[] }
 
+// Desktop routes native create/send input through a delegation tool result.
+// Only this exact envelope is user input; ordinary tool results stay tools.
+export function normalizeItem(item: Item): Item {
+  if (item.type !== 'functionCallOutput' || item.namespace !== 'codex_app' || !['create_thread', 'send_message_to_thread'].includes(String(item.name))) return item
+  const output = item.output
+  const text = typeof output === 'string' ? output : output && typeof output === 'object' && 'text' in output ? output.text : null
+  if (typeof text !== 'string') return item
+  const match = text.match(/^\s*<codex_delegation>\s*<source_thread_id>[a-zA-Z0-9-]+<\/source_thread_id>\s*<input>([\s\S]*)<\/input>\s*<\/codex_delegation>\s*$/)
+  if (!match) return item
+  return { id: item.id, type: 'userMessage', content: [{ type: 'text', text: match[1]!.trim() }] }
+}
+
 export function userText(text: string): string {
   const context = /<in-app-browser-context source="ambient-ui-state">[\s\S]*?<\/in-app-browser-context>/g
   const hasContext = context.test(text)
@@ -19,7 +31,8 @@ export function timeline(turns: Turn[]): Entry[] {
   for (const turn of turns) {
     let group: Item[] = []
     const flush = () => { if (group.length) entries.push({ role: 'tools', items: group }); group = [] }
-    for (const item of turn.items || []) {
+    for (const original of turn.items || []) {
+      const item = normalizeItem(original)
       if (item.type === 'reasoning' || item.type === 'hookPrompt') continue
       if (item.type === 'userMessage') {
         flush()

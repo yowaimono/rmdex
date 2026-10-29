@@ -11,14 +11,17 @@ import PermissionMenu from './components/PermissionMenu.vue'
 import ModelMenu, { type ModelOption } from './components/ModelMenu.vue'
 import { timeline, type ContentPart, type Turn } from './conversation'
 
-type Thread = { id: string; name?: string | null; preview?: string; cwd?: string; updatedAt?: number; status?: { type: string }; turns?: Turn[] }
+type Thread = { id: string; name?: string | null; preview?: string; cwd?: string; updatedAt?: number; status?: { type: string }; turns?: Turn[]; desktopDraft?: { projectId: string | null; deviceKey: string; preparing?: boolean } }
 const apiBase = Capacitor.isNativePlatform() ? 'https://code.kyeai.xyz' : ''
 const apiUrl = (path: string) => path.startsWith('http://') || path.startsWith('https://') ? path : `${apiBase}${path}`
 let appUrlListener: { remove: () => Promise<void> } | undefined
 const threads = ref<Thread[]>([])
+const localDraftThreads = ref<Thread[]>([])
 const selected = ref<Thread | null>(null)
 const query = ref('')
 const loading = ref(false)
+const threadLoading = ref(false)
+const threadLoadError = ref('')
 const error = ref('')
 const connected = ref(false)
 const remoteDevice = ref<{ id: string; name: string; online: boolean } | null>(null)
@@ -46,6 +49,14 @@ const creating = ref(false)
 const showCreate = ref(false)
 const createPath = ref('')
 const createError = ref('')
+const createProject = ref('')
+const desktopProjects = ref<Array<{ id: string; name: string; path: string }>>([])
+const defaultCapabilities = { mode: 'app-server', models: true, permissions: true, stop: true, approvals: true, create: true, send: true, history: false, createRequiresPrompt: false }
+const capabilities = ref({ ...defaultCapabilities })
+const desktopMode = computed(() => capabilities.value.mode === 'desktop')
+const historyCursor = ref<string | null>(null)
+const historyLoading = ref(false)
+let queuedUntil = 0
 const conversation = ref<HTMLElement | null>(null)
 async function scrollToLatest() { await nextTick(); if (conversation.value) conversation.value.scrollTop = conversation.value.scrollHeight }
 const drafts = ref<Record<string, string>>({})
@@ -55,17 +66,18 @@ const activeTurnId = ref<string | null>(null)
 const stopRequested = ref(false)
 const stopping = ref(false)
 const pendingMessages = ref<Record<string, { text: string; previousCount: number }>>({})
-const permissionMode = ref<'ask' | 'auto' | 'full'>('ask')
+const permissionMode = ref<'ask' | 'auto' | 'full'>((localStorage.getItem('rmdex-permission-mode') as 'ask' | 'auto' | 'full' | null) || 'ask')
 const models = ref<ModelOption[]>([])
 const selectedModel = ref<string | null>(null)
 const selectedEffort = ref<string | null>(null)
 const modelLoading = ref(false)
+const desktopDefaultModel = '__rmdex_desktop_default__'
 const lastTurn = ref<{ status: string; error?: { message?: string } } | null>(null)
 type Approval = { id: string; method: string; params: { command?: string; reason?: string; cwd?: string; grantRoot?: string } }
 const pendingApprovals = ref<Approval[]>([])
 let poll: ReturnType<typeof setInterval> | undefined
 let pollBusy = false
-type ReadResult = { thread: Thread; activeTurnId: string | null; approvals: Approval[]; lastTurn?: { status: string; error?: { message?: string } } | null }
+type ReadResult = { thread: Thread; activeTurnId: string | null; approvals: Approval[]; lastTurn?: { status: string; error?: { message?: string } } | null; page?: { hasMore: boolean; nextCursor: string | null } }
 const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true })
 const defaultLink = markdown.renderer.rules.link_open || ((tokens, idx, options, _env, renderer) => renderer.renderToken(tokens, idx, options))
 markdown.renderer.rules.link_open = (tokens, idx, options, env, renderer) => {
@@ -76,8 +88,9 @@ markdown.renderer.rules.link_open = (tokens, idx, options, env, renderer) => {
 const filtered = computed(() => threads.value.filter((t) => `${t.name || ''} ${t.preview || ''} ${t.cwd || ''}`.toLowerCase().includes(query.value.toLowerCase())))
 const remoteMode = computed(() => Capacitor.isNativePlatform() || !!clientToken.value || !['localhost', '127.0.0.1'].includes(location.hostname))
 const messages = computed(() => timeline(selected.value?.turns || []))
-const working = computed(() => !!activeTurnId.value || sendingThreadId.value === selected.value?.id)
+const working = computed(() => !!activeTurnId.value || sendingThreadId.value === selected.value?.id || !!selected.value?.desktopDraft?.preparing)
 const workLabel = computed(() => {
+  if (selected.value?.desktopDraft?.preparing) return 'Desktop 正在准备新会话'
   if (pendingApprovals.value.length) return '等待审批'
   const turn = selected.value?.turns?.find(item => item.id === activeTurnId.value)
   const last = turn?.items?.[turn.items.length - 1]
@@ -85,6 +98,9 @@ const workLabel = computed(() => {
   return (last && labels[last.type]) || 'Codex 正在工作'
 })
 function applyRead(result: ReadResult) {
+  if (desktopMode.value && selected.value?.id === result.thread.id) {
+    result.thread.turns = [...new Map([...(selected.value.turns || []), ...(result.thread.turns || [])].map(turn => [turn.id, turn])).values()]
+  }
   selected.value = result.thread; activeTurnId.value = result.activeTurnId; pendingApprovals.value = result.approvals || []; lastTurn.value = result.lastTurn || null
   for (const turn of result.thread.turns || []) for (const item of turn.items || []) if (item.type === 'userMessage') for (const part of item.content || []) if (part.assetUrl && !authenticatedImages.value[part.assetUrl] && !imageLoads.has(part.assetUrl)) {
     const assetUrl = part.assetUrl
@@ -102,9 +118,10 @@ function applyRead(result: ReadResult) {
   }
   const pending = pendingMessages.value[result.thread.id]
   if (pending && timeline(result.thread.turns || []).filter(entry => entry.role === 'user' && entry.text === pending.text).length > pending.previousCount) delete pendingMessages.value[result.thread.id]
+  if (desktopMode.value && !activeTurnId.value && pendingMessages.value[result.thread.id] && Date.now() < queuedUntil) activeTurnId.value = 'desktop-queued'
 }
 function toolSummary(items: { type: string; command?: unknown; commandActions?: unknown; tool?: unknown; name?: unknown; server?: unknown; namespace?: unknown; query?: unknown; path?: unknown }[]) {
-  const names: Record<string, string> = { commandExecution: '执行命令', mcpToolCall: '调用工具', dynamicToolCall: '调用工具', fileChange: '修改文件', webSearch: '搜索网页', imageView: '查看图片' }
+  const names: Record<string, string> = { commandExecution: '执行命令', mcpToolCall: '调用工具', dynamicToolCall: '调用工具', functionCallOutput: '工具结果', fileChange: '修改文件', webSearch: '搜索网页', imageView: '查看图片', plan: '执行计划', contextCompaction: '上下文压缩' }
   const labels = [...new Set(items.map(item => names[item.type] || '其他操作'))]
   const first = items.find(item => ['commandExecution', 'mcpToolCall', 'dynamicToolCall', 'webSearch', 'fileChange', 'imageView'].includes(item.type))
   let preview = ''
@@ -125,10 +142,19 @@ function imageSource(part: ContentPart) {
   return undefined
 }
 
+async function readJsonResponse(response: Response, fallback: string) {
+  const text = await response.text()
+  if (!text.trim()) throw new Error(`${fallback}（服务器返回了空响应，设备可能正在重连）`)
+  try {
+    return JSON.parse(text) as any
+  } catch {
+    throw new Error(`${fallback}（服务器返回了无效 JSON）`)
+  }
+}
 async function get<T>(path: string): Promise<T> {
   const response = await fetch(apiUrl(path), { headers: clientToken.value ? { Authorization: `Bearer ${clientToken.value}` } : {} })
-  const data = await response.json()
-  if (!response.ok) throw new Error(data.error || 'Request failed')
+  const data = await readJsonResponse(response, `加载 ${path} 失败`)
+  if (!response.ok) throw new Error(data?.error || 'Request failed')
   return data as T
 }
 async function bindOnlineDevice() {
@@ -145,11 +171,17 @@ async function bindOnlineDevice() {
 async function loadModels() {
   modelLoading.value = true
   try {
-    const result = await get<{ data: ModelOption[] }>('/api/models')
+    const result = await get<{ data: ModelOption[]; capabilities?: typeof defaultCapabilities; projects?: typeof desktopProjects.value }>('/api/models')
+    capabilities.value = { ...defaultCapabilities, ...result.capabilities }
+    desktopProjects.value = result.projects || []
     models.value = result.data.filter(model => !model.hidden)
+    if (desktopMode.value && capabilities.value.models) {
+      models.value = [{ id: desktopDefaultModel, model: '', displayName: '沿用 Desktop', description: '使用会话的现有模型，新对话使用桌面默认设置', hidden: false, isDefault: true, defaultReasoningEffort: '', supportedReasoningEfforts: [] }, ...models.value]
+    }
     const deviceKey = remoteDevice.value?.id || 'local'
-    const savedModel = localStorage.getItem(`rmdex-model:${deviceKey}`)
-    const savedEffort = localStorage.getItem(`rmdex-effort:${deviceKey}`)
+    const settingsKey = desktopMode.value ? `desktop:${deviceKey}` : deviceKey
+    const savedModel = localStorage.getItem(`rmdex-model:${settingsKey}`)
+    const savedEffort = localStorage.getItem(`rmdex-effort:${settingsKey}`)
     const nextModel = models.value.find(model => model.id === savedModel) || models.value.find(model => model.isDefault) || models.value[0]
     selectedModel.value = nextModel?.id || null
     const nextEffort = nextModel?.supportedReasoningEfforts.some(item => item.reasoningEffort === savedEffort)
@@ -158,18 +190,27 @@ async function loadModels() {
     selectedEffort.value = nextEffort
   } catch (e) {
     models.value = []; selectedModel.value = null; selectedEffort.value = null
-    throw e
+    capabilities.value = { ...defaultCapabilities, models: false, permissions: false, stop: false, send: false, create: false }
+    error.value = `设备设置暂不可用：${e instanceof Error ? e.message : String(e)}`
   } finally { modelLoading.value = false }
+}
+function rememberPermission(value: 'ask' | 'auto' | 'full') {
+  permissionMode.value = value
+  localStorage.setItem('rmdex-permission-mode', value)
 }
 function rememberModel(value: string) {
   selectedModel.value = value
   const deviceKey = remoteDevice.value?.id || 'local'
-  localStorage.setItem(`rmdex-model:${deviceKey}`, value)
+  localStorage.setItem(`rmdex-model:${desktopMode.value ? `desktop:${deviceKey}` : deviceKey}`, value)
 }
 function rememberEffort(value: string) {
   selectedEffort.value = value
   const deviceKey = remoteDevice.value?.id || 'local'
-  localStorage.setItem(`rmdex-effort:${deviceKey}`, value)
+  localStorage.setItem(`rmdex-effort:${desktopMode.value ? `desktop:${deviceKey}` : deviceKey}`, value)
+}
+function desktopSettings(): { model?: string; effort?: string } {
+  if (!capabilities.value.models || !selectedModel.value || selectedModel.value === desktopDefaultModel) return {}
+  return { model: selectedModel.value, ...(selectedEffort.value ? { effort: selectedEffort.value } : {}) }
 }
 async function refresh() {
   loading.value = true; error.value = ''
@@ -202,7 +243,8 @@ async function refresh() {
       get<{ data: Thread[] }>('/api/threads'),
       loadModels(),
     ])
-    threads.value = [...new Map(result.data.map((thread) => [thread.id, thread])).values()]
+    const deviceKey = remoteDevice.value?.id || 'local'
+    threads.value = [...localDraftThreads.value.filter(thread => thread.desktopDraft?.deviceKey === deviceKey), ...new Map(result.data.map((thread) => [thread.id, thread])).values()]
     connected.value = true
   }
   catch (e) { connected.value = false; error.value = e instanceof Error ? e.message : String(e) }
@@ -211,15 +253,42 @@ async function refresh() {
 
 async function openThread(thread: Thread) {
   const version = ++selectionVersion
+  threadLoading.value = true; threadLoadError.value = ''; historyCursor.value = null; historyLoading.value = false; queuedUntil = 0
   selected.value = thread; activeTurnId.value = null; pendingApprovals.value = []; lastTurn.value = null; mobileDetail.value = true; error.value = ''
+  if (thread.desktopDraft) {
+    threadLoading.value = false
+    await nextTick()
+    document.querySelector<HTMLTextAreaElement>('.composer textarea')?.focus()
+    return
+  }
   try {
     const result = await get<ReadResult>(`/api/threads/${thread.id}`)
-    if (version === selectionVersion) { applyRead(result); await scrollToLatest() }
+    if (version === selectionVersion) { applyRead(result); historyCursor.value = result.page?.hasMore ? result.page.nextCursor : null; threadLoading.value = false; await scrollToLatest() }
   }
-  catch (e) { if (version === selectionVersion) error.value = e instanceof Error ? e.message : String(e) }
+  catch (e) { if (version === selectionVersion) threadLoadError.value = e instanceof Error ? e.message : String(e) }
+  finally { if (version === selectionVersion) threadLoading.value = false }
+}
+async function loadOlder() {
+  if (!selected.value || !historyCursor.value || historyLoading.value) return
+  const id = selected.value.id
+  const version = selectionVersion
+  historyLoading.value = true
+  try {
+    const result = await post(`/api/threads/${id}/history`, { cursor: historyCursor.value }) as ReadResult
+    if (version !== selectionVersion || !selected.value) return
+    const element = conversation.value
+    const height = element?.scrollHeight || 0
+    selected.value.turns = [...new Map([...(result.thread.turns || []), ...(selected.value.turns || [])].map(turn => [turn.id, turn])).values()]
+    // Register attachment downloads without replacing the live state with an older page.
+    applyRead({ ...result, thread: selected.value, activeTurnId: activeTurnId.value, approvals: pendingApprovals.value, lastTurn: lastTurn.value })
+    historyCursor.value = result.page?.hasMore ? result.page.nextCursor : null
+    await nextTick()
+    if (element) element.scrollTop += element.scrollHeight - height
+  } catch (e) { if (version === selectionVersion) error.value = e instanceof Error ? e.message : String(e) }
+  finally { if (version === selectionVersion) historyLoading.value = false }
 }
 async function updateThread() {
-  if (!selected.value || pollBusy) return
+  if (!selected.value || selected.value.desktopDraft || pollBusy || threadLoading.value || threadLoadError.value) return
   const id = selected.value.id
   const version = selectionVersion
   const element = conversation.value
@@ -235,24 +304,24 @@ async function post(path: string, body: unknown) {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (clientToken.value) headers.Authorization = `Bearer ${clientToken.value}`
   const response = await fetch(apiUrl(path), { method: 'POST', headers, body: JSON.stringify(body) })
-  const result = await response.json()
-  if (!response.ok) throw new Error(result.error || '请求失败')
+  const result = await readJsonResponse(response, `请求 ${path} 失败`)
+  if (!response.ok) throw new Error(result?.error || '请求失败')
   return result
 }
 async function adminFetch<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
   const headers: Record<string, string> = { Authorization: `Bearer ${adminToken.value}` }
   if (body !== undefined) headers['Content-Type'] = 'application/json'
   const response = await fetch(apiUrl(path), { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
-  const data = await response.json()
-  if (!response.ok) throw new Error(data.error || '请求失败')
+  const data = await readJsonResponse(response, `请求 ${path} 失败`)
+  if (!response.ok) throw new Error(data?.error || '请求失败')
   return data as T
 }
 async function loginAdmin() {
   pairError.value = ''
   try {
     const response = await fetch(apiUrl('/api/auth/login'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: adminPassword.value }) })
-    const result = await response.json()
-    if (!response.ok) throw new Error(result.error || '登录失败')
+    const result = await readJsonResponse(response, '登录失败')
+    if (!response.ok) throw new Error(result?.error || '登录失败')
     adminToken.value = result.token; sessionStorage.setItem('rmdex-admin-token', result.token); adminPassword.value = ''
     await loadDevices()
     if (!clientToken.value) {
@@ -336,37 +405,105 @@ async function revokeDevice(deviceId: string) {
 }
 async function copyValue(value: string) { await navigator.clipboard.writeText(value) }
 function openCreate() {
+  if (!capabilities.value.create) return
   createPath.value = selected.value?.cwd || 'D:\\WorkSpace'
+  createProject.value = desktopProjects.value.find(project => project.path.toLowerCase() === createPath.value.toLowerCase())?.id || ''
   createError.value = ''
   showCreate.value = true
 }
+function operationId(key: string, signature: string) {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(key) || 'null') as { signature: string; id: string } | null
+    if (saved?.signature === signature && saved.id) return saved.id
+  } catch { /* A damaged browser entry should not prevent a new operation. */ }
+  const id = crypto.randomUUID()
+  sessionStorage.setItem(key, JSON.stringify({ signature, id }))
+  return id
+}
 async function createThread() {
   if (creating.value) return
+  if (desktopMode.value) {
+    const thread: Thread = {
+      id: `draft-${crypto.randomUUID()}`, name: '新对话', turns: [], updatedAt: Date.now() / 1000,
+      cwd: desktopProjects.value.find(project => project.id === createProject.value)?.path || '',
+      desktopDraft: { projectId: createProject.value || null, deviceKey: remoteDevice.value?.id || 'local' },
+    }
+    localDraftThreads.value.unshift(thread)
+    threads.value.unshift(thread)
+    query.value = ''; showCreate.value = false
+    await openThread(thread)
+    return
+  }
   creating.value = true; createError.value = ''
   try {
-    const result = await post('/api/threads', { cwd: createPath.value }) as { thread: Thread }
+    const result = await post('/api/threads', { cwd: createPath.value }) as { thread?: Thread; outcome?: string; message?: string }
+    if (result.outcome === 'uncertain') throw new Error(result.message || '创建结果未确认，请在 Desktop 核对')
+    if (!result.thread) { showCreate.value = false; await refresh(); error.value = result.message || 'Desktop 正在准备会话，请稍后刷新'; return }
+    const thread = result.thread
     query.value = ''
-    threads.value = [result.thread, ...threads.value.filter(thread => thread.id !== result.thread.id)]
+    threads.value = [thread, ...threads.value.filter(item => item.id !== thread.id)]
     showCreate.value = false
-    await openThread(result.thread)
+    await openThread(thread)
   } catch (e) { createError.value = e instanceof Error ? e.message : String(e) }
   finally { creating.value = false }
 }
+async function sendDesktopDraft(thread: Thread, text: string) {
+  const draft = thread.desktopDraft!
+  const key = `rmdex-create:${draft.deviceKey}:${thread.id}`
+  const settings = desktopSettings()
+  const result = await post('/api/threads', {
+    text, projectId: draft.projectId, ...settings,
+    operationId: operationId(key, JSON.stringify([text, draft.projectId, ...(settings.model ? [settings] : [])])),
+  }) as { thread?: Thread; outcome?: string; message?: string }
+  if (result.outcome === 'uncertain') throw new Error(result.message || '创建结果未确认，请在 Desktop 核对')
+  if (!result.thread) {
+    if (result.outcome !== 'preparing') throw new Error('Desktop 未返回会话，请核对桌面后再试')
+    draft.preparing = true
+    drafts.value[thread.id] = ''
+    if (selected.value?.id === thread.id) error.value = result.message || 'Desktop 正在准备新会话，请稍后刷新会话列表'
+    return
+  }
+  sessionStorage.removeItem(key)
+  const created = result.thread
+  localDraftThreads.value = localDraftThreads.value.filter(item => item.id !== thread.id)
+  threads.value = [created, ...threads.value.filter(item => item.id !== thread.id && item.id !== created.id)]
+  if (pendingMessages.value[thread.id]) pendingMessages.value[created.id] = pendingMessages.value[thread.id]!
+  delete pendingMessages.value[thread.id]
+  delete drafts.value[thread.id]
+  queuedUntil = Date.now() + 60000
+  if (selected.value?.id === thread.id) {
+    ++selectionVersion
+    selected.value = created
+    sendingThreadId.value = created.id
+    activeTurnId.value = 'desktop-queued'
+    await updateThread()
+    await scrollToLatest()
+  }
+}
 async function send() {
-  if (!selected.value || sending.value || activeTurnId.value) return
+  if (!selected.value || sending.value || activeTurnId.value || selected.value.desktopDraft?.preparing || !capabilities.value.send) return
+  const thread = selected.value
   const id = selected.value.id
   const text = (drafts.value[id] || '').trim()
   if (!text) return
-  if (permissionMode.value === 'full' && !window.confirm('完全访问允许 Codex 不经审批执行操作，并访问电脑上的文件和网络。确认使用此权限发送？')) return
+  if (capabilities.value.permissions && permissionMode.value === 'full' && !window.confirm('完全访问允许 Codex 不经审批执行操作，并访问电脑上的文件和网络。确认使用此权限发送？')) return
   sending.value = true; sendingThreadId.value = id; stopRequested.value = false; stopping.value = false; pendingMessages.value[id] = { text, previousCount: messages.value.filter(entry => entry.role === 'user' && entry.text === text).length }; error.value = ''; lastTurn.value = null
   await scrollToLatest()
   try {
-    const result = await post(`/api/threads/${id}/send`, {
+    if (thread.desktopDraft) { await sendDesktopDraft(thread, text); return }
+    const key = `rmdex-send:${remoteDevice.value?.id || 'local'}:${id}`
+    const settings = desktopSettings()
+    const result = await post(`/api/threads/${id}/send`, desktopMode.value ? {
+      text, ...settings, operationId: operationId(key, settings.model ? JSON.stringify([text, settings]) : text),
+    } : {
       text,
       permissionMode: permissionMode.value,
       model: selectedModel.value,
       effort: selectedEffort.value,
     })
+    if (result.outcome === 'uncertain') throw new Error(result.message || '发送结果未确认，请在 Desktop 核对')
+    sessionStorage.removeItem(key)
+    if (desktopMode.value) queuedUntil = Date.now() + 60000
     if (drafts.value[id]?.trim() === text) drafts.value[id] = ''
     if (selected.value?.id === id) activeTurnId.value = result.turn?.id || activeTurnId.value
     if (stopRequested.value) {
@@ -384,7 +521,7 @@ function onEnter(event: KeyboardEvent) {
   void send()
 }
 async function stop() {
-  if (!selected.value || stopping.value) return
+  if (!selected.value || stopping.value || !capabilities.value.stop) return
   if (sending.value && !activeTurnId.value) {
     stopRequested.value = true
     stopping.value = true
@@ -436,7 +573,7 @@ onUnmounted(() => { if (poll) clearInterval(poll); void appUrlListener?.remove()
         <div class="brand"><img :src="logoUrl" alt="" /><span>rmdex</span></div>
         <button class="icon-button collapse-button" title="收起侧栏" aria-label="收起侧栏" aria-controls="thread-panel" :aria-expanded="sidebarOpen" @click="sidebarOpen = false"><PanelLeftClose :size="19" /></button>
       </div>
-      <button class="new-thread" @click="openCreate"><Plus :size="17" /><span>新建对话</span></button>
+      <button class="new-thread" :disabled="!capabilities.create" @click="openCreate"><Plus :size="17" /><span>新建对话</span></button>
       <div class="device"><span class="device-icon"><Monitor :size="16" /></span><div class="device-copy"><strong>{{ remoteDevice?.name || (remoteMode ? '未连接 Codex 设备' : '本机设备') }}</strong><small>{{ connected ? '已连接' : (remoteMode ? '等待远程设备' : '未连接') }}</small></div><span class="online" :class="{ offline: !connected }"></span></div>
       <button class="pair-entry" type="button" @click="showDevices = true"><QrCode :size="16" /><span>连接设备</span><span class="pair-entry-hint">扫码配对</span></button>
       <label class="search"><Search :size="16" /><input v-model="query" placeholder="搜索会话" aria-label="搜索会话" /></label>
@@ -446,16 +583,18 @@ onUnmounted(() => { if (poll) clearInterval(poll); void appUrlListener?.remove()
       <footer class="side-footer"><span class="online" :class="{ offline: !connected }"></span> {{ remoteMode ? '远程设备' : '本机模式' }} <span class="footer-label">{{ connected ? '已连接' : '未连接' }}</span></footer>
     </aside>
     <main class="main" :class="{ hiddenMobile: !mobileDetail }">
-      <header class="main-head"><button class="icon-button back" title="返回会话" aria-label="返回会话" @click="mobileDetail = false"><ArrowLeft :size="19" /></button><button v-if="!sidebarOpen" class="icon-button expand-button" title="展开侧栏" aria-label="展开侧栏" aria-controls="thread-panel" :aria-expanded="sidebarOpen" @click="sidebarOpen = true"><Menu :size="19" /></button><div class="heading"><strong>{{ selected?.name || selected?.preview || '会话' }}</strong><span v-if="selected">本机设备</span></div><span v-if="activeTurnId" class="readonly">执行中</span><button v-if="!sidebarOpen" class="icon-button expand-button" title="新建对话" aria-label="新建对话" @click="openCreate"><Plus :size="19" /></button></header>
+      <header class="main-head"><button class="icon-button back" title="返回会话" aria-label="返回会话" @click="mobileDetail = false"><ArrowLeft :size="19" /></button><button v-if="!sidebarOpen" class="icon-button expand-button" title="展开侧栏" aria-label="展开侧栏" aria-controls="thread-panel" :aria-expanded="sidebarOpen" @click="sidebarOpen = true"><Menu :size="19" /></button><div class="heading"><strong>{{ selected?.name || selected?.preview || '会话' }}</strong><span v-if="selected">本机设备</span></div><span v-if="activeTurnId" class="readonly">执行中</span><button v-if="!sidebarOpen && capabilities.create" class="icon-button expand-button" title="新建对话" aria-label="新建对话" @click="openCreate"><Plus :size="19" /></button></header>
       <div v-if="error" class="error"><CircleAlert :size="18" /><span>{{ error }}</span><button @click="refresh">重试</button></div>
       <div v-if="!selected" class="welcome"><div class="welcome-icon"><MessageSquare :size="22" /></div><h2>选择一个会话</h2><p>查看你的 Codex 对话</p></div>
-      <div v-else ref="conversation" class="conversation"><div class="conversation-inner"><div class="conversation-header"><h2>{{ selected.name || selected.preview || '未命名会话' }}</h2><p>{{ selected.cwd }}</p></div><div v-if="!messages.length && !pendingMessages[selected.id]" class="empty-messages">此会话暂无可显示的消息。</div><template v-for="(message, i) in messages" :key="i"><details v-if="message.role === 'tools'" class="tool-group"><summary><Wrench :size="14" /><span>{{ toolSummary(message.items) }}</span><span v-if="message.items.some(item => item.status === 'failed' || item.status === 'declined' || item.success === false || (typeof item.exitCode === 'number' && item.exitCode !== 0))" class="group-failed">含失败</span><ChevronRight :size="14" class="group-chevron" /></summary><div class="tool-group-content"><ToolEvent v-for="(item, index) in message.items" :key="item.id || index" :item="item" /></div></details><article v-else class="message" :class="`message--${message.role}`" :aria-label="message.role === 'user' ? '用户消息' : 'Codex 回复'"><div class="message-body"><div v-if="message.images.length" class="attachments"><template v-for="(image, index) in message.images" :key="index"><a v-if="imageSource(image)" :href="imageSource(image)" target="_blank" rel="noopener noreferrer" class="attachment"><img :src="imageSource(image)" alt="图片附件" loading="lazy" /></a><span v-else class="attachment-unavailable">图片附件不可用</span></template></div><div v-if="message.text" class="message-text markdown" v-html="markdown.render(message.text)"></div></div></article></template><article v-if="pendingMessages[selected.id]" class="message message--user" aria-label="待显示的用户消息"><div class="message-body"><div class="message-text markdown" v-html="markdown.render(pendingMessages[selected.id]!.text)"></div></div></article><div v-if="working" class="working" role="status" aria-live="polite"><LoaderCircle :size="16" class="working-spinner" /><span>{{ workLabel }}</span></div><div v-else-if="lastTurn?.status === 'failed'" class="turn-failure" role="alert">执行失败<span v-if="lastTurn.error?.message">：{{ lastTurn.error.message }}</span></div></div></div>
-      <div v-if="selected" class="compose-area">
-        <div v-for="approval in pendingApprovals" :key="approval.id" class="approval"><strong>{{ approval.method.includes('commandExecution') ? '命令执行需要确认' : '文件修改需要确认' }}</strong><p v-if="approval.params.reason">{{ approval.params.reason }}</p><pre v-if="approval.params.command">{{ approval.params.command }}</pre><p v-if="approval.params.cwd">工作目录：{{ approval.params.cwd }}</p><p v-if="approval.params.grantRoot">授权目录：{{ approval.params.grantRoot }}</p><details><summary>完整请求信息</summary><pre>{{ JSON.stringify(approval.params, null, 2) }}</pre></details><p v-if="approval.method.includes('fileChange')">请先在上方工具调用中查看文件变更，再决定是否允许。</p><div class="approval-actions"><button @click="decide(approval, 'decline')">拒绝</button><button @click="decide(approval, 'accept')">允许本次</button></div></div>
-        <form class="composer" @submit.prevent="send"><textarea v-model="drafts[selected.id]" placeholder="给 Codex 发送消息" aria-label="消息" rows="2" :disabled="sending || !!activeTurnId" @keydown.enter.exact="onEnter"></textarea><div class="compose-actions"><PermissionMenu v-model="permissionMode" :disabled="working" /><div class="compose-right"><ModelMenu :models="models" :model-value="selectedModel" :effort="selectedEffort" :loading="modelLoading" :disabled="working || sending" @update:model-value="rememberModel" @update:effort="rememberEffort" /><button v-if="working" type="button" class="send-button stop-button" :class="{ 'is-stopping': stopping }" :title="stopping ? '正在暂停' : '暂停任务'" :aria-label="stopping ? '正在暂停' : '暂停任务'" :disabled="stopping && !!activeTurnId" @click="stop"><Square :size="14" fill="currentColor" /></button><button v-else type="submit" class="send-button" title="发送消息" aria-label="发送消息" :disabled="sending || !drafts[selected.id]?.trim()"><ArrowUp :size="18" /></button></div></div></form>
+      <div v-else-if="threadLoading" class="thread-load-state" role="status" aria-live="polite"><LoaderCircle :size="20" class="working-spinner" /><span>正在加载历史会话…</span></div>
+      <div v-else-if="threadLoadError" class="thread-load-state" role="alert"><CircleAlert :size="20" /><span>加载会话失败：{{ threadLoadError }}</span><button type="button" @click="openThread(selected)">重试</button></div>
+      <div v-else ref="conversation" class="conversation"><div class="conversation-inner"><button v-if="historyCursor" class="history-button" :disabled="historyLoading" @click="loadOlder"><LoaderCircle v-if="historyLoading" :size="14" class="working-spinner" />{{ historyLoading ? '正在加载…' : '加载更早的消息' }}</button><div class="conversation-header"><h2>{{ selected.name || selected.preview || '未命名会话' }}</h2></div><div v-if="!messages.length && !pendingMessages[selected.id]" class="empty-messages">{{ selected.desktopDraft ? '从下方发送消息，开始新对话。' : '此会话暂无可显示的消息。' }}</div><template v-for="(message, i) in messages" :key="i"><details v-if="message.role === 'tools'" class="tool-group"><summary><Wrench :size="14" /><span>{{ toolSummary(message.items) }}</span><span v-if="message.items.some(item => item.status === 'failed' || item.status === 'declined' || item.success === false || (typeof item.exitCode === 'number' && item.exitCode !== 0))" class="group-failed">含失败</span><ChevronRight :size="14" class="group-chevron" /></summary><div class="tool-group-content"><ToolEvent v-for="(item, index) in message.items" :key="item.id || index" :item="item" /></div></details><article v-else class="message" :class="`message--${message.role}`" :aria-label="message.role === 'user' ? '用户消息' : 'Codex 回复'"><div class="message-body"><div v-if="message.images.length" class="attachments"><template v-for="(image, index) in message.images" :key="index"><a v-if="imageSource(image)" :href="imageSource(image)" target="_blank" rel="noopener noreferrer" class="attachment"><img :src="imageSource(image)" alt="图片附件" loading="lazy" /></a><span v-else class="attachment-unavailable">图片附件不可用</span></template></div><div v-if="message.text" class="message-text markdown" v-html="markdown.render(message.text)"></div></div></article></template><article v-if="pendingMessages[selected.id]" class="message message--user" aria-label="待显示的用户消息"><div class="message-body"><div class="message-text markdown" v-html="markdown.render(pendingMessages[selected.id]!.text)"></div></div></article><div v-if="working" class="working" role="status" aria-live="polite"><LoaderCircle :size="16" class="working-spinner" /><span>{{ workLabel }}</span></div><div v-else-if="lastTurn?.status === 'failed'" class="turn-failure" role="alert">执行失败<span v-if="lastTurn.error?.message">：{{ lastTurn.error.message }}</span></div></div></div>
+      <div v-if="selected && !threadLoading && !threadLoadError" class="compose-area">
+        <p v-if="desktopMode" class="desktop-hint">{{ capabilities.models ? '模型与推理强度可在右侧选择；权限、审批和暂停请在 Desktop 处理。' : '当前设备未提供可识别的模型目录；模型、权限、审批和暂停请在 Desktop 处理。' }}</p><div v-for="approval in (capabilities.approvals ? pendingApprovals : [])" :key="approval.id" class="approval"><strong>{{ approval.method.includes('commandExecution') ? '命令执行需要确认' : '文件修改需要确认' }}</strong><p v-if="approval.params.reason">{{ approval.params.reason }}</p><pre v-if="approval.params.command">{{ approval.params.command }}</pre><p v-if="approval.params.cwd">工作目录：{{ approval.params.cwd }}</p><p v-if="approval.params.grantRoot">授权目录：{{ approval.params.grantRoot }}</p><details><summary>完整请求信息</summary><pre>{{ JSON.stringify(approval.params, null, 2) }}</pre></details><p v-if="approval.method.includes('fileChange')">请先在上方工具调用中查看文件变更，再决定是否允许。</p><div class="approval-actions"><button @click="decide(approval, 'decline')">拒绝</button><button @click="decide(approval, 'accept')">允许本次</button></div></div>
+        <form class="composer" @submit.prevent="send"><textarea v-model="drafts[selected.id]" placeholder="给 Codex 发送消息" aria-label="消息" rows="2" :disabled="sending || !!activeTurnId || !!selected.desktopDraft?.preparing || !capabilities.send" @keydown.enter.exact="onEnter"></textarea><div class="compose-actions"><PermissionMenu v-if="capabilities.permissions" :model-value="permissionMode" :disabled="working" @update:model-value="rememberPermission" /><div class="compose-right"><ModelMenu v-if="capabilities.models" :models="models" :model-value="selectedModel" :effort="selectedEffort" :loading="modelLoading" :disabled="working || sending" @update:model-value="rememberModel" @update:effort="rememberEffort" /><button v-if="working && capabilities.stop" type="button" class="send-button stop-button" :class="{ 'is-stopping': stopping }" :title="stopping ? '正在暂停' : '暂停任务'" :aria-label="stopping ? '正在暂停' : '暂停任务'" :disabled="stopping && !!activeTurnId" @click="stop"><Square :size="14" fill="currentColor" /></button><button v-else-if="working" type="button" class="send-button" disabled title="Desktop 正在工作"><LoaderCircle :size="18" class="working-spinner" /></button><button v-else type="submit" class="send-button" title="发送消息" aria-label="发送消息" :disabled="sending || !capabilities.send || !drafts[selected.id]?.trim()"><ArrowUp :size="18" /></button></div></div></form>
       </div>
     </main>
-    <div v-if="showCreate" class="modal-backdrop" @click.self="!creating && (showCreate = false)"><section class="create-dialog" role="dialog" aria-modal="true" aria-labelledby="create-title" @keydown.esc="!creating && (showCreate = false)"><header><h2 id="create-title">新建对话</h2><button class="icon-button" type="button" title="关闭" aria-label="关闭" :disabled="creating" @click="showCreate = false"><X :size="18" /></button></header><form @submit.prevent="createThread"><label for="working-directory">工作目录</label><input id="working-directory" v-model="createPath" required autocomplete="off" placeholder="例如 D:\WorkSpace\rmdex" /><p v-if="createError" class="create-error" role="alert">{{ createError }}</p><div class="dialog-actions"><button type="button" class="cancel-button" :disabled="creating" @click="showCreate = false">取消</button><button type="submit" class="create-button" :disabled="creating || !createPath.trim()">{{ creating ? '创建中…' : '创建对话' }}</button></div></form></section></div>
+    <div v-if="showCreate" class="modal-backdrop" @click.self="!creating && (showCreate = false)"><section class="create-dialog" role="dialog" aria-modal="true" aria-labelledby="create-title" @keydown.esc="!creating && (showCreate = false)"><header><h2 id="create-title">新建对话</h2><button class="icon-button" type="button" title="关闭" aria-label="关闭" :disabled="creating" @click="showCreate = false"><X :size="18" /></button></header><form @submit.prevent="createThread"><template v-if="desktopMode"><label>项目</label><div class="desktop-project-options"><button type="button" :class="{ chosen: !createProject }" @click="createProject = ''">独立会话</button><button v-for="project in desktopProjects" :key="project.id" type="button" :class="{ chosen: createProject === project.id }" @click="createProject = project.id">{{ project.name || project.path }}</button></div></template><template v-else><label for="working-directory">工作目录</label><input id="working-directory" v-model="createPath" required autocomplete="off" placeholder="例如 D:\WorkSpace\rmdex" /></template><p v-if="createError" class="create-error" role="alert">{{ createError }}</p><div class="dialog-actions"><button type="button" class="cancel-button" :disabled="creating" @click="showCreate = false">取消</button><button type="submit" class="create-button" :disabled="creating || (!desktopMode && !createPath.trim())">{{ creating ? '创建中…' : '创建对话' }}</button></div></form></section></div>
     <div v-if="showDevices" class="modal-backdrop" @click.self="showDevices = false"><section class="create-dialog device-dialog" role="dialog" aria-modal="true" aria-labelledby="devices-title" @keydown.esc="showDevices = false"><header><div><h2 id="devices-title">设备连接</h2><p>管理 Codex 电脑与手机配对</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="showDevices = false"><X :size="18" /></button></header>
       <form v-if="!adminToken && !pairLanding" class="admin-login" @submit.prevent="loginAdmin"><label for="admin-password">设备管理员密码</label><p class="dialog-hint">登录后才能管理 Codex 电脑、生成手机配对码和审批手机连接。</p><input id="admin-password" v-model="adminPassword" type="password" autocomplete="current-password" required placeholder="输入服务器管理员密码" /><button class="create-button" type="submit">登录管理设备</button></form>
       <template v-else-if="adminToken"><div class="admin-status"><span class="online"></span><span>管理员已验证</span></div><form class="register-device" @submit.prevent="registerDevice"><input v-model="deviceName" aria-label="设备名称" maxlength="80" /><button class="create-button" type="submit"><Plus :size="15" />注册此电脑</button></form>

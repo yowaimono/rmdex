@@ -2,16 +2,41 @@ import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { readFile, stat } from 'node:fs/promises'
 import { createServer } from 'node:http'
-import { extname, isAbsolute } from 'node:path'
+import { homedir } from 'node:os'
+import { extname, isAbsolute, join } from 'node:path'
 import { createInterface } from 'node:readline'
+import { Duplex } from 'node:stream'
+import WebSocket from 'ws'
 import './remote-agent.ts'
+
+const requestedMode = (process.env.RMDEX_CODEX_MODE || '').trim().toLowerCase()
+const legacyDesktopMode = ['desktop-legacy', 'desktop-mcp'].includes(requestedMode)
+if (legacyDesktopMode) {
+  console.warn('[rmdex] Legacy Desktop MCP mode is enabled explicitly; use RMDEX_CODEX_MODE=desktop for the permission-aware app-server mode.')
+  await import('./desktop-agent.ts')
+} else {
 
 // The local control API remains loopback-only. Remote access is relayed over
 // an authenticated outbound connection from remote-agent.ts.
-const codex = spawn(process.env.RMDEX_CODEX || 'codex', ['app-server'], {
+const codexExecutable = process.env.RMDEX_CODEX || 'codex'
+const codexHome = process.env.CODEX_HOME || join(homedir(), '.codex')
+const sharedSocket = process.env.RMDEX_CODEX_SOCKET || join(codexHome, 'app-server-control', 'app-server-control.sock')
+const sharedMode = ['shared', 'proxy'].includes(requestedMode)
+const codexArgs = sharedMode ? ['app-server', 'proxy', '--sock', sharedSocket] : ['app-server']
+console.log(`[rmdex] Codex connection mode: ${sharedMode ? `shared proxy (${sharedSocket})` : requestedMode === 'desktop' ? 'Desktop-compatible app-server' : 'standalone app-server'}`)
+// Windows npm installs may expose Codex as a PowerShell shim. Node's spawn
+// cannot execute .ps1 files directly, so invoke the shim explicitly instead
+// of failing before the app-server has a chance to start.
+const codexLaunch = process.platform === 'win32' && /\.ps1$/i.test(codexExecutable)
+  ? { file: process.env.ComSpec || 'cmd.exe', args: ['/d', '/c', 'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', codexExecutable, ...codexArgs] }
+  : { file: codexExecutable, args: codexArgs }
+const codex = spawn(codexLaunch.file, codexLaunch.args, {
   stdio: ['pipe', 'pipe', 'pipe'],
   windowsHide: true,
 })
+const sharedConnection = sharedMode
+  ? new WebSocket('ws://localhost/rpc', { createConnection: () => Duplex.from({ readable: codex.stdout, writable: codex.stdin }), handshakeTimeout: 10000 })
+  : undefined
 let sequence = 0
 const pending = new Map<number, { resolve: (result: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>()
 let failure: string | undefined
@@ -24,6 +49,7 @@ const liveTurns = new Map<string, LiveTurn>()
 const approvals = new Map<string, { id: string | number; method: string; params: Record<string, unknown> }>()
 const sending = new Set<string>()
 const newThreads = new Map<string, Record<string, unknown>>()
+const subscriptions = new Map<string, Promise<void>>()
 type CodexModel = {
   id: string
   model: string
@@ -62,24 +88,42 @@ function registerImages(result: unknown) {
   }
 }
 
-codex.stderr.on('data', (data) => console.error(String(data).trim()))
-codex.on('error', (error) => { failure = error.message; console.error(error.message) })
-codex.on('exit', () => {
-  failure = 'Codex app-server exited'
+function failConnection(message: string) {
+  if (failure) return
+  failure = message
+  console.error(message)
   activeTurns.clear()
   liveTurns.clear()
   approvals.clear()
+  subscriptions.clear()
   for (const request of pending.values()) { clearTimeout(request.timer); request.reject(new Error(failure)) }
   pending.clear()
-})
-createInterface({ input: codex.stdout }).on('line', (line) => {
+}
+codex.stderr.on('data', (data) => console.error(String(data).trim()))
+codex.on('error', (error) => failConnection(`Codex process failed: ${error.message}`))
+codex.on('exit', () => failConnection(sharedMode ? 'Codex shared proxy exited; check that the daemon is running' : 'Codex app-server exited'))
+sharedConnection?.on('error', (error) => failConnection(`Codex shared connection failed: ${error.message}`))
+sharedConnection?.on('close', () => failConnection('Codex shared connection closed'))
+function sendMessage(message: unknown, callback?: (error?: Error | null) => void) {
+  if (failure) { callback?.(new Error(failure)); return }
+  const payload = JSON.stringify(message)
+  if (sharedConnection) {
+    if (sharedConnection.readyState !== WebSocket.OPEN) { callback?.(new Error('Codex shared connection is not ready')); return }
+    sharedConnection.send(payload, callback)
+  } else {
+    codex.stdin.write(payload + '\n', callback)
+  }
+}
+function handleMessage(line: string) {
   try {
     const message = JSON.parse(line)
     if (message.method && message.id !== undefined) {
       if (['item/commandExecution/requestApproval', 'item/fileChange/requestApproval'].includes(message.method)) {
         approvals.set(String(message.id), { id: message.id, method: message.method, params: message.params || {} })
+      } else if (!sharedMode) {
+        sendMessage({ id: message.id, error: { code: -32601, message: 'This client does not support this request' } })
       } else {
-        codex.stdin.write(JSON.stringify({ id: message.id, error: { code: -32601, message: 'This client does not support this request' } }) + '\n')
+        console.warn(`Unsupported shared Codex request: ${message.method}`)
       }
       return
     }
@@ -116,7 +160,9 @@ createInterface({ input: codex.stdout }).on('line', (line) => {
     if (message.error) request.reject(new Error(message.error.message || 'Codex request failed'))
     else request.resolve(message.result)
   } catch { console.error('Invalid app-server response') }
-})
+}
+if (sharedConnection) sharedConnection.on('message', (data) => handleMessage(data.toString()))
+else createInterface({ input: codex.stdout }).on('line', handleMessage)
 
 function rpc(method: string, params: unknown): Promise<unknown> {
   if (failure) return Promise.reject(new Error(failure))
@@ -124,7 +170,7 @@ function rpc(method: string, params: unknown): Promise<unknown> {
     const id = ++sequence
     const timer = setTimeout(() => { pending.delete(id); reject(new Error('Codex request timed out')) }, 15000)
     pending.set(id, { resolve, reject, timer })
-    codex.stdin.write(JSON.stringify({ id, method, params }) + '\n', (error) => {
+    sendMessage({ id, method, params }, (error) => {
       if (error && pending.has(id)) { clearTimeout(timer); pending.delete(id); reject(error) }
     })
   })
@@ -144,8 +190,24 @@ async function listModels() {
   return data
 }
 
-const ready = rpc('initialize', { clientInfo: { name: 'rmdex', version: '0.0.1' } })
-  .then(() => { codex.stdin.write(JSON.stringify({ method: 'initialized', params: {} }) + '\n') })
+function subscribeToThread(threadId: string) {
+  let subscription = subscriptions.get(threadId)
+  if (!subscription) {
+    subscription = rpc('thread/resume', { threadId, excludeTurns: true }).then(() => {})
+    subscriptions.set(threadId, subscription)
+    subscription.catch(() => { if (subscriptions.get(threadId) === subscription) subscriptions.delete(threadId) })
+  }
+  return subscription
+}
+
+const transportReady = sharedConnection ? new Promise<void>((resolve, reject) => {
+  sharedConnection.once('open', resolve)
+  sharedConnection.once('error', reject)
+  sharedConnection.once('close', () => reject(new Error('Codex shared connection closed')))
+}) : Promise.resolve()
+const ready = transportReady.catch((error: Error) => { throw new Error(failure || `Codex shared connection failed: ${error.message}`) })
+  .then(() => rpc('initialize', { clientInfo: { name: 'rmdex', version: '0.0.1' }, capabilities: { experimentalApi: true } }))
+  .then(() => { sendMessage({ method: 'initialized', params: {} }) })
 ready.catch((error) => console.error('Codex initialization failed:', error.message))
 
 const server = createServer(async (req, res) => {
@@ -194,7 +256,10 @@ const server = createServer(async (req, res) => {
         if (sending.has(threadId) || activeTurns.has(threadId)) throw new Error('此会话正在执行，请等待结束')
         sending.add(threadId)
         try {
-          if (!newThreads.has(threadId)) await rpc('thread/resume', { threadId, excludeTurns: true })
+          if (!newThreads.has(threadId)) {
+            if (sharedMode) await subscribeToThread(threadId)
+            else await rpc('thread/resume', { threadId, excludeTurns: true })
+          }
           const options = data.permissionMode === 'full'
             ? { approvalPolicy: 'never', approvalsReviewer: 'user', sandboxPolicy: { type: 'dangerFullAccess' } }
             : { approvalPolicy: 'on-request', approvalsReviewer: data.permissionMode === 'auto' ? 'auto_review' : 'user', sandboxPolicy: { type: 'workspaceWrite' } }
@@ -218,11 +283,24 @@ const server = createServer(async (req, res) => {
         const request = approvals.get(approvalMatch[1]!)
         if (!request || !['accept', 'decline'].includes(data.decision)) throw new Error('审批请求已失效')
         approvals.delete(approvalMatch[1]!)
-        codex.stdin.write(JSON.stringify({ id: request.id, result: { decision: data.decision } }) + '\n')
+        sendMessage({ id: request.id, result: { decision: data.decision } })
         result = { ok: true }
       } else { res.writeHead(404).end(JSON.stringify({ error: 'Not found' })); return }
     } else if (url.pathname === '/api/models') {
-      result = { data: await listModels() }
+      result = {
+        data: await listModels(),
+        capabilities: {
+          mode: 'app-server',
+          models: true,
+          permissions: true,
+          stop: true,
+          approvals: true,
+          create: true,
+          send: true,
+          history: false,
+          createRequiresPrompt: false,
+        },
+      }
     } else if (url.pathname === '/api/threads') {
       const list = await rpc('thread/list', { limit: 100, sortKey: 'updated_at' }) as { data: Array<{ id: string }> }
       const listed = new Set(list.data.map(thread => thread.id))
@@ -234,6 +312,17 @@ const server = createServer(async (req, res) => {
         const thread = newThreads.get(threadId!)
         if (!thread) throw error
         result = { thread: { ...thread, turns: [] } }
+      }
+      const initialRead = result as { thread?: { turns?: Array<{ id: string; status: string }> } }
+      if (sharedMode && initialRead.thread?.turns?.length && !newThreads.has(threadId!)) {
+        await subscribeToThread(threadId!)
+        result = await rpc('thread/read', { threadId, includeTurns: true })
+      }
+      const currentRead = result as { thread?: { turns?: Array<{ id: string; status: string }> } }
+      const runningTurn = currentRead.thread?.turns?.findLast(turn => turn.status === 'inProgress')
+      if (sharedMode && runningTurn && !activeTurns.has(threadId!)) {
+        activeTurns.set(threadId!, runningTurn.id)
+        if (!liveTurns.has(threadId!)) liveTurns.set(threadId!, { id: runningTurn.id, status: runningTurn.status, items: new Map() })
       }
       registerImages(result)
       const live = liveTurns.get(threadId!)
@@ -265,10 +354,11 @@ const server = createServer(async (req, res) => {
       } catch { res.writeHead(404).end(JSON.stringify({ error: 'Image unavailable' })) }
       return
     } else { res.writeHead(404).end(JSON.stringify({ error: 'Not found' })); return }
-    res.end(JSON.stringify(result))
+    res.end(JSON.stringify(result === undefined ? { error: 'Agent returned no data' } : result))
   } catch (error) {
     res.writeHead(502).end(JSON.stringify({ error: error instanceof Error ? error.message : 'Codex request failed' }))
   }
 })
 server.listen(port, '127.0.0.1', () => console.log(`rmdex local agent listening on http://127.0.0.1:${port}`))
-for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => { codex.kill(); server.close(); process.exit() })
+for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => { sharedConnection?.terminate(); codex.kill(); server.close(); process.exit() })
+}

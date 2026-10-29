@@ -29,6 +29,7 @@ const icon = computed(() => {
 function textValue(value: unknown): string {
   if (typeof value === 'string') return value
   if (value === undefined || value === null) return ''
+  if (typeof value === 'object' && 'text' in value && typeof value.text === 'string') return value.text + ('truncated' in value && value.truncated ? '\n…（输出已截断）' : '')
   try { return JSON.stringify(value) } catch { return String(value) }
 }
 function commandActionText(value: unknown): string {
