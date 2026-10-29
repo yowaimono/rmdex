@@ -50,6 +50,10 @@ const approvals = new Map<string, { id: string | number; method: string; params:
 const sending = new Set<string>()
 const newThreads = new Map<string, Record<string, unknown>>()
 const subscriptions = new Map<string, Promise<void>>()
+type PermissionMode = 'ask' | 'auto' | 'full'
+let defaultPermissionMode: PermissionMode = ['ask', 'auto', 'full'].includes(process.env.RMDEX_DEFAULT_PERMISSION_MODE || '')
+  ? process.env.RMDEX_DEFAULT_PERMISSION_MODE as PermissionMode
+  : 'ask'
 type CodexModel = {
   id: string
   model: string
@@ -219,7 +223,7 @@ const server = createServer(async (req, res) => {
     res.writeHead(403).end(JSON.stringify({ error: 'Forbidden' })); return
   }
   if (!['GET', 'POST'].includes(req.method || '')) { res.writeHead(405).end(JSON.stringify({ error: 'Method not allowed' })); return }
-  if (req.method === 'POST' && (!/^http:\/\/(localhost|127\.0\.0\.1):5173$/.test(origin || '') || !/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] || ''))) {
+  if (req.method === 'POST' && ((!/^http:\/\/(localhost|127\.0\.0\.1):5173$/.test(origin || '')) || !/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] || ''))) {
     res.writeHead(403).end(JSON.stringify({ error: 'Forbidden' })); return
   }
   try {
@@ -236,7 +240,11 @@ const server = createServer(async (req, res) => {
       const sendMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/send$/)
       const stopMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/stop$/)
       const approvalMatch = url.pathname.match(/^\/api\/approvals\/([a-zA-Z0-9-]+)$/)
-      if (url.pathname === '/api/threads') {
+      if (url.pathname === '/api/settings') {
+        if (!['ask', 'auto', 'full'].includes(data.permissionMode)) throw new Error('请选择有效的权限模式')
+        defaultPermissionMode = data.permissionMode as PermissionMode
+        result = { permissionMode: defaultPermissionMode }
+      } else if (url.pathname === '/api/threads') {
         if (typeof data.cwd !== 'string' || !data.cwd.trim() || !isAbsolute(data.cwd.trim())) throw new Error('请输入工作目录的绝对路径')
         const cwd = data.cwd.trim()
         const info = await stat(cwd).catch(() => null)
@@ -248,7 +256,8 @@ const server = createServer(async (req, res) => {
       } else if (sendMatch) {
         const threadId = sendMatch[1]!
         if (typeof data.text !== 'string' || !data.text.trim() || data.text.length > 32000) throw new Error('消息不能为空或超过长度限制')
-        if (!['ask', 'auto', 'full'].includes(data.permissionMode)) throw new Error('请选择有效的权限模式')
+        const permissionMode = data.permissionMode === undefined ? defaultPermissionMode : data.permissionMode
+        if (!['ask', 'auto', 'full'].includes(permissionMode)) throw new Error('请选择有效的权限模式')
         const models = (data.model !== undefined || data.effort !== undefined) ? await listModels() : []
         const selectedModel = typeof data.model === 'string' && data.model.trim() ? models.find(model => model.id === data.model) : undefined
         if (data.model !== undefined && !selectedModel) throw new Error('所选模型不在当前 Codex 主机的模型列表中')
@@ -260,9 +269,9 @@ const server = createServer(async (req, res) => {
             if (sharedMode) await subscribeToThread(threadId)
             else await rpc('thread/resume', { threadId, excludeTurns: true })
           }
-          const options = data.permissionMode === 'full'
+          const options = permissionMode === 'full'
             ? { approvalPolicy: 'never', approvalsReviewer: 'user', sandboxPolicy: { type: 'dangerFullAccess' } }
-            : { approvalPolicy: 'on-request', approvalsReviewer: data.permissionMode === 'auto' ? 'auto_review' : 'user', sandboxPolicy: { type: 'workspaceWrite' } }
+            : { approvalPolicy: 'on-request', approvalsReviewer: permissionMode === 'auto' ? 'auto_review' : 'user', sandboxPolicy: { type: 'workspaceWrite' } }
           const modelOptions = selectedModel ? { model: selectedModel.id, effort: data.effort } : {}
           const started = await rpc('turn/start', { threadId, input: [{ type: 'text', text: data.text, text_elements: [] }], ...modelOptions, ...options }) as { turn?: { id: string; status?: string } }
           newThreads.delete(threadId)
@@ -286,6 +295,8 @@ const server = createServer(async (req, res) => {
         sendMessage({ id: request.id, result: { decision: data.decision } })
         result = { ok: true }
       } else { res.writeHead(404).end(JSON.stringify({ error: 'Not found' })); return }
+    } else if (url.pathname === '/api/settings') {
+      result = { permissionMode: defaultPermissionMode, mode: sharedMode ? 'shared' : 'standalone' }
     } else if (url.pathname === '/api/models') {
       result = {
         data: await listModels(),

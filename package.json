@@ -10,6 +10,9 @@
     "desktop:probe": "node scripts/probe-desktop.mjs",
     "desktop:shared": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/start-shared-session.ps1",
     "desktop:shared:manual": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/start-shared-manual.ps1",
+    "pc:build": "vite build --config pc-vite.config.ts",
+    "pc:server": "tsx pc/server.ts",
+    "pc:start": "npm run pc:build && npm run pc:server",
     "test:desktop": "node --import tsx --test server/desktop.test.mjs",
     "relay": "tsx server/relay/index.ts",
     "build:relay": "esbuild server/relay/index.ts --bundle --platform=node --format=esm --packages=external --outfile=dist-relay/index.js",
@@ -21,7 +24,9 @@
     "android:open": "cap open android",
     "android:apk": "npm run android:sync && cd android && gradlew.bat assembleDebug",
     "mcp": "tsx server/control-mcp.ts",
-    "test:mcp": "node --import tsx --test server/control-mcp.test.mjs"
+    "test:mcp": "node --import tsx --test server/control-mcp.test.mjs",
+    "pc:window:build": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-pc-window.ps1",
+    "test:pc": "node --test pc/launcher.test.mjs"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.3",

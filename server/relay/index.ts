@@ -5,7 +5,7 @@ import { dirname, extname, join, normalize } from 'node:path'
 import { WebSocket, WebSocketServer } from 'ws'
 
 type Device = { id: string; name: string; tokenHash: string; createdAt: number; revoked?: boolean }
-type Client = { tokenHash: string; deviceId: string; name: string; createdAt: number; revoked?: boolean }
+type Client = { tokenHash: string; deviceId: string; name: string; createdAt: number; lastSeenAt?: number; revoked?: boolean }
 type Pairing = { codeHash: string; deviceId: string; expiresAt: number }
 type PairRequest = { id: string; deviceId: string; name: string; createdAt: number; expiresAt: number; status: 'pending' | 'approved' | 'denied'; token?: string }
 type State = { devices: Device[]; clients: Client[]; pairings: Pairing[]; pairRequests: PairRequest[] }
@@ -69,7 +69,9 @@ async function body(req: import('node:http').IncomingMessage) {
 }
 function clientFor(req: import('node:http').IncomingMessage) {
   const token = req.headers.authorization?.match(/^Bearer\s+(.+)$/i)?.[1]
-  return token ? state.clients.find(client => !client.revoked && equalHash(token, client.tokenHash)) : undefined
+  const client = token ? state.clients.find(item => !item.revoked && equalHash(token, item.tokenHash)) : undefined
+  if (client) client.lastSeenAt = Date.now()
+  return client
 }
 function adminFor(req: import('node:http').IncomingMessage) {
   const token = req.headers.authorization?.match(/^Bearer\s+(.+)$/i)?.[1]
@@ -233,14 +235,24 @@ const server = createServer(async (req, res) => {
       if (!device) { json(res, 401, { error: '设备已撤销' }); return }
       json(res, 200, { device: { id: device.id, name: device.name, online: deviceSockets.get(device.id)?.readyState === WebSocket.OPEN } }); return
     }
+    if (req.method === 'GET' && url.pathname === '/api/client/peers') {
+      const client = clientFor(req)
+      if (!client) { json(res, 401, { error: '请重新配对' }); return }
+      const device = state.devices.find(item => item.id === client.deviceId && !item.revoked)
+      if (!device) { json(res, 401, { error: '设备已撤销' }); return }
+      const phones = state.clients
+        .filter(item => !item.revoked && item.deviceId === device.id && item !== client)
+        .map(item => ({ name: item.name, lastSeenAt: item.lastSeenAt, online: Boolean(item.lastSeenAt && Date.now() - item.lastSeenAt < 90_000) }))
+      json(res, 200, { device: { id: device.id, name: device.name, online: deviceSockets.get(device.id)?.readyState === WebSocket.OPEN }, phones }); return
+    }
     const client = clientFor(req)
     if (!client) { json(res, 401, { error: '需要登录或扫码配对' }); return }
     const device = state.devices.find(item => item.id === client.deviceId && !item.revoked)
     if (!device) { json(res, 401, { error: '设备已撤销' }); return }
     if (!['GET', 'POST'].includes(req.method || '')) { json(res, 405, { error: 'Method not allowed' }); return }
     const allowed = req.method === 'GET'
-      ? /^\/api\/(?:models|threads(?:\/[a-zA-Z0-9-]+)?|images\/[a-f0-9-]+)$/.test(url.pathname)
-      : /^\/api\/(?:threads|threads\/[a-zA-Z0-9-]+\/(?:send|stop|history)|approvals\/[a-zA-Z0-9-]+)$/.test(url.pathname)
+      ? /^\/api\/(?:models|settings|threads(?:\/[a-zA-Z0-9-]+)?|images\/[a-f0-9-]+)$/.test(url.pathname)
+      : /^\/api\/(?:settings|threads|threads\/[a-zA-Z0-9-]+\/(?:send|stop|history)|approvals\/[a-zA-Z0-9-]+)$/.test(url.pathname)
     if (!allowed || url.search) { json(res, 404, { error: 'Not found' }); return }
     const result = await rpc(device.id, url.pathname + url.search, req.method!, req.method === 'POST' ? await body(req) : undefined)
     if (url.pathname.startsWith('/api/images/') && result && typeof result === 'object' && (result as { __rmdexBinary?: boolean }).__rmdexBinary) {

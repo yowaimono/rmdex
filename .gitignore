@@ -31,3 +31,4 @@ dist-relay
 
 # Local diagnostics and generated handoff artifacts
 work/
+dist-pc/
