@@ -68,8 +68,8 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
     </header>
 
     <section class="hero">
-      <div><p class="eyebrow">本机控制台</p><h1>Codex Desktop <span>共享运行状态</span></h1><p class="subtitle">一个 app-server，连接 PC、Server 和手机端。</p></div>
-      <div class="hero-actions"><button class="primary" :disabled="busy || isRunning" @click="action('/pc-api/start')"><Power :size="16" />启动组件</button><button class="secondary" :disabled="busy || !isRunning" @click="action('/pc-api/restart')"><RefreshCw :size="16" />重启</button><button class="danger" :disabled="busy || !isRunning" @click="action('/pc-api/stop')"><CircleStop :size="16" />停止</button></div>
+      <div><p class="eyebrow">本机控制台</p><h1>Codex Desktop <span>共享运行状态</span></h1><p class="subtitle">一个 app-server，连接 PC、Server 和手机端。暂停或重启时会清理残留的 Codex app-server 进程。</p></div>
+      <div class="hero-actions"><button class="primary" :disabled="busy || isRunning" @click="action('/pc-api/start')"><Power :size="16" />启动组件</button><button class="secondary" :disabled="busy || !isRunning" @click="action('/pc-api/restart')"><RefreshCw :size="16" />重启</button><button class="danger" :disabled="busy || !isRunning" @click="action('/pc-api/stop')"><CircleStop :size="16" />暂停组件</button></div>
     </section>
 
     <p v-if="error || status?.error" class="error-banner"><AlertTriangle :size="17" />{{ error || status?.error }}</p>

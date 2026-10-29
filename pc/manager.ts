@@ -121,18 +121,31 @@ export class PcManager {
     })
   }
 
+  private async cleanupCodexProcesses() {
+    if (process.platform !== 'win32') return 0
+    const script = "$pattern = 'app-server|features\\.code_mode_host=true|codex_app\\.enabled=true'; Get-CimInstance Win32_Process -Filter \"Name = 'codex.exe'\" | Where-Object { $_.CommandLine -and $_.CommandLine -match $pattern } | ForEach-Object { \"$($_.ProcessId)|$($_.CommandLine)\" }"
+    const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
+    let output = ''
+    child.stdout.on('data', chunk => { output += chunk.toString() })
+    const code = await new Promise<number>((resolve, reject) => { child.once('error', reject); child.once('exit', value => resolve(value ?? 2)) })
+    if (code !== 0) throw new Error('无法读取 Codex app-server 进程列表')
+    const processes = output.split(/\r?\n/).map(line => line.trim()).filter(Boolean).map(line => {
+      const separator = line.indexOf('|')
+      return { pid: Number(separator < 0 ? line : line.slice(0, separator)), commandLine: separator < 0 ? '' : line.slice(separator + 1) }
+    }).filter(item => Number.isInteger(item.pid) && item.pid > 0)
+    for (const process of processes) await run('taskkill.exe', ['/PID', String(process.pid), '/T', '/F']).catch(() => {})
+    if (processes.length) await new Promise(resolve => setTimeout(resolve, 500))
+    return processes.length
+  }
+
   private async preflight() {
+    await this.cleanupCodexProcesses()
     // Do not accidentally attach to an unrelated process already owning the agent port.
     await new Promise<void>((resolve, reject) => {
       const probe = createNetServer()
       probe.once('error', () => reject(new Error(`Port ${this.agentPort} is already in use; stop the existing agent first.`)))
       probe.listen(this.agentPort, '127.0.0.1', () => probe.close(() => resolve()))
     })
-    if (process.platform === 'win32') {
-      const check = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "if (Get-CimInstance Win32_Process -Filter \"Name = 'codex.exe'\" | Where-Object { $_.CommandLine -match 'app-server.*analytics-default-enabled|features\\.code_mode_host=true.*app-server' }) { exit 1 }"], { stdio: 'ignore', windowsHide: true })
-      const code = await new Promise<number>((resolve, reject) => { check.once('error', reject); check.once('exit', value => resolve(value ?? 2)) })
-      if (code !== 0) throw new Error('Exit Codex Desktop completely before starting shared mode. Existing sessions will not be force-closed.')
-    }
   }
 
   private async startDaemon() {
@@ -212,6 +225,7 @@ export class PcManager {
       this.phase = 'error'
       await terminate(this.agent)
       this.agent = undefined
+      await this.cleanupCodexProcesses().catch(() => {})
       return this.status()
     }
   }
@@ -219,6 +233,7 @@ export class PcManager {
   async stop() {
     await terminate(this.desktop)
     await terminate(this.agent)
+    await this.cleanupCodexProcesses()
     this.desktop = undefined
     this.agent = undefined
     this.agentLog?.end()

@@ -178,6 +178,17 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .modal-backdrop { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 20px; background: rgba(25, 36, 50, .35); }
 .create-dialog { width: min(100%, 440px); padding: 20px; border: 1px solid #e5eaf0; border-radius: 8px; background: #fff; box-shadow: 0 16px 48px rgba(35, 53, 75, .15); }
 .create-dialog header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+.risk-dialog { width: min(100%, 460px); }
+.risk-heading { display: flex; align-items: center; gap: 11px; }
+.risk-heading h2 { margin: 0; }
+.risk-heading p { margin: 4px 0 0; color: #8a6b55; font-size: 12px; }
+.risk-icon { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 8px; background: #fff1e8; color: #c56226; }
+.risk-copy { margin: 0 0 4px; padding: 14px; border: 1px solid #f2dfd0; border-radius: 6px; background: #fffaf6; color: #6c5b50; font-size: 13px; line-height: 1.65; }
+.risk-copy p { margin: 0; }
+.risk-copy p + p { margin-top: 9px; color: #8b786b; font-size: 12px; }
+.danger-confirm-button { padding: 8px 14px; border: 1px solid #c56226; border-radius: 5px; background: #c56226; color: #fff; font-size: 13px; }
+.danger-confirm-button:hover { border-color: #ae501c; background: #ae501c; }
+
 .create-dialog h2 { margin: 0; font-size: 17px; }
 .device-dialog { max-height: min(90dvh, 760px); overflow: auto; }
 .device-dialog header p { margin: 5px 0 0; color: #93a1af; font-size: 12px; }
