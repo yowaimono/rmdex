@@ -1,7 +1,7 @@
 {
   "name": "rmdex",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -26,7 +26,9 @@
     "mcp": "tsx server/control-mcp.ts",
     "test:mcp": "node --import tsx --test server/control-mcp.test.mjs",
     "pc:window:build": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-pc-window.ps1",
-    "test:pc": "node --test pc/launcher.test.mjs"
+    "test:pc": "node --test pc/launcher.test.mjs",
+    "release:android": "npm run android:sync && cd android && gradlew.bat assembleDebug",
+    "release:pc": "npm run pc:build && npm run pc:window:build && powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-pc-msi.ps1"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.3",

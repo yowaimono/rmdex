@@ -16,10 +16,17 @@ internal static class Program {
     }
 }
 internal sealed class Dashboard : Form {
-    private readonly string root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", ".."));
+    private readonly string root = ResolveRoot();
     private readonly WebView2 web = new WebView2();
     private readonly Label loading = new Label();
     private string origin;
+    private static string ResolveRoot() {
+        var configured = Environment.GetEnvironmentVariable("RMDEX_PROJECT_ROOT");
+        if (!String.IsNullOrWhiteSpace(configured) && Directory.Exists(configured)) return Path.GetFullPath(configured);
+        var baseDir = AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
+        var candidate = Path.GetFullPath(Path.Combine(baseDir, "..", ".."));
+        return Directory.Exists(Path.Combine(candidate, "pc")) ? candidate : baseDir;
+    }
     public Dashboard() {
         Text = "rmdex PC";
         var area = Screen.PrimaryScreen.WorkingArea;
@@ -49,6 +56,10 @@ internal sealed class Dashboard : Form {
             origin = "http://127.0.0.1:" + port;
             if (!await Task.Run(() => Ready())) {
                 var node = Environment.GetEnvironmentVariable("RMDEX_NODE");
+                if (String.IsNullOrWhiteSpace(node)) {
+                    var bundled = Path.Combine(root, "runtime", "node.exe");
+                    if (File.Exists(bundled)) node = bundled;
+                }
                 if (String.IsNullOrWhiteSpace(node)) node = "node.exe";
                 var info = new ProcessStartInfo(node, "--import tsx pc/server.ts");
                 info.WorkingDirectory = root; info.UseShellExecute = false; info.CreateNoWindow = true;
