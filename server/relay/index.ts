@@ -251,7 +251,7 @@ const server = createServer(async (req, res) => {
     if (!device) { json(res, 401, { error: '设备已撤销' }); return }
     if (!['GET', 'POST'].includes(req.method || '')) { json(res, 405, { error: 'Method not allowed' }); return }
     const allowed = req.method === 'GET'
-      ? /^\/api\/(?:models|settings|threads(?:\/[a-zA-Z0-9-]+)?|images\/[a-f0-9-]+)$/.test(url.pathname)
+      ? /^\/api\/(?:models|settings|threads(?:\/[a-zA-Z0-9-]+(?:\/status)?)?|images\/[a-f0-9-]+)$/.test(url.pathname)
       : /^\/api\/(?:settings|threads|threads\/[a-zA-Z0-9-]+\/(?:send|stop|history)|approvals\/[a-zA-Z0-9-]+)$/.test(url.pathname)
     if (!allowed || url.search) { json(res, 404, { error: 'Not found' }); return }
     const result = await rpc(device.id, url.pathname + url.search, req.method!, req.method === 'POST' ? await body(req) : undefined)

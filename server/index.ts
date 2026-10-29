@@ -316,18 +316,26 @@ const server = createServer(async (req, res) => {
       const list = await rpc('thread/list', { limit: 100, sortKey: 'updated_at' }) as { data: Array<{ id: string }> }
       const listed = new Set(list.data.map(thread => thread.id))
       result = { ...list, data: [...[...newThreads.values()].filter(thread => !listed.has(String(thread.id))), ...list.data] }
+    } else if (/^\/api\/threads\/[a-zA-Z0-9-]+\/status$/.test(url.pathname)) {
+      const threadId = url.pathname.split('/')[3]!
+      const live = liveTurns.get(threadId)
+      result = {
+        threadId,
+        activeTurnId: activeTurns.get(threadId) || null,
+        approvals: [...approvals.entries()]
+          .filter(([, request]) => request.params.threadId === threadId)
+          .map(([id, request]) => ({ id, method: request.method, params: request.params })),
+        lastTurn: live ? { id: live.id, status: live.status, error: live.error } : null,
+        live: live ? { turnId: live.id, status: live.status, error: live.error, sentText: live.sentText, items: [...live.items.values()] } : null,
+      }
     } else if (/^\/api\/threads\/[a-zA-Z0-9-]+$/.test(url.pathname)) {
       const threadId = url.pathname.split('/').pop()
+      if (sharedMode && !newThreads.has(threadId!)) await subscribeToThread(threadId!)
       try { result = await rpc('thread/read', { threadId, includeTurns: true }) }
       catch (error) {
         const thread = newThreads.get(threadId!)
         if (!thread) throw error
         result = { thread: { ...thread, turns: [] } }
-      }
-      const initialRead = result as { thread?: { turns?: Array<{ id: string; status: string }> } }
-      if (sharedMode && initialRead.thread?.turns?.length && !newThreads.has(threadId!)) {
-        await subscribeToThread(threadId!)
-        result = await rpc('thread/read', { threadId, includeTurns: true })
       }
       const currentRead = result as { thread?: { turns?: Array<{ id: string; status: string }> } }
       const runningTurn = currentRead.thread?.turns?.findLast(turn => turn.status === 'inProgress')

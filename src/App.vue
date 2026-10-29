@@ -78,12 +78,22 @@ const selectedModel = ref<string | null>(null)
 const selectedEffort = ref<string | null>(null)
 const modelLoading = ref(false)
 const desktopDefaultModel = '__rmdex_desktop_default__'
-const lastTurn = ref<{ status: string; error?: { message?: string } } | null>(null)
+const lastTurn = ref<{ id?: string; status: string; error?: { message?: string } } | null>(null)
 type Approval = { id: string; method: string; params: { command?: string; reason?: string; cwd?: string; grantRoot?: string } }
 const pendingApprovals = ref<Approval[]>([])
 let poll: ReturnType<typeof setInterval> | undefined
 let pollBusy = false
-type ReadResult = { thread: Thread; activeTurnId: string | null; approvals: Approval[]; lastTurn?: { status: string; error?: { message?: string } } | null; page?: { hasMore: boolean; nextCursor: string | null } }
+type ReadResult = { thread: Thread; activeTurnId: string | null; approvals: Approval[]; lastTurn?: { id?: string; status: string; error?: { message?: string } } | null; page?: { hasMore: boolean; nextCursor: string | null } }
+type ThreadStatus = {
+  threadId: string
+  activeTurnId: string | null
+  approvals: Approval[]
+  lastTurn?: { id?: string; status: string; error?: { message?: string } } | null
+  live?: { turnId: string; status: string; error?: { message?: string }; sentText?: string; items: Turn['items'] } | null
+}
+const threadCache = new Map<string, ReadResult>()
+const threadRequests = new Map<string, Promise<ReadResult>>()
+let modelsLoadedKey = ''
 const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true })
 const defaultLink = markdown.renderer.rules.link_open || ((tokens, idx, options, _env, renderer) => renderer.renderToken(tokens, idx, options))
 markdown.renderer.rules.link_open = (tokens, idx, options, env, renderer) => {
@@ -103,6 +113,50 @@ const workLabel = computed(() => {
   const labels: Record<string, string> = { commandExecution: '正在执行命令', mcpToolCall: '正在调用工具', dynamicToolCall: '正在调用工具', webSearch: '正在搜索', fileChange: '正在处理文件', agentMessage: '正在回复' }
   return (last && labels[last.type]) || 'Codex 正在工作'
 })
+function threadCacheKey(id: string) {
+  return `${remoteDevice.value?.id || 'local'}:${desktopMode.value ? 'desktop' : 'app-server'}:${id}`
+}
+function cloneRead(result: ReadResult): ReadResult {
+  return structuredClone(result)
+}
+function rememberThreadRead(result: ReadResult) {
+  threadCache.set(threadCacheKey(result.thread.id), cloneRead(result))
+}
+async function readThread(id: string, force = false) {
+  const key = threadCacheKey(id)
+  if (!force) {
+    const cached = threadCache.get(key)
+    if (cached) return cloneRead(cached)
+  }
+  const existing = threadRequests.get(key)
+  if (existing) return existing.then(cloneRead)
+  const request = get<ReadResult>(`/api/threads/${id}`)
+    .then(result => { rememberThreadRead(result); return result })
+    .finally(() => threadRequests.delete(key))
+  threadRequests.set(key, request)
+  return request.then(cloneRead)
+}
+function mergeThreadStatus(result: ThreadStatus) {
+  if (!selected.value || selected.value.id !== result.threadId) return
+  const turns = selected.value.turns ||= []
+  const live = result.live
+  if (live) {
+    let turn = turns.find(item => item.id === live.turnId)
+    if (!turn) { turn = { id: live.turnId, status: live.status, items: [] }; turns.push(turn) }
+    turn.status = live.status
+    const hasUserInput = live.sentText && turn.items.some(item => item.type === 'userMessage' && item.content?.some(part => part.text === live.sentText))
+    if (live.sentText && !hasUserInput) turn.items.unshift({ id: `rmdex-input-${live.turnId}`, type: 'userMessage', content: [{ type: 'text', text: live.sentText }] })
+    for (const item of live.items || []) {
+      const index = turn.items.findIndex(existing => existing.id && existing.id === item.id)
+      if (index < 0) turn.items.push(item)
+      else turn.items[index] = item
+    }
+  }
+  activeTurnId.value = result.activeTurnId
+  pendingApprovals.value = result.approvals || []
+  lastTurn.value = result.lastTurn || null
+  rememberThreadRead({ thread: selected.value, activeTurnId: activeTurnId.value, approvals: pendingApprovals.value, lastTurn: lastTurn.value, page: threadCache.get(threadCacheKey(result.threadId))?.page })
+}
 function applyRead(result: ReadResult) {
   if (desktopMode.value && selected.value?.id === result.thread.id) {
     result.thread.turns = [...new Map([...(selected.value.turns || []), ...(result.thread.turns || [])].map(turn => [turn.id, turn])).values()]
@@ -125,6 +179,7 @@ function applyRead(result: ReadResult) {
   const pending = pendingMessages.value[result.thread.id]
   if (pending && timeline(result.thread.turns || []).filter(entry => entry.role === 'user' && entry.text === pending.text).length > pending.previousCount) delete pendingMessages.value[result.thread.id]
   if (desktopMode.value && !activeTurnId.value && pendingMessages.value[result.thread.id] && Date.now() < queuedUntil) activeTurnId.value = 'desktop-queued'
+  rememberThreadRead({ thread: selected.value, activeTurnId: activeTurnId.value, approvals: pendingApprovals.value, lastTurn: lastTurn.value, page: result.page })
 }
 function toolSummary(items: { type: string; command?: unknown; commandActions?: unknown; tool?: unknown; name?: unknown; server?: unknown; namespace?: unknown; query?: unknown; path?: unknown }[]) {
   const names: Record<string, string> = { commandExecution: '执行命令', mcpToolCall: '调用工具', dynamicToolCall: '调用工具', functionCallOutput: '工具结果', fileChange: '修改文件', webSearch: '搜索网页', imageView: '查看图片', plan: '执行计划', contextCompaction: '上下文压缩' }
@@ -175,6 +230,9 @@ async function bindOnlineDevice() {
   return true
 }
 async function loadModels() {
+  const deviceKey = remoteDevice.value?.id || 'local'
+  const requestedKey = `${desktopMode.value ? 'desktop' : 'app-server'}:${deviceKey}`
+  if (modelsLoadedKey === requestedKey) return
   modelLoading.value = true
   try {
     const result = await get<{ data: ModelOption[]; capabilities?: typeof defaultCapabilities; projects?: typeof desktopProjects.value }>('/api/models')
@@ -184,7 +242,6 @@ async function loadModels() {
     if (desktopMode.value && capabilities.value.models) {
       models.value = [{ id: desktopDefaultModel, model: '', displayName: '沿用 Desktop', description: '使用会话的现有模型，新对话使用桌面默认设置', hidden: false, isDefault: true, defaultReasoningEffort: '', supportedReasoningEfforts: [] }, ...models.value]
     }
-    const deviceKey = remoteDevice.value?.id || 'local'
     const settingsKey = desktopMode.value ? `desktop:${deviceKey}` : deviceKey
     const savedModel = localStorage.getItem(`rmdex-model:${settingsKey}`)
     const savedEffort = localStorage.getItem(`rmdex-effort:${settingsKey}`)
@@ -194,6 +251,7 @@ async function loadModels() {
       ? savedEffort
       : nextModel?.defaultReasoningEffort || nextModel?.supportedReasoningEfforts[0]?.reasoningEffort || null
     selectedEffort.value = nextEffort
+    modelsLoadedKey = requestedKey
   } catch (e) {
     models.value = []; selectedModel.value = null; selectedEffort.value = null
     capabilities.value = { ...defaultCapabilities, models: false, permissions: false, stop: false, send: false, create: false }
@@ -259,16 +317,29 @@ async function refresh() {
 
 async function openThread(thread: Thread) {
   const version = ++selectionVersion
-  threadLoading.value = true; threadLoadError.value = ''; historyCursor.value = null; historyLoading.value = false; queuedUntil = 0
+  const cached = threadCache.get(threadCacheKey(thread.id))
+  threadLoading.value = !cached; threadLoadError.value = ''; historyCursor.value = cached?.page?.hasMore ? cached.page.nextCursor : null; historyLoading.value = false; queuedUntil = 0
   selected.value = thread; activeTurnId.value = null; pendingApprovals.value = []; lastTurn.value = null; mobileDetail.value = true; error.value = ''
+  if (cached) {
+    applyRead(cloneRead(cached))
+    threadLoading.value = false
+    void readThread(thread.id, true).then(result => {
+      if (version !== selectionVersion) return
+      applyRead(result)
+      historyCursor.value = result.page?.hasMore ? result.page.nextCursor : null
+    }).catch(e => { if (version === selectionVersion) error.value = e instanceof Error ? e.message : String(e) })
+    await nextTick()
+    await scrollToLatest()
+  }
   if (thread.desktopDraft) {
     threadLoading.value = false
     await nextTick()
     document.querySelector<HTMLTextAreaElement>('.composer textarea')?.focus()
     return
   }
+  if (cached) return
   try {
-    const result = await get<ReadResult>(`/api/threads/${thread.id}`)
+    const result = await readThread(thread.id)
     if (version === selectionVersion) { applyRead(result); historyCursor.value = result.page?.hasMore ? result.page.nextCursor : null; threadLoading.value = false; await scrollToLatest() }
   }
   catch (e) { if (version === selectionVersion) threadLoadError.value = e instanceof Error ? e.message : String(e) }
@@ -301,8 +372,13 @@ async function updateThread() {
   const follow = element ? element.scrollHeight - element.scrollTop - element.clientHeight < 100 : false
   pollBusy = true
   try {
-    const result = await get<ReadResult>(`/api/threads/${id}`)
-    if (version === selectionVersion) { applyRead(result); if (follow) await scrollToLatest() }
+    if (desktopMode.value) {
+      const result = await readThread(id, true)
+      if (version === selectionVersion) { applyRead(result); if (follow) await scrollToLatest() }
+    } else {
+      const result = await get<ThreadStatus>(`/api/threads/${id}/status`)
+      if (version === selectionVersion) { mergeThreadStatus(result); if (follow) await scrollToLatest() }
+    }
   } catch (e) { if (version === selectionVersion) error.value = e instanceof Error ? e.message : String(e) }
   finally { pollBusy = false }
 }
