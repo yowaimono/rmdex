@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { Capacitor } from '@capacitor/core'
 import { App as NativeApp } from '@capacitor/app'
+import { CapacitorBarcodeScanner, CapacitorBarcodeScannerTypeHint } from '@capacitor/barcode-scanner'
 import MarkdownIt from 'markdown-it'
 import { ArrowLeft, ArrowUp, ChevronRight, CircleAlert, LoaderCircle, Menu, MessageSquare, Monitor, PanelLeftClose, Plus, RefreshCw, Search, Square, Wrench, X, QrCode, Copy, Smartphone, Trash2, ShieldAlert } from 'lucide-vue-next'
 import QRCode from 'qrcode'
@@ -42,6 +43,9 @@ const pairInput = ref('')
 const pairRequests = ref<Array<{ id: string; deviceId: string; name: string; createdAt: number }>>([])
 const mobilePairing = ref(false)
 const pairLanding = ref(false)
+const scanningPair = ref(false)
+const pairApprovalPage = ref(false)
+const pairApprovalState = ref<'waiting' | 'denied' | 'expired' | 'error'>('waiting')
 let selectionVersion = 0
 const mobileDetail = ref(false)
 const sidebarOpen = ref(true)
@@ -382,19 +386,71 @@ async function claimPair(code = pairInput.value) {
     if (response.status !== 202) throw new Error(result.error || '配对失败')
     history.replaceState({}, '', location.pathname)
     pairInput.value = ''
+    pairLanding.value = false
+    showDevices.value = false
+    pairApprovalPage.value = true
+    pairApprovalState.value = 'waiting'
     for (let attempt = 0; attempt < 150; attempt++) {
       const status = await fetch(apiUrl('/api/pair/status'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestId: result.requestId }) })
       const state = await status.json()
       if (state.status === 'approved' && state.token) {
         clientToken.value = state.token; localStorage.setItem('rmdex-client-token', state.token)
-        pairLanding.value = false; showDevices.value = false; mobilePairing.value = false; await refresh(); return
+        pairApprovalPage.value = false; pairLanding.value = false; showDevices.value = false; await refresh(); return
       }
-      if (state.status === 'denied' || state.status === 'expired') throw new Error(state.status === 'denied' ? '电脑端拒绝了配对请求' : '配对申请已过期')
+      if (state.status === 'denied') { pairApprovalState.value = 'denied'; pairError.value = '电脑端拒绝了配对请求'; return }
+      if (state.status === 'expired') { pairApprovalState.value = 'expired'; pairError.value = '配对申请已过期'; return }
       await new Promise(resolve => setTimeout(resolve, 2000))
     }
+    pairApprovalState.value = 'error'
     throw new Error('等待电脑确认超时，请重新扫码')
-  } catch (e) { showDevices.value = true; pairError.value = e instanceof Error ? e.message : String(e) }
-  finally { mobilePairing.value = false }
+  } catch (e) {
+    pairApprovalPage.value = true; showDevices.value = false; pairApprovalState.value = 'error'; pairError.value = e instanceof Error ? e.message : String(e)
+  } finally { mobilePairing.value = false }
+}
+function returnToPairingEntry() {
+  pairApprovalPage.value = false
+  pairApprovalState.value = 'waiting'
+  pairError.value = ''
+  pairLanding.value = true
+  showDevices.value = true
+}
+async function scanPairCode() {
+  if (scanningPair.value) return
+  pairError.value = ''
+  scanningPair.value = true
+  try {
+    const result = await CapacitorBarcodeScanner.scanBarcode({
+      hint: CapacitorBarcodeScannerTypeHint.QR_CODE,
+      scanInstructions: '将电脑端二维码放入取景框内',
+      scanText: '扫描二维码',
+      cancelButtonAccessibilityLabel: '取消扫码',
+      torchButtonOnAccessibilityLabel: '关闭闪光灯',
+      torchButtonOffAccessibilityLabel: '打开闪光灯',
+    })
+    const value = result.ScanResult?.trim()
+    if (!value) return
+    if (/^https?:\/\//i.test(value)) {
+      await handlePairLink(value)
+      return
+    }
+    const code = new URLSearchParams(value.replace(/^#/, '')).get('pair')
+    if (code) {
+      await claimPair(code)
+      return
+    }
+    if (/^[A-Za-z0-9]{32}$/.test(value)) {
+      pairInput.value = value
+      await claimPair(value)
+      return
+    }
+    throw new Error('二维码不是有效的 rmdex 配对二维码')
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e)
+    if (!/cancel|canceled|cancelled|取消/i.test(message)) {
+      pairError.value = message
+      if (pairApprovalPage.value) pairApprovalState.value = 'error'
+    }
+  } finally { scanningPair.value = false }
 }
 async function decidePair(requestId: string, decision: 'approve' | 'deny') {
   try { await adminFetch(`/api/pair-requests/${requestId}`, 'POST', { decision }); await loadDevices() }
@@ -599,6 +655,7 @@ onUnmounted(() => { if (poll) clearInterval(poll); void appUrlListener?.remove()
     </main>
     <div v-if="showFullAccessConfirm" class="modal-backdrop" @click.self="showFullAccessConfirm = false"><section class="create-dialog risk-dialog" role="dialog" aria-modal="true" aria-labelledby="full-access-title" @keydown.esc="showFullAccessConfirm = false"><header><div class="risk-heading"><span class="risk-icon"><ShieldAlert :size="19" /></span><div><h2 id="full-access-title">确认使用完全访问</h2><p>这次消息将跳过 Codex 审批。</p></div></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="showFullAccessConfirm = false"><X :size="18" /></button></header><div class="risk-copy"><p>完全访问模式允许 Codex 直接执行命令、修改工作目录中的文件，并访问电脑上的网络资源。</p><p>只在你明确知道这条消息会做什么时继续。你也可以取消后切换为“请求审批”。</p></div><div class="dialog-actions"><button type="button" class="cancel-button" @click="showFullAccessConfirm = false">取消</button><button type="button" class="danger-confirm-button" @click="showFullAccessConfirm = false; fullAccessConfirmed = true; send()">继续发送</button></div></section></div>
     <div v-if="showCreate" class="modal-backdrop" @click.self="!creating && (showCreate = false)"><section class="create-dialog" role="dialog" aria-modal="true" aria-labelledby="create-title" @keydown.esc="!creating && (showCreate = false)"><header><h2 id="create-title">新建对话</h2><button class="icon-button" type="button" title="关闭" aria-label="关闭" :disabled="creating" @click="showCreate = false"><X :size="18" /></button></header><form @submit.prevent="createThread"><template v-if="desktopMode"><label>项目</label><div class="desktop-project-options"><button type="button" :class="{ chosen: !createProject }" @click="createProject = ''">独立会话</button><button v-for="project in desktopProjects" :key="project.id" type="button" :class="{ chosen: createProject === project.id }" @click="createProject = project.id">{{ project.name || project.path }}</button></div></template><template v-else><label for="working-directory">工作目录</label><input id="working-directory" v-model="createPath" required autocomplete="off" placeholder="例如 D:\WorkSpace\rmdex" /></template><p v-if="createError" class="create-error" role="alert">{{ createError }}</p><div class="dialog-actions"><button type="button" class="cancel-button" :disabled="creating" @click="showCreate = false">取消</button><button type="submit" class="create-button" :disabled="creating || (!desktopMode && !createPath.trim())">{{ creating ? '创建中…' : '创建对话' }}</button></div></form></section></div>
+    <div v-if="pairApprovalPage" class="pair-status-backdrop"><section class="pair-status-page" role="dialog" aria-modal="true" aria-labelledby="pair-status-title"><button class="icon-button pair-status-close" type="button" title="返回设备连接" aria-label="返回设备连接" @click="returnToPairingEntry"><X :size="18" /></button><div class="pair-status-icon" :class="`is-${pairApprovalState}`"><LoaderCircle v-if="pairApprovalState === 'waiting'" :size="28" class="working-spinner" /><CircleAlert v-else :size="28" /></div><h2 id="pair-status-title">{{ pairApprovalState === 'waiting' ? '等待电脑端确认' : pairApprovalState === 'denied' ? '配对请求未通过' : pairApprovalState === 'expired' ? '配对请求已过期' : '配对暂时没有完成' }}</h2><p class="pair-status-copy">{{ pairApprovalState === 'waiting' ? '配对申请已经发送到电脑端，请在 Codex Desktop 中允许这台手机连接。' : pairError }}</p><div v-if="pairApprovalState === 'waiting'" class="pair-status-waiting"><span class="online"></span><span>正在等待电脑端审批</span></div><div v-else class="pair-status-actions"><button class="create-button" type="button" :disabled="scanningPair" @click="scanPairCode"><QrCode :size="16" />重新扫描二维码</button><button class="cancel-button" type="button" @click="returnToPairingEntry">手动输入配对码</button></div><form v-if="pairApprovalState !== 'waiting'" class="pair-status-manual" @submit.prevent="claimPair()"><label for="pair-status-code">输入 32 位配对码</label><div><input id="pair-status-code" v-model="pairInput" maxlength="32" inputmode="text" autocomplete="off" placeholder="输入配对码" /><button class="create-button" type="submit" :disabled="pairInput.length !== 32 || mobilePairing">继续</button></div></form></section></div>
     <div v-if="showDevices" class="modal-backdrop" @click.self="showDevices = false"><section class="create-dialog device-dialog" role="dialog" aria-modal="true" aria-labelledby="devices-title" @keydown.esc="showDevices = false"><header><div><h2 id="devices-title">设备连接</h2><p>管理 Codex 电脑与手机配对</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="showDevices = false"><X :size="18" /></button></header>
       <form v-if="!adminToken && !pairLanding" class="admin-login" @submit.prevent="loginAdmin"><label for="admin-password">设备管理员密码</label><p class="dialog-hint">登录后才能管理 Codex 电脑、生成手机配对码和审批手机连接。</p><input id="admin-password" v-model="adminPassword" type="password" autocomplete="current-password" required placeholder="输入服务器管理员密码" /><button class="create-button" type="submit">登录管理设备</button></form>
       <template v-else-if="adminToken"><div class="admin-status"><span class="online"></span><span>管理员已验证</span></div><form class="register-device" @submit.prevent="registerDevice"><input v-model="deviceName" aria-label="设备名称" maxlength="80" /><button class="create-button" type="submit"><Plus :size="15" />注册此电脑</button></form>
@@ -607,7 +664,7 @@ onUnmounted(() => { if (poll) clearInterval(poll); void appUrlListener?.remove()
         <div class="device-list"><div v-for="device in devices" :key="device.id" class="device-row"><span class="device-icon"><Monitor :size="16" /></span><div class="device-copy"><strong>{{ device.name }}</strong><small>{{ device.online ? '在线' : '离线' }}</small></div><span class="online" :class="{ offline: !device.online }"></span><button class="icon-button" :class="{ 'connect-device-button': remoteDevice?.id !== device.id }" title="连接此设备" aria-label="连接此设备" :disabled="!device.online" @click="connectDevice(device.id)"><MessageSquare :size="16" /></button><button class="icon-button" title="生成手机配对码" aria-label="生成手机配对码" @click="createPair(device.id)"><Smartphone :size="16" /></button><button class="icon-button revoke-button" title="撤销设备" aria-label="撤销设备" @click="revokeDevice(device.id)"><Trash2 :size="15" /></button></div><p v-if="!devices.length" class="device-empty">尚未注册 Codex 电脑</p></div>
         <div v-if="pairCode" class="pair-result"><img :src="pairQr" alt="手机扫码配对二维码" /><div><strong>手机扫码配对</strong><p>二维码和配对码 3 分钟内有效，只能使用一次。</p><code>{{ pairCode }}</code><button class="copy-button" type="button" @click="copyValue(pairUrl)"><Copy :size="15" />复制配对链接</button></div></div>
       </template>
-      <template v-else-if="pairLanding"><div class="mobile-pair-intro"><Smartphone :size="22" /><div><strong>申请连接 Codex 电脑</strong><p>配对申请会发送到电脑端，等待管理员允许后即可使用。</p></div></div><form class="claim-pair" @submit.prevent="claimPair()"><label for="pair-code">二维码无法自动识别时，输入配对码</label><div><input id="pair-code" v-model="pairInput" maxlength="32" placeholder="输入配对码" /><button class="create-button" type="submit" :disabled="pairInput.length !== 32">配对</button></div></form><p v-if="mobilePairing && !pairError" class="pair-waiting" role="status"><LoaderCircle :size="15" class="working-spinner" />配对申请已发送，请在电脑端允许此手机连接。</p></template>
+      <template v-else-if="pairLanding"><div class="mobile-pair-intro"><Smartphone :size="22" /><div><strong>申请连接 Codex 电脑</strong><p>配对申请会发送到电脑端，等待管理员允许后即可使用。</p></div></div><button class="create-button scan-pair-button" type="button" :disabled="scanningPair || mobilePairing" @click="scanPairCode"><QrCode :size="16" />{{ scanningPair ? '正在打开扫码…' : '扫描电脑二维码' }}</button><form class="claim-pair" @submit.prevent="claimPair()"><label for="pair-code">二维码无法识别时，输入配对码</label><div><input id="pair-code" v-model="pairInput" maxlength="32" placeholder="输入配对码" /><button class="create-button" type="submit" :disabled="pairInput.length !== 32 || mobilePairing">配对</button></div></form><p v-if="mobilePairing && !pairError" class="pair-waiting" role="status"><LoaderCircle :size="15" class="working-spinner" />配对申请已发送，请在电脑端允许此手机连接。</p></template>
       <p v-if="pairError" class="create-error" role="alert">{{ pairError }}</p>
     </section></div>
   </div>
