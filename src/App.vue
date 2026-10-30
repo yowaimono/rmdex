@@ -1,9 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
-import { Capacitor } from '@capacitor/core'
+import { Capacitor, registerPlugin } from '@capacitor/core'
 import { App as NativeApp } from '@capacitor/app'
 import { LocalNotifications } from '@capacitor/local-notifications'
-import { PushNotifications } from '@capacitor/push-notifications'
 import { CapacitorBarcodeScanner, CapacitorBarcodeScannerTypeHint } from '@capacitor/barcode-scanner'
 import MarkdownIt from 'markdown-it'
 import { ArrowLeft, ArrowUp, ChevronRight, CircleAlert, Ellipsis, LoaderCircle, Menu, MessageSquare, Monitor, PanelLeftClose, Pencil, Plus, RefreshCw, Search, Square, Wrench, X, QrCode, Copy, Smartphone, Trash2, ShieldAlert } from 'lucide-vue-next'
@@ -18,6 +17,7 @@ import { loadThreadCache, queueThreadCacheWrite } from './thread-cache'
 type Thread = { id: string; name?: string | null; preview?: string; cwd?: string; updatedAt?: number; status?: { type: string }; turns?: Turn[]; desktopDraft?: { projectId: string | null; deviceKey: string; preparing?: boolean } }
 const apiBase = Capacitor.isNativePlatform() ? 'https://code.kyeai.xyz' : ''
 const apiUrl = (path: string) => path.startsWith('http://') || path.startsWith('https://') ? path : `${apiBase}${path}`
+const RmdexBackgroundService = registerPlugin<{ start(options: { relayUrl: string; pushToken: string }): Promise<void>; stop(): Promise<void> }>('RmdexBackgroundService')
 let appUrlListener: { remove: () => Promise<void> } | undefined
 const threads = ref<Thread[]>([])
 const localDraftThreads = ref<Thread[]>([])
@@ -96,8 +96,6 @@ let poll: ReturnType<typeof setInterval> | undefined
 let pollBusy = false
 let appStateListener: { remove: () => Promise<void> } | undefined
 let notificationListener: { remove: () => Promise<void> } | undefined
-let pushRegistrationListener: { remove: () => Promise<void> } | undefined
-let pushActionListener: { remove: () => Promise<void> } | undefined
 let appActive = true
 const trackedTasks = new Map<string, { turnId: string; text: string; name: string }>()
 const cacheHydratedKeys = new Set<string>()
@@ -205,27 +203,30 @@ async function setupNotifications() {
     })
   } catch { /* Notifications are optional on devices that deny permission. */ }
 }
-async function setupPushNotifications() {
-  if (!Capacitor.isNativePlatform() || !clientToken.value || pushRegistrationListener) return
+function installationId() {
+  const key = 'rmdex-installation-id'
+  let value = localStorage.getItem(key) || ''
+  if (!/^[A-Za-z0-9_-]{16,128}$/.test(value)) {
+    value = crypto.randomUUID().replace(/[^A-Za-z0-9_-]/g, '')
+    localStorage.setItem(key, value)
+  }
+  return value
+}
+async function setupBackgroundNotifications() {
+  if (!Capacitor.isNativePlatform() || !clientToken.value) return
   try {
-    const permission = await PushNotifications.checkPermissions()
-    if (permission.receive !== 'granted') {
-      const requested = await PushNotifications.requestPermissions()
-      if (requested.receive !== 'granted') return
+    let pushToken = localStorage.getItem('rmdex-background-push-token') || ''
+    if (!pushToken) {
+      const result = await post('/api/push/register', { installationId: installationId(), clientName: 'rmdex Android' }) as { pushToken: string }
+      pushToken = result.pushToken
+      localStorage.setItem('rmdex-background-push-token', pushToken)
     }
-    await PushNotifications.createChannel({ id: 'rmdex-tasks', name: '任务完成', description: 'Codex 任务完成提醒', importance: 5, visibility: 1 })
-    pushRegistrationListener = await PushNotifications.addListener('registration', token => {
-      void post('/api/push/register', { token: token.value, clientName: 'rmdex Android' }).catch(() => {})
-    })
-    pushActionListener = await PushNotifications.addListener('pushNotificationActionPerformed', async action => {
-      const threadId = typeof action.notification.data?.threadId === 'string' ? action.notification.data.threadId : ''
-      if (!threadId) return
-      await refresh()
-      const thread = threads.value.find(item => item.id === threadId)
-      if (thread) await openThread(thread)
-    })
-    await PushNotifications.register()
-  } catch { /* FCM is optional until the Android Firebase project is configured. */ }
+    await RmdexBackgroundService.start({ relayUrl: apiBase, pushToken })
+  } catch { /* The foreground service is optional on web and older Android installs. */ }
+}
+function stopBackgroundNotifications() {
+  if (Capacitor.isNativePlatform()) void RmdexBackgroundService.stop().catch(() => {})
+  localStorage.removeItem('rmdex-background-push-token')
 }
 function maybeNotifyTaskComplete(result: ThreadStatus) {
   const task = trackedTasks.get(result.threadId)
@@ -342,7 +343,7 @@ function storeSession(kind: AuthKind, result: { accessToken?: string; refreshTok
     localStorage.setItem('rmdex-client-token', access)
     localStorage.setItem('rmdex-client-access-token', access)
     if (result.refreshToken) localStorage.setItem('rmdex-client-refresh-token', result.refreshToken)
-    if (Capacitor.isNativePlatform()) void setupPushNotifications()
+    if (Capacitor.isNativePlatform()) void setupBackgroundNotifications()
   }
 }
 function clearSession(kind: AuthKind) {
@@ -351,6 +352,8 @@ function clearSession(kind: AuthKind) {
     sessionStorage.removeItem('rmdex-admin-token')
     localStorage.removeItem('rmdex-admin-access-token'); localStorage.removeItem('rmdex-admin-refresh-token')
   } else {
+    void post('/api/push/unregister', { installationId: installationId() }).catch(() => {})
+    stopBackgroundNotifications()
     clientToken.value = ''; clientRefreshToken.value = ''
     localStorage.removeItem('rmdex-client-token'); localStorage.removeItem('rmdex-client-access-token'); localStorage.removeItem('rmdex-client-refresh-token')
   }
@@ -735,7 +738,7 @@ async function scanPairCode() {
     const value = result.ScanResult?.trim()
     if (!value) return
     if (/^https?:\/\//i.test(value)) {
-      await handlePairLink(value)
+      await handleAppUrl(value)
       return
     }
     const code = new URLSearchParams(value.replace(/^#/, '')).get('pair')
@@ -904,35 +907,43 @@ async function decide(approval: Approval, decision: 'accept' | 'decline') {
   catch (e) { error.value = e instanceof Error ? e.message : String(e) }
 }
 function date(value?: number) { return value ? new Date(value * 1000).toLocaleDateString() : '' }
-async function handlePairLink(rawUrl: string) {
+async function handleAppUrl(rawUrl: string) {
   const url = new URL(rawUrl)
-  const code = new URLSearchParams(url.hash.slice(1)).get('pair')
-  if (!code) return
-  pairLanding.value = true
-  showDevices.value = true
-  if (!Capacitor.isNativePlatform()) history.replaceState({}, '', location.pathname)
-  await claimPair(code)
+  const params = new URLSearchParams(url.hash.slice(1))
+  const code = params.get('pair')
+  if (code) {
+    pairLanding.value = true
+    showDevices.value = true
+    if (!Capacitor.isNativePlatform()) history.replaceState({}, '', location.pathname)
+    await claimPair(code)
+    return
+  }
+  const threadId = params.get('thread')
+  if (!threadId) return
+  await refresh()
+  const thread = threads.value.find(item => item.id === threadId)
+  if (thread) await openThread(thread)
 }
 onMounted(async () => {
   let handledLaunch = false
   for (const task of notificationTasks()) trackedTasks.set(task.threadId, { turnId: task.turnId, text: task.text, name: task.name })
   await setupNotifications()
-  if (clientToken.value) void setupPushNotifications()
+  if (clientToken.value) void setupBackgroundNotifications()
   if (Capacitor.isNativePlatform()) {
-    appUrlListener = await NativeApp.addListener('appUrlOpen', ({ url }) => { void handlePairLink(url) })
+    appUrlListener = await NativeApp.addListener('appUrlOpen', ({ url }) => { void handleAppUrl(url) })
     const launch = await NativeApp.getLaunchUrl()
-    if (launch?.url) { handledLaunch = true; await handlePairLink(launch.url) }
+    if (launch?.url) { handledLaunch = true; await handleAppUrl(launch.url) }
   }
   if (!handledLaunch) {
     const code = new URLSearchParams(location.hash.slice(1)).get('pair')
-    if (code) await handlePairLink(location.href)
+    if (code) await handleAppUrl(location.href)
     else if (Capacitor.isNativePlatform() && !clientToken.value) { pairLanding.value = true; showDevices.value = true }
     else void refresh()
   }
   poll = setInterval(() => { updateThread(); if (adminToken.value && showDevices.value) void loadDevices() }, 2000)
   if (adminToken.value) void loadDevices()
 })
-onUnmounted(() => { if (poll) clearInterval(poll); clearThreadLongPress(); void appUrlListener?.remove(); void appStateListener?.remove(); void notificationListener?.remove(); void pushRegistrationListener?.remove(); void pushActionListener?.remove() })
+onUnmounted(() => { if (poll) clearInterval(poll); clearThreadLongPress(); void appUrlListener?.remove(); void appStateListener?.remove(); void notificationListener?.remove() })
 </script>
 
 <template>

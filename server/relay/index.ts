@@ -1,4 +1,4 @@
-import { createHash, createSign, randomBytes, scrypt, timingSafeEqual } from 'node:crypto'
+import { createHash, randomBytes, scrypt, timingSafeEqual } from 'node:crypto'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { dirname, extname, join, normalize } from 'node:path'
@@ -9,10 +9,11 @@ type Device = { id: string; name: string; tokenHash: string; createdAt: number; 
 type Client = { tokenHash: string; deviceId: string; name: string; createdAt: number; lastSeenAt?: number; revoked?: boolean }
 type User = { id: string; username: string; passwordHash: string; role: 'admin'; createdAt: number; disabled?: boolean }
 type AuthSession = { id: string; familyId: string; userId: string; deviceId?: string; name?: string; accessHash: string; accessExpiresAt: number; refreshHash: string; refreshExpiresAt: number; usedRefreshHashes?: string[]; createdAt: number; lastSeenAt?: number; revoked?: boolean }
-type PushToken = { token: string; deviceId: string; platform: 'android'; clientName?: string; createdAt: number; lastSeenAt: number }
+type PushToken = { tokenHash: string; deviceId: string; installationId: string; platform: 'android'; clientName?: string; createdAt: number; lastSeenAt: number }
+type NotificationEvent = { id: string; deviceId: string; threadId: string; turnId: string; status: string; title: string; body: string; createdAt: number }
 type Pairing = { codeHash: string; deviceId: string; expiresAt: number }
 type PairRequest = { id: string; deviceId: string; name: string; createdAt: number; expiresAt: number; status: 'pending' | 'approved' | 'denied'; token?: string }
-type State = { devices: Device[]; clients: Client[]; pairings: Pairing[]; pairRequests: PairRequest[]; users: User[]; sessions: AuthSession[]; pushTokens: PushToken[] }
+type State = { devices: Device[]; clients: Client[]; pairings: Pairing[]; pairRequests: PairRequest[]; users: User[]; sessions: AuthSession[]; pushTokens: PushToken[]; notifications: NotificationEvent[] }
 type Credentials = { accessToken: string; refreshToken: string; expiresIn: number; user: { id: string; username: string }; token?: string; clientToken?: string; deviceId?: string }
 type Pending = { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
 
@@ -23,11 +24,12 @@ const adminUsername = (process.env.RMDEX_ADMIN_USERNAME || 'admin').trim().slice
 const adminPassword = process.env.RMDEX_ADMIN_PASSWORD || ''
 const statePath = process.env.RMDEX_STATE || '/data/state.json'
 const webRoot = process.env.RMDEX_WEB_ROOT || '/app/web'
-const state: State = { devices: [], clients: [], pairings: [], pairRequests: [], users: [], sessions: [], pushTokens: [] }
+const state: State = { devices: [], clients: [], pairings: [], pairRequests: [], users: [], sessions: [], pushTokens: [], notifications: [] }
 const approvedPairTokens = new Map<string, Credentials>()
 const deviceSockets = new Map<string, WebSocket>()
 const devicePending = new Map<string, Map<string, Pending>>()
 const authAttempts = new Map<string, { count: number; until: number }>()
+const notificationWaiters = new Map<string, Set<{ after: number; resolve: () => void; timer: NodeJS.Timeout }>>()
 const scryptAsync = promisify(scrypt)
 const ACCESS_TTL = 15 * 60_000
 const REFRESH_TTL = 30 * 24 * 60 * 60_000
@@ -125,7 +127,12 @@ async function load() {
     state.clients = Array.isArray(saved.clients) ? saved.clients : []
     state.users = Array.isArray(saved.users) ? saved.users : []
     state.sessions = Array.isArray(saved.sessions) ? saved.sessions : []
-    state.pushTokens = Array.isArray(saved.pushTokens) ? saved.pushTokens : []
+    state.pushTokens = Array.isArray(saved.pushTokens) ? saved.pushTokens.flatMap(item => {
+      if (typeof item.tokenHash === 'string') return [item]
+      if (typeof (item as { token?: string }).token === 'string') return [{ tokenHash: hash((item as { token: string }).token), deviceId: item.deviceId, installationId: `legacy-${item.deviceId}`, platform: 'android' as const, clientName: item.clientName, createdAt: item.createdAt, lastSeenAt: item.lastSeenAt }]
+      return []
+    }) : []
+    state.notifications = Array.isArray(saved.notifications) ? saved.notifications.filter(item => item && typeof item.deviceId === 'string' && typeof item.threadId === 'string') : []
     state.pairings = Array.isArray(saved.pairings) ? saved.pairings.filter(pair => pair.expiresAt > Date.now()) : []
     state.pairRequests = Array.isArray(saved.pairRequests) ? saved.pairRequests.filter(pair => pair.expiresAt > Date.now() && pair.status === 'pending') : []
   } catch (error) {
@@ -163,6 +170,12 @@ function clientFor(req: import('node:http').IncomingMessage) {
   if (client) client.lastSeenAt = Date.now()
   return client
 }
+function pushFor(req: import('node:http').IncomingMessage) {
+  const token = bearer(req)
+  const subscription = token ? state.pushTokens.find(item => equalHash(token, item.tokenHash)) : undefined
+  if (subscription) subscription.lastSeenAt = Date.now()
+  return subscription
+}
 function adminFor(req: import('node:http').IncomingMessage) {
   const session = accessSession(bearer(req))
   const user = session ? userForId(session.userId) : undefined
@@ -181,64 +194,21 @@ function rpc(deviceId: string, path: string, method: string, data?: unknown): Pr
   })
 }
 
-const fcmServiceAccountPath = process.env.RMDEX_FCM_SERVICE_ACCOUNT_PATH || ''
-const fcmServiceAccountJson = process.env.RMDEX_FCM_SERVICE_ACCOUNT_JSON || ''
-let fcmConfigPromise: Promise<{ projectId: string; clientEmail: string; privateKey: string } | undefined> | undefined
-let fcmAccess: { token: string; expiresAt: number } | undefined
-let fcmUnavailableLogged = false
 const taskWatchers = new Map<string, NodeJS.Timeout>()
-async function fcmConfig() {
-  if (!fcmConfigPromise) {
-    fcmConfigPromise = (async () => {
-      try {
-        const raw = fcmServiceAccountJson || (fcmServiceAccountPath ? await readFile(fcmServiceAccountPath, 'utf8') : '')
-        if (!raw) return undefined
-        const parsed = JSON.parse(raw) as { project_id?: string; client_email?: string; private_key?: string }
-        if (!parsed.project_id || !parsed.client_email || !parsed.private_key) throw new Error('FCM 服务账号缺少 project_id、client_email 或 private_key')
-        return { projectId: parsed.project_id, clientEmail: parsed.client_email, privateKey: parsed.private_key.replace(/\\n/g, '\n') }
-      } catch (error) {
-        if (!fcmUnavailableLogged) { console.warn(`[rmdex] FCM disabled: ${error instanceof Error ? error.message : 'invalid service account'}`); fcmUnavailableLogged = true }
-        return undefined
-      }
-    })()
+function notificationEvents(deviceId: string, after: number) {
+  return state.notifications.filter(item => item.deviceId === deviceId && item.createdAt > after)
+}
+async function enqueueNotification(deviceId: string, threadId: string, turnId: string, status: string, title: string, bodyText: string) {
+  const previousCreatedAt = state.notifications.length ? state.notifications[state.notifications.length - 1]!.createdAt : 0
+  const event: NotificationEvent = { id: randomToken(12), deviceId, threadId, turnId, status, title, body: bodyText, createdAt: Math.max(Date.now(), previousCreatedAt + 1) }
+  state.notifications.push(event)
+  if (state.notifications.length > 2000) state.notifications.splice(0, state.notifications.length - 2000)
+  await persist()
+  for (const waiter of notificationWaiters.get(deviceId) || []) {
+    clearTimeout(waiter.timer)
+    waiter.resolve()
   }
-  return fcmConfigPromise
-}
-async function fcmAccessToken() {
-  if (fcmAccess && fcmAccess.expiresAt > Date.now() + 60_000) return fcmAccess.token
-  const config = await fcmConfig()
-  if (!config) return undefined
-  const now = Math.floor(Date.now() / 1000)
-  const header = encodePart(JSON.stringify({ alg: 'RS256', typ: 'JWT' }))
-  const claim = encodePart(JSON.stringify({ iss: config.clientEmail, scope: 'https://www.googleapis.com/auth/firebase.messaging', aud: 'https://oauth2.googleapis.com/token', iat: now, exp: now + 3600 }))
-  const signer = createSign('RSA-SHA256')
-  signer.update(`${header}.${claim}`)
-  const assertion = `${header}.${claim}.${signer.sign(config.privateKey).toString('base64url')}`
-  const response = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion }) })
-  const data = await response.json() as { access_token?: string; expires_in?: number }
-  if (!response.ok || !data.access_token) throw new Error(`FCM OAuth failed (${response.status})`)
-  fcmAccess = { token: data.access_token, expiresAt: Date.now() + Math.max(60, data.expires_in || 3600) * 1000 }
-  return fcmAccess.token
-}
-async function sendPush(deviceId: string, title: string, bodyText: string, data: Record<string, string>) {
-  const tokens = state.pushTokens.filter(item => item.deviceId === deviceId)
-  if (!tokens.length) return
-  const config = await fcmConfig()
-  if (!config) return
-  try {
-    const accessToken = await fcmAccessToken()
-    if (!accessToken) return
-    const invalid = new Set<string>()
-    for (const item of tokens) {
-      const response = await fetch(`https://fcm.googleapis.com/v1/projects/${encodeURIComponent(config.projectId)}/messages:send`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: { token: item.token, notification: { title, body: bodyText }, data, android: { priority: 'high', notification: { channel_id: 'rmdex-tasks' } } } }),
-      })
-      if (!response.ok && [400, 404].includes(response.status)) invalid.add(item.token)
-    }
-    if (invalid.size) { state.pushTokens = state.pushTokens.filter(item => !invalid.has(item.token)); await persist() }
-  } catch (error) { console.warn(`[rmdex] FCM notification failed: ${error instanceof Error ? error.message : 'unknown error'}`) }
+  notificationWaiters.delete(deviceId)
 }
 function watchTask(deviceId: string, threadId: string, turnId: string, name: string) {
   const key = `${deviceId}:${threadId}:${turnId}`
@@ -251,7 +221,7 @@ function watchTask(deviceId: string, threadId: string, turnId: string, name: str
       const result = await rpc(deviceId, `/api/threads/${threadId}/status`, 'GET') as { activeTurnId?: string | null; lastTurn?: { id?: string; status?: string } | null }
       const status = result.lastTurn?.status || ''
       if (result.lastTurn?.id === turnId && !result.activeTurnId && status && !['inProgress', 'running', 'active', 'started'].includes(status)) {
-        await sendPush(deviceId, `${name || 'Codex 会话'}已完成`, status === 'completed' ? '任务已完成，点击查看结果' : `任务${status === 'interrupted' ? '已暂停' : '已结束'}，点击查看详情`, { threadId, turnId, status })
+        await enqueueNotification(deviceId, threadId, turnId, status, `${name || 'Codex 会话'}已完成`, status === 'completed' ? '任务已完成，点击查看结果' : `任务${status === 'interrupted' ? '已暂停' : '已结束'}，点击查看详情`)
         return
       }
     } catch { /* The desktop agent may be reconnecting; keep watching. */ }
@@ -442,15 +412,42 @@ const server = createServer(async (req, res) => {
       const device = state.devices.find(item => item.id === client.deviceId && !item.revoked)
       if (!device) { json(res, 401, { error: '设备已撤销' }); return }
       const data = await body(req)
-      const token = typeof data.token === 'string' ? data.token.trim() : ''
-      if (!token || token.length > 4096) { json(res, 400, { error: '推送凭证无效' }); return }
-      if (url.pathname.endsWith('/unregister')) state.pushTokens = state.pushTokens.filter(item => item.token !== token)
-      else {
-        state.pushTokens = state.pushTokens.filter(item => item.token !== token)
-        state.pushTokens.push({ token, deviceId: device.id, platform: 'android', clientName: typeof data.clientName === 'string' ? data.clientName.slice(0, 80) : client.name, createdAt: Date.now(), lastSeenAt: Date.now() })
+      const installationId = typeof data.installationId === 'string' ? data.installationId.trim() : ''
+      if (!/^[A-Za-z0-9_-]{16,128}$/.test(installationId)) { json(res, 400, { error: '安装标识无效' }); return }
+      if (url.pathname.endsWith('/unregister')) {
+        state.pushTokens = state.pushTokens.filter(item => !(item.deviceId === device.id && item.installationId === installationId))
+        await persist()
+        json(res, 200, { ok: true }); return
       }
+      const pushToken = randomToken()
+      state.pushTokens = state.pushTokens.filter(item => !(item.deviceId === device.id && item.installationId === installationId))
+      state.pushTokens.push({ tokenHash: hash(pushToken), deviceId: device.id, installationId, platform: 'android', clientName: typeof data.clientName === 'string' ? data.clientName.slice(0, 80) : client.name, createdAt: Date.now(), lastSeenAt: Date.now() })
       await persist()
-      json(res, 200, { ok: true }); return
+      json(res, 200, { pushToken }); return
+    }
+    if (req.method === 'GET' && url.pathname === '/api/notifications/poll') {
+      const subscription = pushFor(req)
+      if (!subscription) { json(res, 401, { error: '后台连接凭证已失效' }); return }
+      const after = Math.max(0, Number(url.searchParams.get('after') || 0))
+      const wait = Math.min(30_000, Math.max(0, Number(url.searchParams.get('wait') || 25_000)))
+      if (!Number.isFinite(after) || !Number.isFinite(wait)) { json(res, 400, { error: '游标无效' }); return }
+      if (!notificationEvents(subscription.deviceId, after).length && wait > 0) {
+        let currentWaiter: { after: number; resolve: () => void; timer: NodeJS.Timeout } | undefined
+        await new Promise<void>(resolve => {
+          currentWaiter = { after, resolve, timer: setTimeout(resolve, wait) }
+          const waiters = notificationWaiters.get(subscription.deviceId) || new Set()
+          waiters.add(currentWaiter)
+          notificationWaiters.set(subscription.deviceId, waiters)
+        })
+        const waiters = notificationWaiters.get(subscription.deviceId)
+        if (waiters) {
+          if (currentWaiter) { clearTimeout(currentWaiter.timer); waiters.delete(currentWaiter) }
+          if (!waiters.size) notificationWaiters.delete(subscription.deviceId)
+        }
+      }
+      const events = notificationEvents(subscription.deviceId, after)
+      const cursor = events.reduce((value, item) => Math.max(value, item.createdAt), after)
+      json(res, 200, { data: events, cursor }); return
     }
     const client = clientFor(req)
     if (!client) { json(res, 401, { error: '需要登录或扫码配对' }); return }

@@ -165,15 +165,12 @@ Build the relay image with `docker build -t rmdex-relay:local .`. Production con
 
 Existing state files with `clients` and old SHA-256 admin hashes remain readable. New web/mobile sessions use the account access/refresh pair, while old device tokens and client tokens continue to work during migration. Put the relay behind HTTPS/WSS; never publish port 8787 directly. The computer agent requires `RMDEX_RELAY_URL=wss://code.kyeai.xyz/agent` and its one-time `RMDEX_DEVICE_TOKEN`. Pairing codes expire after three minutes and must be explicitly approved in the desktop device panel before the phone receives a client credential.
 
-For true Android background notifications, create a Firebase Android app for
-`xyz.kyeai.rmdex`, place its `google-services.json` at
-`android/app/google-services.json` for the Android build, and configure the
-relay with either `RMDEX_FCM_SERVICE_ACCOUNT_JSON` or
-`RMDEX_FCM_SERVICE_ACCOUNT_PATH`. The service account needs permission to send
-Firebase Cloud Messaging messages. When configured, the relay watches turns
-started through the remote device and sends a notification when they finish;
-without Firebase credentials the existing in-process local notification remains
-available as a fallback.
+Android background notifications do not use Firebase. The relay stores task
+completion events and exposes an authenticated long-poll endpoint. The Android
+app starts a small foreground service that keeps this connection alive and
+creates the system notification locally. This keeps the push path under our
+control, but Android displays a persistent `rmdex 后台连接` notification and
+the service uses some battery while enabled.
 
 
 ## Android app
@@ -189,4 +186,4 @@ cd android
 ./gradlew assembleDebug
 ```
 
-On Windows, use `gradlew.bat assembleDebug`. The debug APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`. Use `npx cap open android` to open the native project in Android Studio. The push plugin is included in the project; FCM registration only becomes active after the Firebase config file is supplied.
+On Windows, use `gradlew.bat assembleDebug`. The debug APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`. Use `npx cap open android` to open the native project in Android Studio. The Android project includes the native background service; no Firebase project or `google-services.json` is required.

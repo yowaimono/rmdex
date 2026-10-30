@@ -32,6 +32,8 @@ const fakeAgent = createServer(async (req, res) => {
   if (raw) forwardedBody = JSON.parse(raw) as Record<string, unknown>
   res.setHeader('Content-Type', 'application/json')
   if (req.url === '/api/models') { res.end(JSON.stringify({ data: [{ id: 'dynamic-model', displayName: 'Dynamic Model' }] })); return }
+  if (req.url?.endsWith('/send')) { res.end(JSON.stringify({ turn: { id: 'completed-turn' }, path: req.url })); return }
+  if (req.url?.endsWith('/status')) { res.end(JSON.stringify({ activeTurnId: null, lastTurn: { id: 'completed-turn', status: 'completed' }, path: req.url })); return }
   res.end(JSON.stringify({ data: [{ id: 'local-agent-test' }], path: req.url }))
 })
 try {
@@ -79,7 +81,10 @@ try {
   assert.equal((await request('/api/pair/status', statusBody)).data.status, 'expired')
   const client = claimedStatus.data.token as string
   const headers = { Authorization: `Bearer ${client}` }
-  assert.equal((await request('/api/push/register', { ...json({ token: 'test-fcm-token' }), headers: { ...headers, 'Content-Type': 'application/json' } })).status, 200)
+  const pushRegistration = await request('/api/push/register', { ...json({ installationId: 'test-installation-1234' }), headers: { ...headers, 'Content-Type': 'application/json' } })
+  assert.equal(pushRegistration.status, 200)
+  assert.ok(pushRegistration.data.pushToken)
+  assert.equal((await request(`/api/notifications/poll?wait=0&after=0`, { headers: { Authorization: `Bearer ${pushRegistration.data.pushToken}` } })).status, 200)
   assert.equal((await request('/api/devices', { headers })).status, 401)
   assert.equal((await request('/api/client', { headers })).data.device.online, true)
   assert.equal((await request('/api/threads', { headers })).data.data[0].id, 'test-thread')
@@ -109,11 +114,20 @@ try {
   assert.equal(forwarded.status, 200)
   assert.equal(forwarded.data.data[0].id, 'local-agent-test')
   assert.equal(forwarded.data.path, '/api/threads')
+  const pushRegistration2 = await request('/api/push/register', { ...json({ installationId: 'test-installation-5678' }), headers: { ...headers2, 'Content-Type': 'application/json' } })
+  assert.equal(pushRegistration2.status, 200)
+  const waitingNotifications = request('/api/notifications/poll?wait=10000&after=0', { headers: { Authorization: `Bearer ${pushRegistration2.data.pushToken}` } })
   const models = await request('/api/models', { headers: headers2 })
   assert.equal(models.status, 200)
   assert.equal(models.data.data[0].id, 'dynamic-model')
   const sent = await request('/api/threads/local-agent-test/send', { ...json({ text: 'model forwarding', permissionMode: 'ask', model: 'dynamic-model', effort: 'high' }), headers: { ...headers2, 'Content-Type': 'application/json' } })
   assert.equal(sent.status, 200)
+  const notifications = await waitingNotifications
+  assert.equal(notifications.status, 200)
+  assert.equal(notifications.data.data[0].threadId, 'local-agent-test')
+  assert.equal(notifications.data.data[0].turnId, 'completed-turn')
+  assert.ok(notifications.data.cursor > 0)
+  assert.equal((await request(`/api/notifications/poll?wait=0&after=${notifications.data.cursor}`, { headers: { Authorization: `Bearer ${pushRegistration2.data.pushToken}` } })).data.data.length, 0)
   assert.equal(forwardedBody?.model, 'dynamic-model')
   assert.equal(forwardedBody?.effort, 'high')
   const history = await request('/api/threads/local-agent-test/history', { ...json({ cursor: 'older-history' }), headers: { ...headers2, 'Content-Type': 'application/json' } })
