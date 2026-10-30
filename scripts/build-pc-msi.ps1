@@ -1,6 +1,6 @@
 ﻿$ErrorActionPreference = 'Stop'
 $project = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$version = '0.1.6'
+$version = '0.2.0'
 $work = Join-Path $project 'work\pc-msi'
 $stage = Join-Path $work 'payload'
 $wix = 'D:\WorkSpace\frametell\node_modules\.pnpm\electron-winstaller@5.4.0\node_modules\electron-winstaller\vendor'
