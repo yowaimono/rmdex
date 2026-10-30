@@ -4,6 +4,7 @@ import { dirname } from 'node:path'
 import { DesktopError, type DesktopTool } from './desktop-mcp.ts'
 import { desktopModels, sharedDesktopModels } from './desktop-models.ts'
 import { normalizeItem } from '../src/conversation.ts'
+import { attachmentPrompt, type StoredAttachment } from './attachments.ts'
 
 export type DesktopCaller = { call: (name: string, args: Record<string, unknown>, write?: boolean) => Promise<any>; tools: () => Promise<DesktopTool[]> }
 type JournalEntry = { fingerprint: string; state: 'dispatching' | 'finished'; result?: any }
@@ -74,7 +75,7 @@ export class DesktopAdapter {
     const projects = names.has('list_projects') ? await this.projects() : []
     return { data, capabilities: { mode: 'desktop', models: data.length > 0, permissions: false, stop: false, approvals: false, create: names.has('create_thread'), send: names.has('send_message_to_thread'), queue: false, steer: false, rename: false, fork: false, archive: false, delete: false, history: true, createRequiresPrompt: true }, projects }
   }
-  private async projects() {
+  async projects() {
     const raw = await this.client.call('list_projects', {})
     return (raw.projects || []).filter((project: any) => project.projectKind !== 'chatgpt' && project.hostId === 'local' && project.path).map((project: any) => ({ id: project.projectId, name: project.label, path: project.path }))
   }
@@ -89,7 +90,7 @@ export class DesktopAdapter {
   }
   private operation(data: any) {
     if (typeof data.operationId !== 'string' || !/^[a-f0-9-]{36}$/i.test(data.operationId)) throw new Error('缺少有效的操作编号，请刷新页面')
-    if (typeof data.text !== 'string' || !data.text.trim() || data.text.length > 32000) throw new Error('消息不能为空或超过长度限制')
+    if (typeof data.text !== 'string' || (!data.text.trim() && !data.attachments?.length) || data.text.length > 32000) throw new Error('消息不能为空或超过长度限制')
     if (data.permissionMode != null || data.approvalPolicy != null || data.sandboxPolicy != null) throw new Error('Desktop 原生接口不支持修改权限，请在 Desktop 调整')
   }
   private async settings(name: string, data: any): Promise<{ model?: string; thinking?: string }> {
@@ -106,8 +107,12 @@ export class DesktopAdapter {
     this.sending.add(id)
     try {
       const settings = await this.settings('send_message_to_thread', data)
-      return await this.journal.run(data.operationId, createHash('sha256').update(JSON.stringify(['send', id, data.text, ...(settings.model ? [settings] : [])])).digest('hex'), async () => {
-        const raw = await this.client.call('send_message_to_thread', { threadId: id, hostId: 'local', prompt: data.text, ...settings }, true)
+      const attachments = (data.attachments || []) as StoredAttachment[]
+      const prompt = attachmentPrompt(data.text, attachments)
+      const stablePrompt = attachmentPrompt(data.text, attachments.map(file => ({ ...file, path: '<uploaded-attachment>' })))
+      const attachmentDigests = attachments.map(file => [file.name, file.size, file.digest])
+      return await this.journal.run(data.operationId, createHash('sha256').update(JSON.stringify(['send', id, stablePrompt, attachmentDigests, ...(settings.model ? [settings] : [])])).digest('hex'), async () => {
+        const raw = await this.client.call('send_message_to_thread', { threadId: id, hostId: 'local', prompt, ...settings }, true)
         if (raw.threadId !== id) throw new DesktopError('目标会话未确认', true)
         return { outcome: 'queued', threadId: id }
       })
@@ -119,9 +124,14 @@ export class DesktopAdapter {
     const project = data.projectId ? (await this.projects()).find((project: any) => project.id === data.projectId) : undefined
     if (data.projectId && !project) throw new Error('请选择 Desktop 中已存在的本地项目')
     const target = project ? { type: 'project', projectId: project.id, environment: { type: 'local' } } : { type: 'projectless' }
-    return this.journal.run(data.operationId, createHash('sha256').update(JSON.stringify(['create', target, data.text, ...(settings.model ? [settings] : [])])).digest('hex'), async () => {
-      const raw = await this.client.call('create_thread', { target, prompt: data.text, title: data.text.trim().slice(0, 40), ...settings }, true)
-      if (typeof raw.threadId === 'string') return { outcome: 'queued', thread: { id: raw.threadId, name: data.text.trim().slice(0, 40), cwd: project?.path || '' } }
+    const attachments = (data.attachments || []) as StoredAttachment[]
+    const prompt = attachmentPrompt(data.text, attachments)
+    const stablePrompt = attachmentPrompt(data.text, attachments.map(file => ({ ...file, path: '<uploaded-attachment>' })))
+    const title = data.text.trim().slice(0, 40) || attachments.map(file => file.name).join(', ').slice(0, 40)
+    const attachmentDigests = attachments.map(file => [file.name, file.size, file.digest])
+    return this.journal.run(data.operationId, createHash('sha256').update(JSON.stringify(['create', target, stablePrompt, attachmentDigests, ...(settings.model ? [settings] : [])])).digest('hex'), async () => {
+      const raw = await this.client.call('create_thread', { target, prompt, title, ...settings }, true)
+      if (typeof raw.threadId === 'string') return { outcome: 'queued', thread: { id: raw.threadId, name: title, cwd: project?.path || '' } }
       if (typeof raw.clientThreadId === 'string') return { outcome: 'preparing', message: 'Desktop 正在准备新会话，请稍后刷新会话列表' }
       throw new DesktopError('Desktop 未确认新会话', true)
     })

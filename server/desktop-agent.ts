@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { readFile, stat } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { extname, isAbsolute, join, dirname } from 'node:path'
+import { AttachmentStore } from './attachments.ts'
+import { ProjectStore } from './project-store.ts'
 import { DesktopAdapter, OperationJournal } from './desktop-adapter.ts'
 import { contextFile, readDesktopContext } from './desktop-context.ts'
 import { DesktopMcp } from './desktop-mcp.ts'
@@ -31,20 +33,24 @@ async function adapter() {
 const images = new Map<string, string>()
 const imageIds = new Map<string, string>()
 const types: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' }
+const attachmentStore = new AttachmentStore()
+const projectStore = new ProjectStore(process.env.CODEX_HOME || join(homedir(), '.codex'))
 function registerImages(result: any) {
   for (const turn of result.thread?.turns || []) for (const item of turn.items || []) {
-    if (item.type !== 'userMessage') continue
-    for (const part of item.content || []) {
-      if (part.type !== 'localImage' || typeof part.path !== 'string' || !isAbsolute(part.path) || !types[extname(part.path).toLowerCase()]) continue
-      const id = imageIds.get(part.path) || randomUUID()
-      images.set(id, part.path); imageIds.set(part.path, id)
-      part.assetUrl = `/api/images/${id}`
-    }
+    const parts = item.type === 'userMessage' ? item.content || [] : []
+    for (const part of parts) registerImagePath(part, part.path)
+    if (['imageView', 'imageGeneration'].includes(String(item.type))) registerImagePath(item, item.path || item.savedPath)
   }
   while (images.size > 2000) {
     const id = images.keys().next().value!
     imageIds.delete(images.get(id)!); images.delete(id)
   }
+}
+function registerImagePath(target: Record<string, unknown>, value: unknown) {
+  if (typeof value !== 'string' || !isAbsolute(value) || !types[extname(value).toLowerCase()]) return
+  const id = imageIds.get(value) || randomUUID()
+  images.set(id, value); imageIds.set(value, id)
+  target.assetUrl = `/api/images/${id}`
 }
 const server = createServer(async (req, res) => {
   res.setHeader('Content-Type', 'application/json; charset=utf-8')
@@ -63,13 +69,33 @@ const server = createServer(async (req, res) => {
     let data: any = {}
     if (req.method === 'POST') {
       let raw = ''
-      for await (const chunk of req) { raw += chunk.toString(); if (raw.length > 65536) throw new Error('请求过大') }
+      for await (const chunk of req) { raw += chunk.toString(); if (raw.length > 12 * 1024 * 1024) throw new Error('请求过大') }
       data = JSON.parse(raw || '{}')
       if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('无效请求')
     }
     const match = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)(?:\/(send|history|stop))?$/)
+    const projectUpdateMatch = url.pathname.match(/^\/api\/projects\/([a-zA-Z0-9-]+)\/update$/)
+    const projectDeleteMatch = url.pathname.match(/^\/api\/projects\/([a-zA-Z0-9-]+)\/delete$/)
     if (req.method === 'POST' && (match?.[2] === 'stop' || url.pathname.startsWith('/api/approvals/'))) {
       res.writeHead(409).end(JSON.stringify({ error: '当前 Desktop 工具不支持此操作，请在 Codex Desktop 中处理' })); return
+    }
+    if (req.method === 'POST' && url.pathname === '/api/attachments') {
+      res.writeHead(201)
+      res.end(JSON.stringify(await attachmentStore.add(data)))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/api/projects') {
+      res.writeHead(201)
+      res.end(JSON.stringify(await projectStore.create(data)))
+      return
+    }
+    if (req.method === 'POST' && projectUpdateMatch) {
+      res.end(JSON.stringify(await projectStore.update(projectUpdateMatch[1]!, data)))
+      return
+    }
+    if (req.method === 'POST' && projectDeleteMatch) {
+      res.end(JSON.stringify(await projectStore.delete(projectDeleteMatch[1]!)))
+      return
     }
     if (req.method === 'GET' && /^\/api\/images\/[a-f0-9-]+$/.test(url.pathname)) {
       const path = images.get(url.pathname.split('/').pop()!)
@@ -80,14 +106,15 @@ const server = createServer(async (req, res) => {
     }
     const desktop = await adapter()
     let result: any
-    if (req.method === 'GET' && url.pathname === '/api/models') result = await desktop.models()
+    if (req.method === 'GET' && url.pathname === '/api/projects') result = { data: await projectStore.list(await desktop.projects()) }
+    else if (req.method === 'GET' && url.pathname === '/api/models') result = await desktop.models()
     else if (req.method === 'GET' && url.pathname === '/api/threads') result = await desktop.list()
     else if (req.method === 'GET' && match && !match[2]) { result = await desktop.read(match[1]!); registerImages(result) }
     else if (req.method === 'POST' && match?.[2] === 'history') {
       if (typeof data.cursor !== 'string' || !data.cursor) throw new Error('缺少历史游标')
       result = await desktop.read(match[1]!, data.cursor); registerImages(result)
-    } else if (req.method === 'POST' && match?.[2] === 'send') result = await desktop.send(match[1]!, data)
-    else if (req.method === 'POST' && url.pathname === '/api/threads') result = await desktop.create(data)
+    } else if (req.method === 'POST' && match?.[2] === 'send') result = await desktop.send(match[1]!, { ...data, attachments: attachmentStore.resolve(data.attachments) })
+    else if (req.method === 'POST' && url.pathname === '/api/threads') result = await desktop.create({ ...data, attachments: attachmentStore.resolve(data.attachments) })
     else { res.writeHead(404).end(JSON.stringify({ error: 'Not found' })); return }
     res.end(JSON.stringify(result === undefined ? { error: 'Agent returned no data' } : result))
   } catch (error) {

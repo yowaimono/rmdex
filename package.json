@@ -14,6 +14,7 @@
     "pc:server": "tsx pc/server.ts",
     "pc:start": "npm run pc:build && npm run pc:server",
     "test:desktop": "node --import tsx --test server/desktop.test.mjs",
+    "test:projects": "node --import tsx --test server/project-store.test.mjs",
     "relay": "tsx server/relay/index.ts",
     "build:relay": "esbuild server/relay/index.ts --bundle --platform=node --format=esm --packages=external --outfile=dist-relay/index.js",
     "test:relay": "tsx server/relay/relay.test.ts",

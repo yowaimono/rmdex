@@ -154,6 +154,18 @@ Server HTTP reachability and paired client activity; supports start, stop, resta
 default permission modes `ask`, `auto`, and `full`. Explicit per-turn permissions from Web, Android, MCP, or Desktop are not overridden; the setting is not a global Desktop policy. Client activity is inferred from recent HTTP requests, not a live connection guarantee. The equivalent Windows
 launcher is `scripts/start-rmdex-pc.ps1`.
 
+## Projects and chats
+
+The session sidebar groups pinned chats at the top, then collapsible Projects,
+with ungrouped chats below. A Project stores a name and an existing absolute
+folder path in `%CODEX_HOME%/rmdex-projects.json`; it does not create, move, or
+delete folders. Chats are grouped by their working directory. When the legacy
+Desktop tools adapter is connected, native Desktop Projects appear automatically
+and create chats with their native project ID. In app-server mode, add a named
+Project with the same folder path to group its chats. A hand-added Project can
+create chats through app-server mode; legacy Desktop mode requires the Project
+to be created in Desktop first.
+
 The PC service only listens on loopback. It reads the existing `.device-token`
 and `.web-client-token` when present, while the relay connection remains an
 outbound WSS connection. Generated logs and the local permission preference

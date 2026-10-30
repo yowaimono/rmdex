@@ -3,7 +3,8 @@ import { computed } from 'vue'
 import { ChevronRight, FileCode2, Globe, Image, TerminalSquare, Wrench } from 'lucide-vue-next'
 
 type ToolItem = { type: string; [key: string]: unknown }
-const props = defineProps<{ item: ToolItem }>()
+const props = defineProps<{ item: ToolItem; imageUrl?: string }>()
+const emit = defineEmits<{ preview: [url: string] }>()
 const names: Record<string, string> = {
   commandExecution: '执行命令', fileChange: '文件变更', mcpToolCall: '工具调用',
   dynamicToolCall: '工具调用', functionCallOutput: '工具结果', webSearch: '搜索网页',
@@ -82,6 +83,7 @@ const raw = computed(() => JSON.stringify(props.item, null, 2))
       <ChevronRight :size="15" class="tool-chevron" />
     </summary>
     <div class="tool-details">
+      <button v-if="imageUrl" type="button" class="tool-image-preview" title="放大预览图片" @click="emit('preview', imageUrl)"><img :src="imageUrl" alt="图片预览" loading="lazy" /></button>
       <div v-for="field in fields" :key="field.key" class="tool-field">
         <div class="tool-field-label">{{ field.label }}</div>
         <pre>{{ field.value }}</pre>

@@ -7,6 +7,8 @@ import { extname, isAbsolute, join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { Duplex } from 'node:stream'
 import WebSocket from 'ws'
+import { AttachmentStore, attachmentInput } from './attachments.ts'
+import { ProjectStore } from './project-store.ts'
 import './remote-agent.ts'
 
 const requestedMode = (process.env.RMDEX_CODEX_MODE || '').trim().toLowerCase()
@@ -23,6 +25,7 @@ const codexHome = process.env.CODEX_HOME || join(homedir(), '.codex')
 const sharedSocket = process.env.RMDEX_CODEX_SOCKET || join(codexHome, 'app-server-control', 'app-server-control.sock')
 const sharedMode = ['shared', 'proxy'].includes(requestedMode)
 const threadNamesPath = join(codexHome, 'rmdex-thread-names.json')
+const projectStore = new ProjectStore(codexHome)
 let threadNames: Record<string, string> = {}
 const threadNamesReady = readFile(threadNamesPath, 'utf8').then(raw => { threadNames = JSON.parse(raw) }).catch(error => { if (error.code !== 'ENOENT') console.warn(`[rmdex] Thread names could not be loaded: ${error.message}`) })
 let threadListCache: { expiresAt: number; data: Array<Record<string, unknown>> } | undefined
@@ -47,6 +50,7 @@ const pending = new Map<number, { resolve: (result: unknown) => void; reject: (e
 let failure: string | undefined
 const images = new Map<string, string>()
 const imageIds = new Map<string, string>()
+const attachmentStore = new AttachmentStore()
 const activeTurns = new Map<string, string>()
 type LiveItem = { id: string; type: string; [key: string]: unknown }
 type LiveTurn = { id: string; status: string; items: Map<string, LiveItem>; error?: unknown; sentText?: string }
@@ -74,7 +78,7 @@ let modelCache: { expiresAt: number; data: CodexModel[] } | undefined
 const port = Number(process.env.RMDEX_AGENT_PORT || 18787)
 const imageTypes: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' }
 
-type ThreadRead = { thread?: { turns?: Array<{ items?: Array<{ type?: string; content?: Array<{ type?: string; path?: string; assetUrl?: string }> }> }> } }
+type ThreadRead = { thread?: { turns?: Array<{ items?: Array<Record<string, any>> }> } }
 function applyThreadName(thread: Record<string, unknown>) {
   const id = typeof thread.id === 'string' ? thread.id : ''
   return id && threadNames[id] ? { ...thread, name: threadNames[id] } : thread
@@ -103,13 +107,10 @@ function registerImages(result: unknown) {
   const thread = result as ThreadRead
   for (const turn of thread.thread?.turns || []) {
     for (const item of turn.items || []) {
-      if (item.type !== 'userMessage') continue
-      for (const part of item.content || []) {
-        if (part.type !== 'localImage' || !part.path || !isAbsolute(part.path) || !imageTypes[extname(part.path).toLowerCase()]) continue
-        const id = imageIds.get(part.path) || randomUUID()
-        imageIds.set(part.path, id)
-        images.set(id, part.path)
-        part.assetUrl = `/api/images/${id}`
+      const parts = item.type === 'userMessage' ? item.content || [] : []
+      for (const part of parts) registerImagePath(part, part.path)
+      if (['imageView', 'imageGeneration'].includes(String(item.type))) {
+        registerImagePath(item, item.path || item.savedPath)
       }
     }
   }
@@ -119,6 +120,13 @@ function registerImages(result: unknown) {
     images.delete(first)
     if (path && imageIds.get(path) === first) imageIds.delete(path)
   }
+}
+function registerImagePath(target: Record<string, unknown>, value: unknown) {
+  if (typeof value !== 'string' || !isAbsolute(value) || !imageTypes[extname(value).toLowerCase()]) return
+  const id = imageIds.get(value) || randomUUID()
+  imageIds.set(value, id)
+  images.set(id, value)
+  target.assetUrl = `/api/images/${id}`
 }
 
 function failConnection(message: string) {
@@ -272,7 +280,7 @@ const server = createServer(async (req, res) => {
       let body = ''
       if (req.method === 'POST') for await (const chunk of req) {
         body += chunk.toString()
-        if (body.length > 65536) throw new Error('请求过大')
+        if (body.length > 12 * 1024 * 1024) throw new Error('请求过大')
       }
       const data = body ? JSON.parse(body) : {}
       const sendMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/send$/)
@@ -287,7 +295,19 @@ const server = createServer(async (req, res) => {
       const queueDeleteMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/queue\/([^/]+)$/)
       const queueSteerMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/queue\/([^/]+)\/steer$/)
       const approvalMatch = url.pathname.match(/^\/api\/approvals\/([a-zA-Z0-9-]+)$/)
-      if (url.pathname === '/api/settings') {
+      const projectUpdateMatch = url.pathname.match(/^\/api\/projects\/([a-zA-Z0-9-]+)\/update$/)
+      const projectDeleteMatch = url.pathname.match(/^\/api\/projects\/([a-zA-Z0-9-]+)\/delete$/)
+      if (url.pathname === '/api/attachments') {
+        result = await attachmentStore.add(data)
+        res.writeHead(201)
+      } else if (url.pathname === '/api/projects') {
+        result = await projectStore.create(data)
+        res.writeHead(201)
+      } else if (projectUpdateMatch) {
+        result = await projectStore.update(projectUpdateMatch[1]!, data)
+      } else if (projectDeleteMatch) {
+        result = await projectStore.delete(projectDeleteMatch[1]!)
+      } else if (url.pathname === '/api/settings') {
         if (!['ask', 'auto', 'full'].includes(data.permissionMode)) throw new Error('请选择有效的权限模式')
         defaultPermissionMode = data.permissionMode as PermissionMode
         result = { permissionMode: defaultPermissionMode }
@@ -388,7 +408,9 @@ const server = createServer(async (req, res) => {
         result = { ...(result as object), activeTurnId: activeTurns.get(threadId) || null, lastTurn: live ? { id: live.id, status: live.status, error: live.error } : null, approvals: [...approvals.entries()].filter(([, request]) => request.params.threadId === threadId).map(([id, request]) => ({ id, method: request.method, params: request.params })) }
       } else if (sendMatch) {
         const threadId = sendMatch[1]!
-        if (typeof data.text !== 'string' || !data.text.trim() || data.text.length > 32000) throw new Error('消息不能为空或超过长度限制')
+        const attachments = attachmentStore.resolve(data.attachments)
+        const text = typeof data.text === 'string' ? data.text.trim() : ''
+        if ((!text && !attachments.length) || text.length > 32000) throw new Error('消息不能为空或超过长度限制')
         const permissionMode = data.permissionMode === undefined ? defaultPermissionMode : data.permissionMode
         if (!['ask', 'auto', 'full'].includes(permissionMode)) throw new Error('请选择有效的权限模式')
         const models = (data.model !== undefined || data.effort !== undefined) ? await listModels() : []
@@ -406,12 +428,13 @@ const server = createServer(async (req, res) => {
             ? { approvalPolicy: 'never', approvalsReviewer: 'user', sandboxPolicy: { type: 'dangerFullAccess' } }
             : { approvalPolicy: 'on-request', approvalsReviewer: permissionMode === 'auto' ? 'auto_review' : 'user', sandboxPolicy: { type: 'workspaceWrite' } }
           const modelOptions = selectedModel ? { model: selectedModel.id, effort: data.effort } : {}
-          const started = await rpc('turn/start', { threadId, input: [{ type: 'text', text: data.text, text_elements: [] }], ...modelOptions, ...options }) as { turn?: { id: string; status?: string } }
+          const input = attachmentInput(text, attachments)
+          const started = await rpc('turn/start', { threadId, input, ...modelOptions, ...options }) as { turn?: { id: string; status?: string } }
           newThreads.delete(threadId)
           if (started.turn?.id) {
             let live = liveTurns.get(threadId)
             if (!live || live.id !== started.turn.id) { live = { id: started.turn.id, status: started.turn.status || 'inProgress', items: new Map() }; liveTurns.set(threadId, live) }
-            live.sentText = data.text
+            live.sentText = input.find(part => part.type === 'text')?.text || text
           }
           if (started.turn?.id && started.turn.status === 'inProgress' && (!liveTurns.has(threadId) || liveTurns.get(threadId)?.status === 'inProgress')) activeTurns.set(threadId, started.turn.id)
           result = started
@@ -434,6 +457,8 @@ const server = createServer(async (req, res) => {
       const threadId = url.pathname.split('/')[3]!
       if (sharedMode && !newThreads.has(threadId)) await subscribeToThread(threadId)
       result = await rpc('thread/queue/list', { threadId, limit: 100 })
+    } else if (url.pathname === '/api/projects') {
+      result = { data: await projectStore.list() }
     } else if (url.pathname === '/api/models') {
       result = {
         data: await listModels(),

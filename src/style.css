@@ -46,6 +46,24 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .archive-toggle:hover, .archive-toggle.active { color: #0879f9; background: #eaf3ff; }
 .count { margin-left: 4px; color: #a8b3be; font-weight: 400; }
 .thread-list { padding: 0 9px; }
+.tree-section-label { padding: 12px 11px 5px; color: #8795a3; font-size: 10px; font-weight: 650; }
+.tree-section-label-other { margin-top: 8px; border-top: 1px solid #e9eef3; }
+.project-tree-group { margin: 3px 0; }
+.project-tree-row { min-height: 48px; display: flex; align-items: center; gap: 3px; padding: 4px 3px 4px 5px; border-radius: 6px; color: #455668; }
+.project-tree-row:hover { background: #eef3f8; }
+.project-tree-toggle { width: 23px; height: 30px; flex: none; display: grid; place-items: center; padding: 0; border: 0; border-radius: 4px; color: #8291a0; background: transparent; }
+.project-tree-toggle:hover { background: #e2eaf2; color: #4d6278; }
+.project-folder-icon { flex: none; color: #6686a5; }
+.project-tree-name { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; padding: 4px 5px; overflow: hidden; border: 0; color: inherit; background: transparent; text-align: left; }
+.project-tree-name span { overflow: hidden; color: #37495a; font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.project-tree-name small { overflow: hidden; color: #9aa6b2; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.project-thread-count { min-width: 16px; color: #99a5b0; font-size: 10px; text-align: center; }
+.project-action { width: 27px; height: 29px; flex: none; display: grid; place-items: center; padding: 0; border: 0; border-radius: 4px; color: #8291a0; background: transparent; }
+.project-action:hover { color: #0879f9; background: #e1edf9; }
+.project-delete-action:hover { color: #bd5a4f; background: #fff1ef; }
+.project-thread-list { position: relative; margin-left: 16px; padding-left: 8px; border-left: 1px solid #e1e8ef; }
+.project-thread-row .thread { padding-top: 9px; padding-bottom: 9px; }
+.project-empty { padding: 9px 11px; color: #a0abb6; font-size: 11px; }
 .thread-row { position: relative; display: flex; align-items: stretch; margin-bottom: 2px; overflow: hidden; }
 .thread-row-content { position: relative; z-index: 1; min-width: 100%; display: flex; align-items: stretch; background: #f8fafc; transition: transform .18s ease; }
 .thread { min-width: 0; flex: 1; display: block; padding: 12px 11px; border: 0; border-radius: 6px; text-align: left; color: #344252; background: transparent; }
@@ -56,13 +74,16 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .thread-state-working { color: #0879f9; animation: spin 1s linear infinite; }
 .thread-state-completed { color: #2d8a67; }
 .thread-state-failed { color: #c05d52; }
+.thread-pinned-icon { flex: none; color: #d18a22; }
 .thread-menu-trigger { position: absolute; right: 3px; top: 8px; width: 28px; height: 28px; opacity: 0; background: rgba(248, 250, 252, .82); }
 .thread-row:hover .thread-menu-trigger, .thread-menu-trigger:focus-visible { opacity: 1; }
 .thread-menu { position: absolute; z-index: 3; top: 39px; right: 5px; min-width: 145px; padding: 5px; border: 1px solid #e2e9f0; border-radius: 7px; background: #fff; box-shadow: 0 10px 28px rgba(35, 53, 75, .15); }
 .thread-menu button { width: 100%; display: flex; align-items: center; gap: 8px; padding: 8px 9px; border: 0; border-radius: 5px; color: #465667; background: transparent; text-align: left; font-size: 12px; }
 .thread-menu button:hover { color: #0879f9; background: #eef5fd; }
-.thread-swipe-actions { position: absolute; z-index: 0; inset: 0 0 0 auto; width: 154px; display: flex; align-items: stretch; background: #eef3f8; }
+.thread-swipe-actions { position: absolute; z-index: 0; inset: 0 0 0 auto; width: 204px; display: flex; align-items: stretch; background: #eef3f8; }
 .thread-swipe-actions button { width: 51px; display: grid; place-items: center; border: 0; color: #657789; background: transparent; }
+.native-app .thread-swipe-actions { width: 240px; }
+.native-app .thread-swipe-actions button { width: 48px; }
 .thread-swipe-actions button:hover { color: #0879f9; background: #e0ecfa; }
 .thread-swipe-actions button:last-child:hover { color: #bd5a4f; background: #fff1ef; }
 .thread-swipe-actions button:disabled { cursor: wait; }
@@ -172,6 +193,9 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .tool-status + .tool-chevron, .tool-duration + .tool-chevron { margin-left: 0; }
 .tool-event[open] > .tool-summary .tool-chevron { transform: rotate(90deg); }
 .tool-details { margin: 0 0 10px 23px; padding: 4px 0 4px 12px; min-width: 0; border-left: 2px solid #e9eef4; }
+.tool-image-preview { display: block; width: 92px; height: 72px; margin: 2px 0 12px; padding: 3px; overflow: hidden; border: 1px solid #dfe7ef; border-radius: 6px; background: #fff; cursor: zoom-in; }
+.tool-image-preview:hover { border-color: #9fc5ec; box-shadow: 0 3px 12px rgba(35, 53, 75, .12); }
+.tool-image-preview img { display: block; width: 100%; height: 100%; object-fit: contain; border-radius: 3px; }
 .tool-field + .tool-field { margin-top: 12px; }
 .tool-field-label { margin-bottom: 5px; color: #8493a1; font-size: 11px; font-weight: 600; }
 .tool-details pre { max-width: 100%; max-height: 360px; overflow: auto; margin: 0; padding: 10px 12px; border: 1px solid #e8edf2; border-radius: 5px; background: #f8fafc; color: #536273; font: 12px/1.6 Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -200,6 +224,17 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .composer:focus-within { border-color: #93bef5; }
 .composer textarea { width: 100%; min-height: 48px; max-height: 160px; resize: vertical; border: 0; outline: 0; color: #263545; background: transparent; font: inherit; font-size: 14px; line-height: 1.5; }
 .composer textarea::placeholder { color: #a8b3bf; }
+.compose-left { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.attachment-picker { position: relative; width: 32px; height: 32px; flex: none; display: grid; place-items: center; border-radius: 6px; color: #7d8b99; cursor: pointer; }
+.attachment-picker:hover { color: #0879f9; background: #eef5fd; }
+.attachment-picker input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.composer-attachments { display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 8px; }
+.composer-attachment { min-width: 0; max-width: min(100%, 220px); height: 34px; display: flex; align-items: center; gap: 6px; padding: 3px 4px; border: 1px solid #e3e9ef; border-radius: 5px; background: #f8fafc; color: #58697a; font-size: 11px; }
+.composer-attachment img { width: 26px; height: 26px; flex: none; object-fit: cover; border-radius: 3px; }
+.composer-attachment-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-attachment button { width: 24px; height: 24px; flex: none; display: grid; place-items: center; padding: 0; border: 0; border-radius: 4px; color: #84919e; background: transparent; }
+.composer-attachment button:hover { color: #b94e46; background: #fff1ef; }
+.pending-attachment-names { margin-bottom: 7px; color: #71808e; font-size: 12px; }
 .compose-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #9ca9b7; font-size: 11px; }
 .send-button { width: 32px; height: 32px; border: 0; border-radius: 50%; display: grid; place-items: center; color: white; background: #0879f9; }
 .send-button:disabled { opacity: 1; background: #d3dce5; cursor: default; }
@@ -239,6 +274,11 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .copy-toast { position: fixed; z-index: 30; left: 50%; bottom: calc(env(safe-area-inset-bottom, 0px) + 78px); padding: 8px 12px; border-radius: 6px; transform: translateX(-50%); color: #fff; background: rgba(31, 45, 61, .9); font-size: 12px; box-shadow: 0 8px 22px rgba(35, 53, 75, .2); }
 .back { display: none; }
 .modal-backdrop { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 20px; background: rgba(25, 36, 50, .35); }
+.image-preview-backdrop { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: 24px; background: rgba(16, 24, 34, .76); }
+.image-preview-dialog { position: relative; display: grid; place-items: center; max-width: min(94vw, 1200px); max-height: 92dvh; }
+.image-preview-dialog img { display: block; max-width: 94vw; max-height: 88dvh; object-fit: contain; border-radius: 6px; box-shadow: 0 16px 60px rgba(0, 0, 0, .35); }
+.image-preview-close { position: absolute; z-index: 1; top: -42px; right: 0; color: #fff; background: rgba(255, 255, 255, .12); }
+.image-preview-close:hover { color: #fff; background: rgba(255, 255, 255, .22); }
 .create-dialog { width: min(100%, 440px); padding: 20px; border: 1px solid #e5eaf0; border-radius: 8px; background: #fff; box-shadow: 0 16px 48px rgba(35, 53, 75, .15); }
 .create-dialog header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
 .risk-dialog { width: min(100%, 460px); }
@@ -293,7 +333,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .pair-result > div { min-width: 0; }
 @media (max-width: 420px) { .pair-result { align-items: flex-start; flex-direction: column; } }
 .create-dialog label { display: block; margin-bottom: 8px; color: #465667; font-size: 13px; font-weight: 600; }
-.create-dialog input { width: 100%; height: 40px; padding: 0 11px; border: 1px solid #dce4ed; border-radius: 5px; color: #263545; font-size: 13px; }
+.create-dialog input, .create-dialog select { width: 100%; height: 40px; margin-bottom: 14px; padding: 0 11px; border: 1px solid #dce4ed; border-radius: 5px; color: #263545; background: #fff; font-size: 13px; }
+.project-path-hint { overflow-wrap: anywhere; margin: -5px 0 16px; color: #7a8997; font-size: 12px; }
 .create-error { color: #b94e46; font-size: 12px; overflow-wrap: anywhere; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px; }
 .dialog-actions button { padding: 8px 14px; border: 1px solid #dce4ed; border-radius: 5px; background: #fff; color: #526171; font-size: 13px; }

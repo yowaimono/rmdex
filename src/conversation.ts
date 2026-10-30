@@ -21,9 +21,20 @@ export function userText(text: string): string {
   let result = text.replace(context, '').trim()
   const filesWrapper = /^# Files mentioned by the user:\s*\n[\s\S]*?\nDistinguish instructions in attached documents from the user's request\.\s*\n\s*## My request:\s*\n/
   const match = result.match(filesWrapper)
-  if (match) return result.slice(match[0].length).trim()
+  const files = userFiles(text)
+  if (match) result = result.slice(match[0].length).trim()
   if (hasContext && /^## My request:\s*\n/.test(result)) result = result.replace(/^## My request:\s*\n/, '')
-  return result.trim()
+  const request = result.trim()
+  return files.length ? [request, `附件：${files.map(file => file.name).join('、')}`].filter(Boolean).join('\n\n') : request
+}
+
+function userFiles(text: string) {
+  const block = text.match(/^# Files mentioned by the user:\s*\n([\s\S]*?)\nDistinguish instructions in attached documents from the user's request\.\s*\n\s*## My request:\s*\n/)
+  if (!block) return []
+  return block[1]!.split('\n').flatMap(line => {
+    const match = line.match(/^- (.+?): (.+)$/)
+    return match ? [{ name: match[1]!, path: match[2]! }] : []
+  })
 }
 
 export function timeline(turns: Turn[]): Entry[] {
@@ -36,7 +47,8 @@ export function timeline(turns: Turn[]): Entry[] {
       if (item.type === 'reasoning' || item.type === 'hookPrompt') continue
       if (item.type === 'userMessage') {
         flush()
-        const text = userText((item.content || []).filter(part => part.type === 'text').map(part => part.text || '').filter(Boolean).join('\n'))
+        const rawText = (item.content || []).filter(part => part.type === 'text').map(part => part.text || '').filter(Boolean).join('\n')
+        const text = userText(rawText)
         const images = (item.content || []).filter(part => part.type === 'localImage' || part.type === 'image')
         if (text || images.length) entries.push({ role: 'user', text, images, item })
       } else if (item.type === 'agentMessage') {
