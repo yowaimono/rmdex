@@ -226,7 +226,16 @@ async function listModels() {
 function subscribeToThread(threadId: string) {
   let subscription = subscriptions.get(threadId)
   if (!subscription) {
-    subscription = rpc('thread/resume', { threadId, excludeTurns: true }).then(() => {})
+    subscription = rpc('thread/resume', { threadId, excludeTurns: true }).then(() => {}).catch(error => {
+      // Desktop may already own the thread writer. Historical reads remain
+      // valid in that case; only live event subscription is unavailable.
+      const message = error instanceof Error ? error.message : String(error)
+      if (/active writer/i.test(message)) {
+        console.warn(`[rmdex] thread ${threadId} is already owned by another writer; continuing without live subscription`)
+        return
+      }
+      throw error
+    })
     subscriptions.set(threadId, subscription)
     subscription.catch(() => { if (subscriptions.get(threadId) === subscription) subscriptions.delete(threadId) })
   }
@@ -270,6 +279,9 @@ const server = createServer(async (req, res) => {
       const stopMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/stop$/)
       const historyMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/history$/)
       const renameMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/name$/)
+      const archiveMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/(archive|unarchive)$/)
+      const deleteMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/delete$/)
+      const queueMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/(queue|steer)$/)
       const approvalMatch = url.pathname.match(/^\/api\/approvals\/([a-zA-Z0-9-]+)$/)
       if (url.pathname === '/api/settings') {
         if (!['ask', 'auto', 'full'].includes(data.permissionMode)) throw new Error('请选择有效的权限模式')
@@ -298,6 +310,34 @@ const server = createServer(async (req, res) => {
         await persistThreadNames()
         threadListCache = undefined
         result = { threadId, name: threadNames[threadId] }
+      } else if (archiveMatch) {
+        const threadId = archiveMatch[1]!
+        if (sharedMode && !newThreads.has(threadId)) await subscribeToThread(threadId)
+        await rpc(`thread/${archiveMatch[2]}`, { threadId })
+        threadListCache = undefined
+        result = { threadId, archived: archiveMatch[2] === 'archive' }
+      } else if (deleteMatch) {
+        const threadId = deleteMatch[1]!
+        await rpc('thread/delete', { threadId })
+        threadListCache = undefined
+        newThreads.delete(threadId)
+        liveTurns.delete(threadId)
+        activeTurns.delete(threadId)
+        result = { threadId, deleted: true }
+      } else if (queueMatch) {
+        const threadId = queueMatch[1]!
+        if (typeof data.text !== 'string' || !data.text.trim() || data.text.length > 32000) throw new Error('消息不能为空或超出长度限制')
+        if (sharedMode && !newThreads.has(threadId)) await subscribeToThread(threadId)
+        const input = [{ type: 'text', text: data.text, text_elements: [] }]
+        if (queueMatch[2] === 'queue') {
+          const queued = await rpc('thread/queue/add', { threadId, input, clientUserMessageId: typeof data.clientUserMessageId === 'string' ? data.clientUserMessageId : randomUUID() })
+          result = { outcome: 'queued', threadId, queuedSubmission: (queued as { queuedSubmission?: unknown }).queuedSubmission || null }
+        } else {
+          const expectedTurnId = typeof data.expectedTurnId === 'string' && data.expectedTurnId ? data.expectedTurnId : activeTurns.get(threadId)
+          if (!expectedTurnId) throw new Error('当前没有可引导的运行中任务')
+          const steered = await rpc('turn/steer', { threadId, expectedTurnId, input, clientUserMessageId: typeof data.clientUserMessageId === 'string' ? data.clientUserMessageId : randomUUID() })
+          result = { outcome: 'steered', threadId, expectedTurnId, ...(steered && typeof steered === 'object' ? steered : {}) }
+        }
       } else if (historyMatch) {
         const threadId = historyMatch[1]!
         if (typeof data.cursor !== 'string' || !data.cursor || data.cursor.length > 4096) throw new Error('缺少有效历史游标')
@@ -365,7 +405,11 @@ const server = createServer(async (req, res) => {
           approvals: true,
           create: true,
           send: true,
+          queue: true,
+          steer: true,
           rename: true,
+          archive: true,
+          delete: true,
           history: false,
           createRequiresPrompt: false,
         },

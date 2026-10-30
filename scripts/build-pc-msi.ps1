@@ -1,6 +1,6 @@
 ﻿$ErrorActionPreference = 'Stop'
 $project = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$version = '0.1.0'
+$version = '0.1.6'
 $work = Join-Path $project 'work\pc-msi'
 $stage = Join-Path $work 'payload'
 $wix = 'D:\WorkSpace\frametell\node_modules\.pnpm\electron-winstaller@5.4.0\node_modules\electron-winstaller\vendor'
@@ -17,11 +17,19 @@ New-Item -ItemType Directory -Force -Path $stage,$outDir | Out-Null
 
 Copy-Item -LiteralPath (Join-Path $project 'dist-pc') -Destination $stage -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $project 'pc') -Destination $stage -Recurse -Force
+Copy-Item -LiteralPath (Join-Path $project 'server') -Destination $stage -Recurse -Force
+Copy-Item -LiteralPath (Join-Path $project 'src') -Destination $stage -Recurse -Force
+New-Item -ItemType Directory -Force -Path (Join-Path $stage 'scripts') | Out-Null
+Copy-Item -LiteralPath (Join-Path $project 'scripts\\start-shared-desktop.ts') -Destination (Join-Path $stage 'scripts') -Force
 New-Item -ItemType Directory -Force -Path (Join-Path $stage 'node_modules') | Out-Null
 & robocopy.exe (Join-Path $project 'node_modules') (Join-Path $stage 'node_modules') /E /XD (Join-Path $project 'node_modules\.cache') (Join-Path $project 'node_modules\.vite') (Join-Path $project 'node_modules\@capacitor\android\android') /NFL /NDL /NJH /NJS /NP | Out-Null
 if ($LASTEXITCODE -gt 7) { throw 'Failed to copy node_modules.' }
 Copy-Item -LiteralPath (Join-Path $project 'package.json') -Destination $stage -Force
 Copy-Item -LiteralPath (Join-Path $project 'package-lock.json') -Destination $stage -Force -ErrorAction SilentlyContinue
+foreach ($secretName in @('.device-token', '.web-client-token')) {
+  $secretPath = Join-Path $project $secretName
+  if (Test-Path -LiteralPath $secretPath) { Copy-Item -LiteralPath $secretPath -Destination $stage -Force }
+}
 Copy-Item -LiteralPath (Join-Path $project 'work\pc-webview-compact\rmdex-pc-3x4.exe') -Destination $stage -Force
 Copy-Item -LiteralPath (Join-Path $project 'work\pc-webview-compact\Microsoft.Web.WebView2.Core.dll'),(Join-Path $project 'work\pc-webview-compact\Microsoft.Web.WebView2.WinForms.dll'),(Join-Path $project 'work\pc-webview-compact\WebView2Loader.dll') -Destination $stage -Force
 
@@ -31,34 +39,55 @@ Get-ChildItem -LiteralPath (Join-Path $stage 'node_modules') -Directory -Recurse
 Remove-Item -LiteralPath (Join-Path $stage 'node_modules\@capacitor\android\capacitor\build') -Recurse -Force -ErrorAction SilentlyContinue
 Copy-Item -LiteralPath 'D:\bin\nodejs\node.exe' -Destination $runtime -Force
 
-$files = Get-ChildItem -LiteralPath $stage -File
+# Android/Vite build outputs are not needed by the PC service and can contain
+# transient files that disappear while WiX is compiling the manifest.
+$files = Get-ChildItem -LiteralPath $stage -File -Recurse | Where-Object {
+  $_.FullName -notmatch '\\node_modules\\.*\\(?:build|\.gradle|\.vite|\.cache)(?:\\|$)'
+}
 $components = New-Object System.Text.StringBuilder
 $dirMap = @{ '' = 'INSTALLFOLDER' }
-$dirRows = New-Object System.Collections.Generic.List[object]
+$dirNames = @{ '' = '' }
+$children = @{ '' = New-Object System.Collections.Generic.List[string] }
 $index = 0
+function Escape-Xml([string]$value) {
+  return [System.Security.SecurityElement]::Escape($value)
+}
 foreach ($file in $files) {
   $relative = $file.FullName.Substring($stage.Length + 1)
   $parts = $relative -split '[\\/]'
-  $dirParts = if ($parts.Count -gt 1) { $parts[0..($parts.Count - 2)] } else { @() }
-  $parent = 'INSTALLFOLDER'; $key = ''
-    if (-not $dirMap.ContainsKey($key)) {
-      $id = 'DIR_' + ([Math]::Abs($key.GetHashCode())).ToString()
-      $dirMap[$key] = $id
-      [void]$dirRows.Add([pscustomobject]@{ Id=$id; Parent=$parent; Name=$part; Key=$key })
+  $dirParts = if ($parts.Count -gt 1) { @($parts[0..($parts.Count - 2)]) } else { @() }
+  $key = ''
+  foreach ($part in $dirParts) {
+    $next = if ($key) { "$key\$part" } else { $part }
+    if (-not $dirMap.ContainsKey($next)) {
+      $dirMap[$next] = 'DIR' + $dirMap.Count
+      $dirNames[$next] = $part
+      $children[$next] = New-Object System.Collections.Generic.List[string]
+      [void]$children[$key].Add($next)
     }
-    $parent = $dirMap[$key]
+    $key = $next
+  }
+  $parent = $dirMap[$key]
   $componentId = "CMP$index"; $fileId = "FIL$index"
-  $source = $file.FullName.Replace('&','&amp;').Replace('"','&quot;')
-  $name = $file.Name.Replace('&','&amp;').Replace('"','&quot;')
+  $source = Escape-Xml $file.FullName
+  $name = Escape-Xml $file.Name
   $guid = [Guid]::NewGuid().ToString().ToUpper()
   [void]$components.AppendLine(("      <Component Id='{0}' Directory='{1}' Guid='{5}'><File Id='{2}' Source='{3}' Name='{4}' KeyPath='yes' /></Component>" -f $componentId,$parent,$fileId,$source,$name,$guid))
   $index++
 }
 
-$dirs = New-Object System.Text.StringBuilder
-foreach ($row in ($dirRows | Sort-Object { $_.Key.Length })) {
-  [void]$dirs.AppendLine(("        <Directory Id='{0}' Name='{1}' />" -f $row.Id,$row.Name))
+$directoryXml = New-Object System.Text.StringBuilder
+function Add-DirectoryXml([string]$parentKey, [int]$indent) {
+  foreach ($key in ($children[$parentKey] | Sort-Object)) {
+    $padding = (' ' * $indent)
+    $id = $dirMap[$key]
+    $name = Escape-Xml $dirNames[$key]
+    [void]$directoryXml.AppendLine("$padding<Directory Id='$id' Name='$name'>")
+    Add-DirectoryXml $key ($indent + 2)
+    [void]$directoryXml.AppendLine("$padding</Directory>")
+  }
 }
+Add-DirectoryXml '' 8
 $wxs = Join-Path $work 'rmdex.wxs'
 $xml = @"
 <?xml version="1.0" encoding="UTF-8"?>
@@ -70,7 +99,7 @@ $xml = @"
     <Directory Id="TARGETDIR" Name="SourceDir">
       <Directory Id="LocalAppDataFolder">
         <Directory Id="INSTALLFOLDER" Name="rmdex-pc">
-$dirs
+$directoryXml
         </Directory>
       </Directory>
       <Directory Id="ProgramMenuFolder"><Directory Id="ApplicationProgramsFolder" Name="rmdex PC" /></Directory>
@@ -87,6 +116,6 @@ $dirs
 $obj = Join-Path $work 'rmdex.wixobj'
 & $candle -nologo -out $obj $wxs
 if ($LASTEXITCODE -ne 0) { throw "WiX candle failed: $LASTEXITCODE" }
-& $light -nologo -out $msi $obj
-& $light -nologo -sice:ICE30 -out $msi $obj
+& $light -nologo -sice:ICE30 -sice:ICE38 -sice:ICE64 -sice:ICE91 -out $msi $obj
+if ($LASTEXITCODE -ne 0) { throw "WiX light failed: $LASTEXITCODE" }
 Write-Host "Built $msi"

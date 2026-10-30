@@ -72,7 +72,7 @@ export class DesktopAdapter {
     const names = new Set(tools.map(tool => tool.name))
     const data = sharedDesktopModels(tools)
     const projects = names.has('list_projects') ? await this.projects() : []
-    return { data, capabilities: { mode: 'desktop', models: data.length > 0, permissions: false, stop: false, approvals: false, create: names.has('create_thread'), send: names.has('send_message_to_thread'), rename: false, history: true, createRequiresPrompt: true }, projects }
+    return { data, capabilities: { mode: 'desktop', models: data.length > 0, permissions: false, stop: false, approvals: false, create: names.has('create_thread'), send: names.has('send_message_to_thread'), queue: false, steer: false, rename: false, archive: false, delete: false, history: true, createRequiresPrompt: true }, projects }
   }
   private async projects() {
     const raw = await this.client.call('list_projects', {})

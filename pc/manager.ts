@@ -9,6 +9,21 @@ type ProcessState = 'stopped' | 'starting' | 'running' | 'error'
 type Phone = { name: string; online: boolean; lastSeenAt?: number }
 type Settings = { permissionMode: PermissionMode }
 
+/**
+ * Codex Desktop starts an app-server client process, while the shared managed
+ * daemon also runs as codex.exe. The daemon must survive PC restarts because
+ * both rmdex and Desktop use its control socket.
+ */
+export function isCodexDesktopProcess(commandLine: string) {
+  const normalized = commandLine.replace(/\s+/g, ' ').trim().toLowerCase()
+  if (!normalized) return false
+  if (/(?:^|\s)--managed-daemon(?:\s|$)/.test(normalized)) return false
+  if (/\bapp-server\s+daemon\s+pid-update-loop\b/.test(normalized)) return false
+  return normalized.includes('app-server')
+    || normalized.includes('features.code_mode_host=true')
+    || normalized.includes('codex_app.enabled=true')
+}
+
 export type PcStatus = {
   phase: ProcessState
   permissionMode: PermissionMode
@@ -132,7 +147,7 @@ export class PcManager {
     const processes = output.split(/\r?\n/).map(line => line.trim()).filter(Boolean).map(line => {
       const separator = line.indexOf('|')
       return { pid: Number(separator < 0 ? line : line.slice(0, separator)), commandLine: separator < 0 ? '' : line.slice(separator + 1) }
-    }).filter(item => Number.isInteger(item.pid) && item.pid > 0)
+    }).filter(item => Number.isInteger(item.pid) && item.pid > 0 && isCodexDesktopProcess(item.commandLine))
     for (const process of processes) await run('taskkill.exe', ['/PID', String(process.pid), '/T', '/F']).catch(() => {})
     if (processes.length) await new Promise(resolve => setTimeout(resolve, 500))
     return processes.length
@@ -150,9 +165,20 @@ export class PcManager {
 
   private async startDaemon() {
     const codex = await findCodexExecutable()
+    const daemonReady = async () => {
+      try {
+        await run(codex, ['app-server', 'daemon', 'version'])
+        return true
+      } catch {
+        return false
+      }
+    }
+    // The control socket is a Windows named-pipe reparse point and can remain
+    // after the daemon exits. Probe the daemon instead of trusting the path.
+    if (await daemonReady()) return
     await run(codex, ['app-server', 'daemon', 'start'])
     const deadline = Date.now() + 30_000
-    while (!await exists(this.socketPath)) {
+    while (!await daemonReady()) {
       if (Date.now() > deadline) throw new Error(`Codex managed daemon 未就绪：${this.socketPath}`)
       await new Promise(resolve => setTimeout(resolve, 500))
     }
@@ -166,7 +192,9 @@ export class PcManager {
     const errorLog = createWriteStream(stderr, { flags: 'a' })
     const tokenPath = join(this.root, '.device-token')
     const deviceToken = process.env.RMDEX_DEVICE_TOKEN || (await readFile(tokenPath, 'utf8').catch(() => '')).trim()
-    const child = spawn(node, ['--import', 'tsx', join(this.root, 'server', 'index.ts')], {
+    // Keep the entrypoint relative to cwd. Node 24 + tsx can reject a Windows
+    // drive-letter path passed as an ESM entrypoint (ERR_UNSUPPORTED_ESM_URL_SCHEME).
+    const child = spawn(node, ['--import', 'tsx', 'server/index.ts'], {
       cwd: this.root,
       env: {
         ...process.env,
@@ -196,7 +224,7 @@ export class PcManager {
   }
 
   private startDesktop() {
-    const child = spawn(process.execPath, ['--import', 'tsx', join(this.root, 'scripts', 'start-shared-desktop.ts'), '--ensure-daemon'], {
+    const child = spawn(process.execPath, ['--import', 'tsx', 'scripts/start-shared-desktop.ts', '--ensure-daemon', '--wait-for-desktop-exit'], {
       cwd: this.root,
       env: { ...process.env, RMDEX_CODEX_MODE: 'shared', RMDEX_CODEX_SOCKET: this.socketPath },
       stdio: ['ignore', this.desktopLog, this.desktopLog],

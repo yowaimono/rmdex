@@ -49,8 +49,14 @@ export function queueThreadCacheWrite(key: string, result: unknown) {
     pending.delete(key)
     void openDatabase().then(db => {
       if (!db) return
-      const request = db.transaction(storeName, 'readwrite').objectStore(storeName).put({ key, savedAt: Date.now(), result } satisfies CacheRecord)
-      request.onerror = () => undefined
+      // IndexedDB uses the structured-clone algorithm. Keep this boundary
+      // JSON-only so Vue proxies or other host objects never reach IDB.
+      let snapshot: unknown
+      try { snapshot = JSON.parse(JSON.stringify(result)) } catch { return }
+      try {
+        const request = db.transaction(storeName, 'readwrite').objectStore(storeName).put({ key, savedAt: Date.now(), result: snapshot } satisfies CacheRecord)
+        request.onerror = () => undefined
+      } catch { /* DataCloneError or a closed database must not break the UI. */ }
     })
   }, 750)
   pending.set(key, timer)

@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process'
-import { access } from 'node:fs/promises'
+import { access, readdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -16,7 +16,25 @@ const ensureDaemon = argumentsList.includes('--ensure-daemon')
 const executableArgument = argumentsList.find(argument => !argument.startsWith('--'))
 const codexHome = process.env.CODEX_HOME || join(homedir(), '.codex')
 const socket = process.env.RMDEX_CODEX_SOCKET || join(codexHome, 'app-server-control', 'app-server-control.sock')
-const codexExecutable = process.env.RMDEX_CODEX || 'codex'
+async function findCodexExecutable() {
+  if (process.env.RMDEX_CODEX && await access(process.env.RMDEX_CODEX).then(() => true).catch(() => false)) return process.env.RMDEX_CODEX
+  if (process.platform !== 'win32') return 'codex'
+  const root = join(process.env.LOCALAPPDATA || '', 'OpenAI', 'Codex', 'bin')
+  const candidates: string[] = []
+  async function visit(directory: string) {
+    if (!await access(directory).then(() => true).catch(() => false)) return
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name)
+      if (entry.isDirectory()) await visit(path)
+      else if (entry.isFile() && entry.name.toLowerCase() === 'codex.exe') candidates.push(path)
+    }
+  }
+  await visit(root)
+  candidates.sort()
+  return candidates.at(-1) || 'codex'
+}
+
+const codexExecutable = await findCodexExecutable()
 
 function findDesktopExecutable() {
   if (executableArgument) return executableArgument
@@ -33,7 +51,7 @@ function desktopAppServerCount() {
   if (process.platform !== 'win32') return 0
   const output = execFileSync('powershell.exe', [
     '-NoProfile', '-NonInteractive', '-Command',
-    `(Get-CimInstance Win32_Process -Filter "Name = 'codex.exe'" | Where-Object { $_.CommandLine -match "app-server.*analytics-default-enabled|features\\.code_mode_host=true.*app-server" } | Measure-Object).Count`,
+    `$codex = (Get-CimInstance Win32_Process -Filter "Name = 'codex.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine -notmatch "--managed-daemon|app-server\\s+daemon\\s+pid-update-loop" -and $_.CommandLine -match "app-server.*analytics-default-enabled|features\\.code_mode_host=true.*app-server|codex_app\\.enabled=true" } | Measure-Object).Count; $desktop = (Get-CimInstance Win32_Process -Filter "Name = 'ChatGPT.exe'" | Where-Object { $_.ExecutablePath -and $_.ExecutablePath -match "OpenAI\\.Codex" } | Measure-Object).Count; $codex + $desktop`,
   ], { encoding: 'utf8' }).trim()
   return Number(output) || 0
 }
@@ -68,7 +86,7 @@ async function runCodexDaemonStart() {
 const executable = findDesktopExecutable()
 if (waitForDesktopExit) await waitForDesktopToExit()
 if (ensureDaemon) await runCodexDaemonStart()
-const bridge = await createDesktopBridge(socket, process.env.RMDEX_CODEX || 'codex')
+const bridge = await createDesktopBridge(socket, codexExecutable)
 try {
   await new Promise<void>((resolve, reject) => {
     const ws = new WebSocket(bridge.url, { handshakeTimeout: 5000 })
