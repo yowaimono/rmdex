@@ -456,7 +456,7 @@ const server = createServer(async (req, res) => {
     if (!['GET', 'POST', 'DELETE'].includes(req.method || '')) { json(res, 405, { error: 'Method not allowed' }); return }
     const allowed = req.method === 'GET'
       ? /^\/api\/(?:models|settings|threads(?:\/[a-zA-Z0-9-]+(?:\/(?:status|incremental|queue))?)?|images\/[a-f0-9-]+)$/.test(url.pathname)
-      : /^\/api\/(?:settings|threads|threads\/[a-zA-Z0-9-]+\/(?:send|stop|history|name|fork|archive|unarchive|delete|queue|steer)|threads\/[a-zA-Z0-9-]+\/queue\/[^/]+(?:\/steer)?|approvals\/[a-zA-Z0-9-]+)$/.test(url.pathname)
+      : /^\/api\/(?:settings|threads|threads\/[a-zA-Z0-9-]+\/(?:send|stop|history|name|fork|archive|unarchive|delete|queue|steer)|threads\/[a-zA-Z0-9-]+\/queue\/[^/]+(?:\/(?:steer|delete))?|approvals\/[a-zA-Z0-9-]+)$/.test(url.pathname)
     if (!allowed || url.search) { json(res, 404, { error: 'Not found' }); return }
     const requestData = req.method === 'POST' ? await body(req) : undefined
     const result = await rpc(device.id, url.pathname + url.search, req.method!, requestData)

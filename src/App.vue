@@ -5,7 +5,7 @@ import { App as NativeApp } from '@capacitor/app'
 import { LocalNotifications } from '@capacitor/local-notifications'
 import { CapacitorBarcodeScanner, CapacitorBarcodeScannerTypeHint } from '@capacitor/barcode-scanner'
 import MarkdownIt from 'markdown-it'
-import { Archive, ArrowLeft, ArrowUp, ChevronRight, CircleAlert, CornerDownRight, Ellipsis, ExternalLink, GitFork, LoaderCircle, Menu, MessageSquare, Monitor, PanelLeftClose, Pencil, Plus, RefreshCw, RotateCcw, Search, Square, Wrench, X, QrCode, Copy, Smartphone, Trash2, ShieldAlert } from 'lucide-vue-next'
+import { Archive, ArrowLeft, ArrowUp, ChevronRight, CircleAlert, CircleCheck, CornerDownRight, Ellipsis, ExternalLink, GitFork, LoaderCircle, Menu, MessageSquare, Monitor, PanelLeftClose, Pencil, Plus, RefreshCw, RotateCcw, Search, Square, Wrench, X, QrCode, Copy, Smartphone, Trash2, ShieldAlert } from 'lucide-vue-next'
 import QRCode from 'qrcode'
 import logoUrl from './assets/rmdex-logo.jpg'
 import ToolEvent from './components/ToolEvent.vue'
@@ -104,6 +104,7 @@ const queuedSubmissions = ref<QueuedSubmission[]>([])
 const queueActionId = ref<string | null>(null)
 const queueMenuId = ref<string | null>(null)
 const composerInput = ref<HTMLTextAreaElement | null>(null)
+const threadIndicators = ref<Record<string, 'working' | 'completed' | 'failed'>>({})
 const permissionMode = ref<'ask' | 'auto' | 'full'>((localStorage.getItem('rmdex-permission-mode') as 'ask' | 'auto' | 'full' | null) || 'ask')
 const showFullAccessConfirm = ref(false)
 const fullAccessConfirmed = ref(false)
@@ -118,6 +119,7 @@ type Approval = { id: string; method: string; params: { command?: string; reason
 const pendingApprovals = ref<Approval[]>([])
 let poll: ReturnType<typeof setInterval> | undefined
 let pollBusy = false
+let threadStatusPollBusy = false
 let appStateListener: { remove: () => Promise<void> } | undefined
 let notificationListener: { remove: () => Promise<void> } | undefined
 let appActive = true
@@ -154,6 +156,12 @@ const visibleThreadPool = computed(() => {
   return [...new Map([...current, ...archivedThreads.value].map(thread => [thread.id, thread])).values()]
 })
 const filtered = computed(() => visibleThreadPool.value.filter((t) => `${t.name || ''} ${t.preview || ''} ${t.cwd || ''}`.toLowerCase().includes(query.value.toLowerCase())))
+function threadIndicator(thread: Thread) {
+  if (selected.value?.id === thread.id && activeTurnId.value) return 'working'
+  const type = thread.status?.type || ''
+  if (['active', 'inProgress', 'running'].includes(type)) return 'working'
+  return threadIndicators.value[thread.id] || null
+}
 const remoteMode = computed(() => Capacitor.isNativePlatform() || !!clientToken.value || !['localhost', '127.0.0.1'].includes(location.hostname))
 const messages = computed(() => timeline(selected.value?.turns || []))
 const working = computed(() => !!activeTurnId.value || sendingThreadId.value === selected.value?.id || !!selected.value?.desktopDraft?.preparing)
@@ -336,6 +344,8 @@ function mergeThreadStatus(result: ThreadStatus) {
   activeTurnId.value = result.activeTurnId
   pendingApprovals.value = result.approvals || []
   lastTurn.value = result.lastTurn || null
+  if (result.activeTurnId) threadIndicators.value[result.threadId] = 'working'
+  else if (result.lastTurn?.status && ['completed', 'interrupted', 'failed', 'error'].includes(result.lastTurn.status)) threadIndicators.value[result.threadId] = ['failed', 'error'].includes(result.lastTurn.status) ? 'failed' : 'completed'
   rememberThreadRead({ thread: selected.value, activeTurnId: activeTurnId.value, approvals: pendingApprovals.value, lastTurn: lastTurn.value, page: threadCache.get(threadCacheKey(result.threadId))?.page })
   maybeNotifyTaskComplete(result)
 }
@@ -346,6 +356,8 @@ function applyRead(result: ReadResult) {
     result.thread.turns = normalizeTurns(result.thread.turns)
   }
   selected.value = result.thread; activeTurnId.value = result.activeTurnId; pendingApprovals.value = result.approvals || []; lastTurn.value = result.lastTurn || null
+  if (result.activeTurnId) threadIndicators.value[result.thread.id] = 'working'
+  else if (result.lastTurn?.status && ['completed', 'interrupted', 'failed', 'error'].includes(result.lastTurn.status)) threadIndicators.value[result.thread.id] = ['failed', 'error'].includes(result.lastTurn.status) ? 'failed' : 'completed'
   for (const turn of result.thread.turns || []) for (const item of turn.items || []) if (item.type === 'userMessage') for (const part of item.content || []) if (part.assetUrl && !authenticatedImages.value[part.assetUrl] && !imageLoads.has(part.assetUrl)) {
     const assetUrl = part.assetUrl
     const request = (async () => {
@@ -798,12 +810,14 @@ async function refresh(force = true) {
 function queuedText(item: QueuedSubmission) {
   return (item.input || []).filter(part => part.type === 'text').map(part => part.text || '').join('\n').trim() || '排队任务'
 }
-async function loadQueuedSubmissions(threadId: string) {
-  if (desktopMode.value) { queuedSubmissions.value = []; return }
+async function loadQueuedSubmissions(threadId: string): Promise<QueuedSubmission[] | null> {
+  if (desktopMode.value) { queuedSubmissions.value = []; return [] }
   try {
     const result = await get<{ data?: QueuedSubmission[] }>(`/api/threads/${threadId}/queue`)
-    if (selected.value?.id === threadId) queuedSubmissions.value = Array.isArray(result.data) ? result.data.filter(item => typeof item?.id === 'string') : []
-  } catch { /* Older local agents may not expose queue/list yet; keep locally confirmed queue items visible. */ }
+    const items = Array.isArray(result.data) ? result.data.filter(item => typeof item?.id === 'string') : []
+    if (selected.value?.id === threadId) queuedSubmissions.value = items
+    return items
+  } catch { /* Older local agents may not expose queue/list yet; clear stale local entries after a terminal turn. */ return null }
 }
 async function deleteQueued(item: QueuedSubmission) {
   if (!selected.value || queueActionId.value) return
@@ -811,7 +825,7 @@ async function deleteQueued(item: QueuedSubmission) {
   queueActionId.value = item.id
   queueMenuId.value = null
   try {
-    const response = await authenticatedFetch(`/api/threads/${threadId}/queue/${encodeURIComponent(item.id)}`, { method: 'DELETE' }, 'client')
+    const response = await authenticatedFetch(`/api/threads/${threadId}/queue/${encodeURIComponent(item.id)}/delete`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }, 'client')
     const result = await readJsonResponse(response, '删除排队任务失败')
     if (!response.ok) throw new Error(result?.error || '删除排队任务失败')
     await loadQueuedSubmissions(threadId)
@@ -824,7 +838,7 @@ async function editQueued(item: QueuedSubmission) {
   queueActionId.value = item.id
   queueMenuId.value = null
   try {
-    const response = await authenticatedFetch(`/api/threads/${threadId}/queue/${encodeURIComponent(item.id)}`, { method: 'DELETE' }, 'client')
+    const response = await authenticatedFetch(`/api/threads/${threadId}/queue/${encodeURIComponent(item.id)}/delete`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }, 'client')
     const result = await readJsonResponse(response, '编辑排队任务失败')
     if (!response.ok) throw new Error(result?.error || '编辑排队任务失败')
     drafts.value[threadId] = queuedText(item)
@@ -909,12 +923,14 @@ async function updateThread() {
   const element = conversation.value
   const follow = element ? element.scrollHeight - element.scrollTop - element.clientHeight < 100 : false
   pollBusy = true
+  let queueStatus: ThreadStatus | undefined
   try {
     if (desktopMode.value) {
       const result = await readThread(id, true)
       if (version === selectionVersion) { applyRead(result); if (follow) await scrollToLatest() }
     } else {
       const result = await get<ThreadStatus>(`/api/threads/${id}/status`)
+      queueStatus = result
       if (version === selectionVersion) {
         mergeThreadStatus(result)
         if (result.lastTurn?.id && !selected.value?.turns?.some(turn => turn.id === result.lastTurn?.id)) {
@@ -927,9 +943,30 @@ async function updateThread() {
         if (follow) await scrollToLatest()
       }
     }
-    if (version === selectionVersion) await loadQueuedSubmissions(id)
+    if (version === selectionVersion && queueStatus) {
+      const queued = await loadQueuedSubmissions(id)
+      const terminal = !queueStatus.activeTurnId && queueStatus.lastTurn?.status && ['completed', 'interrupted', 'failed', 'error'].includes(queueStatus.lastTurn.status)
+      if (terminal && queued === null) queuedSubmissions.value = []
+    }
   } catch (e) { if (version === selectionVersion) error.value = e instanceof Error ? e.message : String(e) }
   finally { pollBusy = false }
+}
+async function refreshThreadIndicators() {
+  if (desktopMode.value || threadStatusPollBusy) return
+  const candidates = threads.value.filter(thread => thread.id !== selected.value?.id && (['active', 'inProgress', 'running'].includes(thread.status?.type || '') || threadIndicators.value[thread.id] === 'working'))
+  if (!candidates.length) return
+  threadStatusPollBusy = true
+  try {
+    await Promise.allSettled(candidates.map(async thread => {
+      const result = await get<ThreadStatus>(`/api/threads/${thread.id}/status`)
+      const wasWorking = ['active', 'inProgress', 'running'].includes(thread.status?.type || '') || threadIndicators.value[thread.id] === 'working'
+      const terminal = result.lastTurn?.status && ['completed', 'interrupted', 'failed', 'error'].includes(result.lastTurn.status)
+      if (result.activeTurnId) threadIndicators.value[thread.id] = 'working'
+      else if (terminal || wasWorking) threadIndicators.value[thread.id] = terminal && ['failed', 'error'].includes(result.lastTurn!.status) ? 'failed' : 'completed'
+      threads.value = threads.value.map(item => item.id === thread.id ? { ...item, status: { ...(item.status || {}), type: result.activeTurnId ? 'active' : 'idle' } } : item)
+      if (terminal) maybeNotifyTaskComplete(result)
+    }))
+  } finally { threadStatusPollBusy = false }
 }
 async function post(path: string, body: unknown) {
   const response = await authenticatedFetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, 'client')
@@ -1169,6 +1206,7 @@ async function sendDesktopDraft(thread: Thread, text: string) {
   const created = result.thread
   localDraftThreads.value = localDraftThreads.value.filter(item => item.id !== thread.id)
   threads.value = [created, ...threads.value.filter(item => item.id !== thread.id && item.id !== created.id)]
+  threadIndicators.value[created.id] = 'working'
   if (pendingMessages.value[thread.id]) pendingMessages.value[created.id] = pendingMessages.value[thread.id]!
   delete pendingMessages.value[thread.id]
   delete drafts.value[thread.id]
@@ -1210,6 +1248,10 @@ async function send() {
     if (desktopMode.value) queuedUntil = Date.now() + 60000
     if (drafts.value[id]?.trim() === text) drafts.value[id] = ''
     if (selected.value?.id === id) activeTurnId.value = result.turn?.id || activeTurnId.value
+    if (result.turn?.id) {
+      threadIndicators.value[id] = 'working'
+      threads.value = threads.value.map(item => item.id === id ? { ...item, status: { ...(item.status || {}), type: 'active' } } : item)
+    }
     if (result.turn?.id) trackTask(id, result.turn.id, text, thread.name || thread.preview || 'Codex 会话')
     if (stopRequested.value) {
       try { if (result.turn?.id) await post(`/api/threads/${id}/stop`, {}) }
@@ -1232,6 +1274,8 @@ async function sendFollowUp(mode: 'queue' | 'steer') {
   sending.value = true
   sendingThreadId.value = id
   error.value = ''
+  threadIndicators.value[id] = 'working'
+  threads.value = threads.value.map(item => item.id === id ? { ...item, status: { ...(item.status || {}), type: 'active' } } : item)
   try {
     const clientUserMessageId = crypto.randomUUID()
     const result = await post(`/api/threads/${id}/${mode}`, { text, expectedTurnId, clientUserMessageId }) as { outcome?: string; turn?: { id?: string }; queuedSubmission?: QueuedSubmission }
@@ -1300,7 +1344,7 @@ onMounted(async () => {
     else if (Capacitor.isNativePlatform() && !clientToken.value) { pairLanding.value = true; showDevices.value = true }
     else void refresh()
   }
-  poll = setInterval(() => { updateThread(); if (adminToken.value && showDevices.value) void loadDevices() }, 2000)
+  poll = setInterval(() => { void updateThread(); void refreshThreadIndicators(); if (adminToken.value && showDevices.value) void loadDevices() }, 2000)
   if (adminToken.value) void loadDevices()
 })
 onUnmounted(() => { if (poll) clearInterval(poll); clearThreadLongPress(); void appUrlListener?.remove(); void appStateListener?.remove(); void notificationListener?.remove() })
@@ -1324,7 +1368,7 @@ onUnmounted(() => { if (poll) clearInterval(poll); clearThreadLongPress(); void 
         <div v-if="loading && !filtered.length" class="skeleton-list" aria-label="正在加载会话"><div v-for="index in 6" :key="index" class="skeleton-row"><span class="skeleton-line skeleton-line-title"></span><span class="skeleton-line skeleton-line-meta"></span></div></div>
         <div v-for="thread in filtered" :key="thread.id" class="thread-row" :class="{ 'is-swipe-open': swipeOpenId === thread.id, 'is-menu-open': threadMenuId === thread.id }" @pointerdown="capabilities.rename && startThreadLongPress(thread)" @pointerup="clearThreadLongPress" @pointercancel="clearThreadLongPress" @pointerleave="clearThreadLongPress" @touchstart.passive="handleThreadTouchStart(thread, $event)" @touchmove.passive="handleThreadTouchMove(thread, $event)" @touchend="handleThreadTouchEnd(thread)" @contextmenu.prevent="capabilities.rename && beginRename(thread)">
           <div class="thread-row-content" :style="{ transform: swipeOpenId === thread.id ? 'translateX(-154px)' : 'translateX(0)' }">
-            <button class="thread" :class="{ selected: selected?.id === thread.id }" @click="selectThread(thread)"><span class="thread-title">{{ thread.name || thread.preview || '未命名会话' }}</span><span class="thread-meta"><span>{{ date(thread.updatedAt) }}</span><span v-if="isArchived(thread.id)" class="archived-label">已归档</span></span></button>
+            <button class="thread" :class="{ selected: selected?.id === thread.id }" @click="selectThread(thread)"><span class="thread-title-row"><span class="thread-title">{{ thread.name || thread.preview || '未命名会话' }}</span><LoaderCircle v-if="threadIndicator(thread) === 'working'" :size="13" class="thread-state-icon thread-state-working" title="正在执行" /><CircleCheck v-else-if="threadIndicator(thread) === 'completed'" :size="14" class="thread-state-icon thread-state-completed" title="任务已完成" /><CircleAlert v-else-if="threadIndicator(thread) === 'failed'" :size="14" class="thread-state-icon thread-state-failed" title="任务失败" /></span><span class="thread-meta"><span>{{ date(thread.updatedAt) }}</span><span v-if="isArchived(thread.id)" class="archived-label">已归档</span></span></button>
             <button class="icon-button thread-menu-trigger" type="button" title="会话操作" aria-label="会话操作" @click.stop="openThreadMenu(thread)"><Ellipsis :size="17" /></button>
           </div>
           <div class="thread-swipe-actions" aria-label="会话快捷操作"><button type="button" title="重命名" aria-label="重命名" :disabled="!capabilities.rename || !!threadActionId" @click.stop="beginRename(thread)"><Pencil :size="15" /></button><button type="button" :title="isArchived(thread.id) ? '取消归档' : '归档'" :aria-label="isArchived(thread.id) ? '取消归档' : '归档'" :disabled="!capabilities.archive || !!threadActionId" @click.stop="isArchived(thread.id) ? unarchiveThread(thread) : archiveThread(thread)"><Archive :size="15" /></button><button type="button" title="删除" aria-label="删除" :disabled="!capabilities.delete || !!threadActionId" @click.stop="requestDeleteThread(thread)"><Trash2 :size="15" /></button></div>

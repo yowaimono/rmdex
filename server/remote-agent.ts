@@ -22,7 +22,7 @@ if (relayUrl && deviceToken) {
               if (message.type !== 'request' || typeof message.id !== 'string' || typeof message.path !== 'string' || !['GET', 'POST', 'DELETE'].includes(String(message.method))) return
               const allowed = message.method === 'GET'
                 ? /^\/api\/(?:models|settings|threads(?:\/[a-zA-Z0-9-]+(?:\/(?:status|incremental|queue))?)?|images\/[a-f0-9-]+)$/.test(message.path)
-                : /^\/api\/(?:settings|threads|threads\/[a-zA-Z0-9-]+\/(?:send|stop|history|name|fork|archive|unarchive|delete|queue|steer)|threads\/[a-zA-Z0-9-]+\/queue\/[^/]+(?:\/steer)?|approvals\/[a-zA-Z0-9-]+)$/.test(message.path)
+                : /^\/api\/(?:settings|threads|threads\/[a-zA-Z0-9-]+\/(?:send|stop|history|name|fork|archive|unarchive|delete|queue|steer)|threads\/[a-zA-Z0-9-]+\/queue\/[^/]+(?:\/(?:steer|delete))?|approvals\/[a-zA-Z0-9-]+)$/.test(message.path)
               if (!allowed) { socket?.send(JSON.stringify({ type: 'response', id: message.id, error: 'Forbidden' })); return }
               try {
                 const response = await fetch(`http://127.0.0.1:${process.env.RMDEX_AGENT_PORT || 18787}${message.path}`, {

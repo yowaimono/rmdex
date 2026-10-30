@@ -51,6 +51,11 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .thread { min-width: 0; flex: 1; display: block; padding: 12px 11px; border: 0; border-radius: 6px; text-align: left; color: #344252; background: transparent; }
 .thread:hover { background: #eef3f8; }
 .thread.selected { background: #e8f2ff; color: #0875ee; }
+.thread-title-row { display: flex; align-items: center; min-width: 0; gap: 6px; }
+.thread-state-icon { flex: none; }
+.thread-state-working { color: #0879f9; animation: spin 1s linear infinite; }
+.thread-state-completed { color: #2d8a67; }
+.thread-state-failed { color: #c05d52; }
 .thread-menu-trigger { position: absolute; right: 3px; top: 8px; width: 28px; height: 28px; opacity: 0; background: rgba(248, 250, 252, .82); }
 .thread-row:hover .thread-menu-trigger, .thread-menu-trigger:focus-visible { opacity: 1; }
 .thread-menu { position: absolute; z-index: 3; top: 39px; right: 5px; min-width: 145px; padding: 5px; border: 1px solid #e2e9f0; border-radius: 7px; background: #fff; box-shadow: 0 10px 28px rgba(35, 53, 75, .15); }
@@ -61,7 +66,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .thread-swipe-actions button:hover { color: #0879f9; background: #e0ecfa; }
 .thread-swipe-actions button:last-child:hover { color: #bd5a4f; background: #fff1ef; }
 .thread-swipe-actions button:disabled { cursor: wait; }
-.thread-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
+.thread-title { min-width: 0; flex: 0 1 auto; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
 .thread-meta { display: flex; gap: 8px; justify-content: space-between; margin-top: 7px; overflow: hidden; color: #9ba9b6; font-size: 11px; white-space: nowrap; }
 .archived-label { color: #8398ab; }
 .empty-list, .sidebar-error { padding: 15px 11px; color: #98a5b3; font-size: 12px; }
@@ -246,8 +251,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .risk-copy p + p { margin-top: 9px; color: #8b786b; font-size: 12px; }
 .danger-confirm-button { padding: 8px 14px; border: 1px solid #c56226; border-radius: 5px; background: #c56226; color: #fff; font-size: 13px; }
 .danger-confirm-button:hover { border-color: #ae501c; background: #ae501c; }
-.risk-checkbox { display: inline-flex; align-items: center; gap: 7px; margin-top: 14px; color: #7e6b5d; font-size: 12px; cursor: pointer; }
-.risk-checkbox input { width: 15px; height: 15px; margin: 0; accent-color: #c56226; }
+.create-dialog .risk-checkbox { display: inline-flex; align-items: center; width: auto; gap: 7px; margin: 14px 0 0; color: #7e6b5d; font-size: 12px; font-weight: 400; cursor: pointer; }
+.create-dialog .risk-checkbox input { width: 15px; height: 15px; flex: none; margin: 0; padding: 0; accent-color: #c56226; }
 .delete-copy { margin: 0; padding: 13px; border: 1px solid #f1d9d5; border-radius: 6px; color: #86504a; background: #fff8f7; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
 
 .create-dialog h2 { margin: 0; font-size: 17px; }
@@ -319,17 +324,16 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .model-trigger-copy strong { overflow: hidden; color: inherit; font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .model-trigger-copy small { color: #9aa6b1; font-size: 10px; text-transform: capitalize; }
 .model-trigger-chevron { flex: none; }
-.model-popup { position: absolute; z-index: 6; bottom: calc(100% + 10px); left: 0; width: min(360px, calc(100vw - 50px)); max-width: calc(100vw - 24px); max-height: min(70dvh, 560px); overflow-x: hidden; overflow-y: auto; padding: 7px; border: 1px solid #e3e9f0; border-radius: 8px; background: #fff; box-shadow: 0 10px 28px rgba(30, 47, 66, .14), 0 2px 6px rgba(30, 47, 66, .04); }
+.model-popup { position: absolute; z-index: 6; right: 0; bottom: calc(100% + 10px); width: min(320px, calc(100vw - 50px)); max-width: calc(100vw - 24px); max-height: min(70dvh, 560px); overflow-x: hidden; overflow-y: auto; padding: 7px; border: 1px solid #e3e9f0; border-radius: 8px; background: #fff; box-shadow: 0 10px 28px rgba(30, 47, 66, .14), 0 2px 6px rgba(30, 47, 66, .04); }
 .model-popup-heading { padding: 5px 9px 7px; color: #99a5b1; font-size: 11px; font-weight: 600; }
 .model-options { max-height: 300px; overflow-y: auto; }
 .model-option { display: flex; align-items: flex-start; gap: 9px; width: 100%; min-width: 0; padding: 9px; border: 0; border-radius: 6px; background: transparent; color: #344252; text-align: left; }
 .model-option:hover, .model-option.is-selected { background: #f2f6fb; }
 .model-option-icon { flex: none; margin-top: 2px; color: #8393a2; }
 .model-option.is-selected .model-option-icon, .model-check { color: #0879f9; }
-.model-option-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 3px; }
+.model-option-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; }
 .model-option-name { overflow: hidden; color: #344252; font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .model-option-name em { margin-left: 5px; padding: 2px 4px; border-radius: 3px; background: #edf5ff; color: #0879f9; font-size: 10px; font-style: normal; font-weight: 500; }
-.model-option-description { overflow: hidden; color: #94a1ad; font-size: 11px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: anywhere; }
 .model-check { flex: none; margin-top: 2px; }
 .effort-section { margin-top: 4px; padding-top: 5px; border-top: 1px solid #edf1f5; }
 .effort-heading { display: flex; align-items: center; gap: 5px; }
@@ -338,9 +342,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .effort-option:hover, .effort-option.is-selected { border-color: #b5d2f5; background: #eef5ff; color: #0879f9; }
 @media (max-width: 520px) {
   .model-trigger { max-width: 180px; }
-  .model-popup { position: fixed; z-index: 20; left: 12px; right: 12px; bottom: calc(env(safe-area-inset-bottom, 0px) + 76px); width: auto; max-width: none; max-height: min(62dvh, 520px); }
+  .model-popup { position: fixed; z-index: 20; left: auto; right: 12px; bottom: calc(env(safe-area-inset-bottom, 0px) + 76px); width: min(320px, calc(100vw - 24px)); max-width: none; max-height: min(62dvh, 520px); }
   .model-options { max-height: min(42dvh, 300px); }
-  .model-option-description { white-space: normal; overflow-wrap: anywhere; }
   .effort-option { max-width: 100%; }
 }
 @media (max-width: 700px) {

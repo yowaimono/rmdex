@@ -63,7 +63,7 @@ onUnmounted(() => document.removeEventListener('mousedown', closeOnOutside))
       <div class="model-options">
         <button v-for="model in models" :key="model.id" type="button" class="model-option" :class="{ 'is-selected': model.id === selected?.id }" @click="chooseModel(model)">
           <Cpu :size="15" class="model-option-icon" />
-          <span class="model-option-copy"><span class="model-option-name">{{ model.displayName }} <em v-if="model.isDefault">默认</em></span><span class="model-option-description">{{ model.description || model.model }}</span></span>
+          <span class="model-option-copy"><span class="model-option-name">{{ model.displayName }} <em v-if="model.isDefault">默认</em></span></span>
           <Check v-if="model.id === selected?.id" :size="15" class="model-check" />
         </button>
       </div>

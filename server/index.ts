@@ -283,6 +283,7 @@ const server = createServer(async (req, res) => {
       const deleteMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/delete$/)
       const forkMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/fork$/)
       const queueMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/(queue|steer)$/)
+      const queueDeletePostMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/queue\/([^/]+)\/delete$/)
       const queueDeleteMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/queue\/([^/]+)$/)
       const queueSteerMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/queue\/([^/]+)\/steer$/)
       const approvalMatch = url.pathname.match(/^\/api\/approvals\/([a-zA-Z0-9-]+)$/)
@@ -355,9 +356,10 @@ const server = createServer(async (req, res) => {
           const steered = await rpc('turn/steer', { threadId, expectedTurnId, input, clientUserMessageId: typeof data.clientUserMessageId === 'string' ? data.clientUserMessageId : randomUUID() })
           result = { outcome: 'steered', threadId, expectedTurnId, ...(steered && typeof steered === 'object' ? steered : {}) }
         }
-      } else if (queueDeleteMatch && req.method === 'DELETE') {
-        const threadId = queueDeleteMatch[1]!
-        const queuedSubmissionId = decodeURIComponent(queueDeleteMatch[2]!)
+      } else if ((queueDeletePostMatch && req.method === 'POST') || (queueDeleteMatch && req.method === 'DELETE')) {
+        const match = queueDeletePostMatch || queueDeleteMatch!
+        const threadId = match[1]!
+        const queuedSubmissionId = decodeURIComponent(match[2]!)
         if (sharedMode && !newThreads.has(threadId)) await subscribeToThread(threadId)
         result = await rpc('thread/queue/delete', { threadId, queuedSubmissionId })
       } else if (queueSteerMatch) {
