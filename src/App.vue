@@ -5,7 +5,7 @@ import { App as NativeApp } from '@capacitor/app'
 import { LocalNotifications } from '@capacitor/local-notifications'
 import { CapacitorBarcodeScanner, CapacitorBarcodeScannerTypeHint } from '@capacitor/barcode-scanner'
 import MarkdownIt from 'markdown-it'
-import { Archive, ArrowLeft, ArrowUp, ChevronRight, CircleAlert, Ellipsis, ExternalLink, LoaderCircle, Menu, MessageSquare, Monitor, PanelLeftClose, Pencil, Plus, RefreshCw, RotateCcw, Search, Square, Wrench, X, QrCode, Copy, Smartphone, Trash2, ShieldAlert } from 'lucide-vue-next'
+import { Archive, ArrowLeft, ArrowUp, ChevronRight, CircleAlert, CornerDownRight, Ellipsis, ExternalLink, GitFork, LoaderCircle, Menu, MessageSquare, Monitor, PanelLeftClose, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings, Square, Wrench, X, QrCode, Copy, Smartphone, Trash2, ShieldAlert } from 'lucide-vue-next'
 import QRCode from 'qrcode'
 import logoUrl from './assets/rmdex-logo.jpg'
 import ToolEvent from './components/ToolEvent.vue'
@@ -60,6 +60,9 @@ const pairApprovalPage = ref(false)
 const pairApprovalState = ref<'waiting' | 'denied' | 'expired' | 'error'>('waiting')
 const threadMenuId = ref<string | null>(null)
 const threadActionId = ref<string | null>(null)
+const threadActionError = ref('')
+const copyFeedback = ref('')
+let copyFeedbackTimer: ReturnType<typeof setTimeout> | undefined
 const deleteThreadTarget = ref<Thread | null>(null)
 const archivedThreads = ref<Thread[]>([])
 const showArchivedThreads = ref(false)
@@ -77,11 +80,12 @@ const mobileDetail = ref(false)
 const sidebarOpen = ref(true)
 const creating = ref(false)
 const showCreate = ref(false)
+const showSettings = ref(false)
 const createPath = ref('')
 const createError = ref('')
 const createProject = ref('')
 const desktopProjects = ref<Array<{ id: string; name: string; path: string }>>([])
-const defaultCapabilities = { mode: 'app-server', models: true, permissions: true, stop: true, approvals: true, create: true, send: true, queue: true, steer: true, rename: true, archive: true, delete: true, history: false, createRequiresPrompt: false }
+const defaultCapabilities = { mode: 'app-server', models: true, permissions: true, stop: true, approvals: true, create: true, send: true, queue: true, steer: true, rename: true, fork: true, archive: true, delete: true, history: false, createRequiresPrompt: false }
 const capabilities = ref({ ...defaultCapabilities })
 const desktopMode = computed(() => capabilities.value.mode === 'desktop')
 const historyCursor = ref<string | null>(null)
@@ -96,7 +100,14 @@ const activeTurnId = ref<string | null>(null)
 const stopRequested = ref(false)
 const stopping = ref(false)
 const pendingMessages = ref<Record<string, { text: string; previousCount: number }>>({})
+type QueuedSubmission = { id: string; input?: Array<{ type?: string; text?: string }>; clientUserMessageId?: string }
+const queuedSubmissions = ref<QueuedSubmission[]>([])
+const queueActionId = ref<string | null>(null)
+const queueMenuId = ref<string | null>(null)
 const permissionMode = ref<'ask' | 'auto' | 'full'>((localStorage.getItem('rmdex-permission-mode') as 'ask' | 'auto' | 'full' | null) || 'ask')
+type FollowUpMode = 'queue' | 'steer'
+const savedFollowUpMode = localStorage.getItem('rmdex-follow-up-mode')
+const followUpMode = ref<FollowUpMode>(savedFollowUpMode === 'steer' ? 'steer' : 'queue')
 const showFullAccessConfirm = ref(false)
 const fullAccessConfirmed = ref(false)
 const models = ref<ModelOption[]>([])
@@ -587,48 +598,71 @@ function selectThread(thread: Thread) {
 async function refreshThread(thread: Thread) {
   if (threadActionId.value) return
   closeThreadMenus()
+  threadActionError.value = ''
   threadActionId.value = thread.id
   try {
     const result = await readThread(thread.id, true)
     if (selected.value?.id === thread.id) applyRead(result)
     else rememberThreadRead(result)
     await loadThreads(true).then(result => { threads.value = [...localDraftThreads.value, ...new Map(result.map(item => [item.id, item])).values()] })
-  } catch (e) { error.value = e instanceof Error ? e.message : String(e) }
+  } catch (e) { threadActionError.value = e instanceof Error ? e.message : String(e); error.value = threadActionError.value }
+  finally { threadActionId.value = null }
+}
+async function forkThread(thread: Thread) {
+  if (!capabilities.value.fork || threadActionId.value) return
+  closeThreadMenus()
+  threadActionError.value = ''
+  threadActionId.value = thread.id
+  try {
+    const result = await post(`/api/threads/${thread.id}/fork`, {}) as { thread?: Thread; message?: string }
+    if (!result.thread?.id) throw new Error(result.message || 'Fork 未返回新会话')
+    const forked = result.thread
+    threads.value = [forked, ...threads.value.filter(item => item.id !== forked.id)]
+    localDraftThreads.value = localDraftThreads.value.filter(item => item.id !== forked.id)
+    await openThread(forked)
+  } catch (e) { threadActionError.value = e instanceof Error ? e.message : String(e); error.value = threadActionError.value }
   finally { threadActionId.value = null }
 }
 async function archiveThread(thread: Thread) {
   if (!capabilities.value.archive || threadActionId.value) return
   closeThreadMenus()
+  threadActionError.value = ''
   threadActionId.value = thread.id
   try {
-    rememberArchived(thread)
     await post(`/api/threads/${thread.id}/archive`, {})
+    rememberArchived(thread)
     threads.value = threads.value.filter(item => item.id !== thread.id)
     localDraftThreads.value = localDraftThreads.value.filter(item => item.id !== thread.id)
   } catch (e) {
-    forgetArchived(thread.id)
-    error.value = e instanceof Error ? e.message : String(e)
+    threadActionError.value = e instanceof Error ? e.message : String(e); error.value = threadActionError.value
+    try {
+      const result = await loadThreads(true)
+      threads.value = [...localDraftThreads.value, ...new Map(result.map(item => [item.id, item])).values()]
+    } catch { /* Keep the original action error visible. */ }
   } finally { threadActionId.value = null }
 }
 async function unarchiveThread(thread: Thread) {
   if (!capabilities.value.archive || threadActionId.value) return
   closeThreadMenus()
+  threadActionError.value = ''
   threadActionId.value = thread.id
   try {
     await post(`/api/threads/${thread.id}/unarchive`, {})
     forgetArchived(thread.id)
     const result = await loadThreads(true)
     threads.value = [...localDraftThreads.value, ...new Map(result.map(item => [item.id, item])).values()]
-  } catch (e) { error.value = e instanceof Error ? e.message : String(e) }
+  } catch (e) { threadActionError.value = e instanceof Error ? e.message : String(e); error.value = threadActionError.value }
   finally { threadActionId.value = null }
 }
 function requestDeleteThread(thread: Thread) {
   closeThreadMenus()
+  threadActionError.value = ''
   deleteThreadTarget.value = thread
 }
 async function confirmDeleteThread() {
   const thread = deleteThreadTarget.value
   if (!thread || threadActionId.value) return
+  threadActionError.value = ''
   threadActionId.value = thread.id
   try {
     await post(`/api/threads/${thread.id}/delete`, {})
@@ -646,7 +680,7 @@ async function confirmDeleteThread() {
     }
     void removeThreadCache(threadCacheKey(thread.id))
     deleteThreadTarget.value = null
-  } catch (e) { error.value = e instanceof Error ? e.message : String(e) }
+  } catch (e) { threadActionError.value = e instanceof Error ? e.message : String(e); error.value = threadActionError.value }
   finally { threadActionId.value = null }
 }
 function openThreadInDesktop(thread: Thread) {
@@ -677,6 +711,10 @@ async function submitRename() {
 function rememberPermission(value: 'ask' | 'auto' | 'full') {
   permissionMode.value = value
   localStorage.setItem('rmdex-permission-mode', value)
+}
+function rememberFollowUpMode(value: FollowUpMode) {
+  followUpMode.value = value
+  localStorage.setItem('rmdex-follow-up-mode', value)
 }
 function rememberModel(value: string) {
   selectedModel.value = value
@@ -763,11 +801,47 @@ async function refresh(force = true) {
   finally { loading.value = false }
 }
 
+function queuedText(item: QueuedSubmission) {
+  return (item.input || []).filter(part => part.type === 'text').map(part => part.text || '').join('\n').trim() || '排队任务'
+}
+async function loadQueuedSubmissions(threadId: string) {
+  if (desktopMode.value) { queuedSubmissions.value = []; return }
+  try {
+    const result = await get<{ data?: QueuedSubmission[] }>(`/api/threads/${threadId}/queue`)
+    if (selected.value?.id === threadId) queuedSubmissions.value = Array.isArray(result.data) ? result.data.filter(item => typeof item?.id === 'string') : []
+  } catch { /* Older local agents may not expose queue/list yet; keep locally confirmed queue items visible. */ }
+}
+async function deleteQueued(item: QueuedSubmission) {
+  if (!selected.value || queueActionId.value) return
+  const threadId = selected.value.id
+  queueActionId.value = item.id
+  queueMenuId.value = null
+  try {
+    const response = await authenticatedFetch(`/api/threads/${threadId}/queue/${encodeURIComponent(item.id)}`, { method: 'DELETE' }, 'client')
+    const result = await readJsonResponse(response, '删除排队任务失败')
+    if (!response.ok) throw new Error(result?.error || '删除排队任务失败')
+    await loadQueuedSubmissions(threadId)
+  } catch (e) { error.value = e instanceof Error ? e.message : String(e) }
+  finally { queueActionId.value = null }
+}
+async function steerQueued(item: QueuedSubmission) {
+  if (!selected.value || queueActionId.value || !activeTurnId.value) return
+  const threadId = selected.value.id
+  queueActionId.value = item.id
+  queueMenuId.value = null
+  try {
+    await post(`/api/threads/${threadId}/queue/${encodeURIComponent(item.id)}/steer`, { expectedTurnId: activeTurnId.value })
+    await loadQueuedSubmissions(threadId)
+    await updateThread()
+  } catch (e) { error.value = e instanceof Error ? e.message : String(e) }
+  finally { queueActionId.value = null }
+}
 async function openThread(thread: Thread) {
   const version = ++selectionVersion
   const cached = threadCache.get(threadCacheKey(thread.id))
   threadLoading.value = !cached; threadLoadError.value = ''; historyCursor.value = cached?.page?.hasMore ? cached.page.nextCursor : null; historyLoading.value = false; queuedUntil = 0
-  selected.value = thread; activeTurnId.value = null; pendingApprovals.value = []; lastTurn.value = null; mobileDetail.value = true; error.value = ''
+  selected.value = thread; activeTurnId.value = null; pendingApprovals.value = []; lastTurn.value = null; queuedSubmissions.value = []; queueMenuId.value = null; mobileDetail.value = true; error.value = ''
+  void loadQueuedSubmissions(thread.id)
   if (cached) {
     applyRead(cloneRead(cached))
     threadLoading.value = false
@@ -837,6 +911,7 @@ async function updateThread() {
         if (follow) await scrollToLatest()
       }
     }
+    if (version === selectionVersion) await loadQueuedSubmissions(id)
   } catch (e) { if (version === selectionVersion) error.value = e instanceof Error ? e.message : String(e) }
   finally { pollBusy = false }
 }
@@ -991,9 +1066,29 @@ async function revokeDevice(deviceId: string) {
   try { await adminFetch(`/api/devices/${deviceId}`, 'DELETE'); await loadDevices() }
   catch (e) { pairError.value = e instanceof Error ? e.message : String(e) }
 }
-async function copyValue(value: string) {
-  try { await navigator.clipboard.writeText(value) }
-  catch (e) { error.value = e instanceof Error ? e.message : '复制失败，请手动复制' }
+async function copyValue(value: string, feedback = '已复制会话 ID') {
+  try {
+    if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(value)
+    else {
+      const input = document.createElement('textarea')
+      input.value = value
+      input.setAttribute('readonly', '')
+      input.style.position = 'fixed'
+      input.style.opacity = '0'
+      document.body.appendChild(input)
+      input.select()
+      if (!document.execCommand('copy')) throw new Error('复制失败')
+      input.remove()
+    }
+    copyFeedback.value = feedback
+    if (copyFeedbackTimer) clearTimeout(copyFeedbackTimer)
+    copyFeedbackTimer = setTimeout(() => { copyFeedback.value = '' }, 1800)
+  } catch (e) {
+    copyFeedback.value = '复制失败，请长按手动复制'
+    if (copyFeedbackTimer) clearTimeout(copyFeedbackTimer)
+    copyFeedbackTimer = setTimeout(() => { copyFeedback.value = '' }, 2600)
+    error.value = e instanceof Error ? e.message : '复制失败，请手动复制'
+  }
 }
 function openCreate() {
   if (!capabilities.value.create) return
@@ -1122,8 +1217,10 @@ async function sendFollowUp(mode: 'queue' | 'steer') {
   sendingThreadId.value = id
   error.value = ''
   try {
-    const result = await post(`/api/threads/${id}/${mode}`, { text, expectedTurnId, clientUserMessageId: crypto.randomUUID() }) as { outcome?: string; turn?: { id?: string } }
+    const clientUserMessageId = crypto.randomUUID()
+    const result = await post(`/api/threads/${id}/${mode}`, { text, expectedTurnId, clientUserMessageId }) as { outcome?: string; turn?: { id?: string }; queuedSubmission?: QueuedSubmission }
     if (drafts.value[id]?.trim() === text) drafts.value[id] = ''
+    if (mode === 'queue' && result.queuedSubmission?.id) queuedSubmissions.value = [...queuedSubmissions.value.filter(item => item.id !== result.queuedSubmission!.id), result.queuedSubmission]
     if (result.turn?.id) trackTask(id, result.turn.id, text, thread.name || thread.preview || 'Codex 会话')
     await updateThread()
   } catch (e) { error.value = e instanceof Error ? e.message : String(e) }
@@ -1132,7 +1229,9 @@ async function sendFollowUp(mode: 'queue' | 'steer') {
 function onEnter(event: KeyboardEvent) {
   if (event.isComposing || event.keyCode === 229) return
   event.preventDefault()
-  if (activeTurnId.value && capabilities.value.queue) void sendFollowUp('queue')
+  if (activeTurnId.value && capabilities.value[followUpMode.value]) void sendFollowUp(followUpMode.value)
+  else if (activeTurnId.value && capabilities.value.queue) void sendFollowUp('queue')
+  else if (activeTurnId.value && capabilities.value.steer) void sendFollowUp('steer')
   else void send()
 }
 async function stop() {
@@ -1195,8 +1294,10 @@ onUnmounted(() => { if (poll) clearInterval(poll); clearThreadLongPress(); void 
 <template>
   <div class="shell">
     <aside id="thread-panel" class="thread-panel" :class="{ collapsed: !sidebarOpen, hiddenMobile: mobileDetail }">
+      <div class="thread-panel-scroll">
       <div class="brand-row">
         <div class="brand"><img :src="logoUrl" alt="" /><span>rmdex</span></div>
+        <button class="icon-button settings-trigger" title="全局设置" aria-label="全局设置" @click="showSettings = true"><Settings :size="18" /></button>
         <button class="icon-button collapse-button" title="收起侧栏" aria-label="收起侧栏" aria-controls="thread-panel" :aria-expanded="sidebarOpen" @click="sidebarOpen = false"><PanelLeftClose :size="19" /></button>
       </div>
       <button class="new-thread" :disabled="!capabilities.create" @click="openCreate"><Plus :size="17" /><span>新建对话</span></button>
@@ -1204,34 +1305,38 @@ onUnmounted(() => { if (poll) clearInterval(poll); clearThreadLongPress(); void 
       <button class="pair-entry" type="button" @click="showDevices = true"><QrCode :size="16" /><span>连接设备</span><span class="pair-entry-hint">扫码配对</span></button>
       <label class="search"><Search :size="16" /><input v-model="query" placeholder="搜索会话" aria-label="搜索会话" /></label>
       <div class="section-label"><span>会话 <span class="count">{{ filtered.length }}</span></span><div class="section-actions"><button class="archive-toggle" type="button" :class="{ active: showArchivedThreads }" :title="showArchivedThreads ? '隐藏已归档' : '显示已归档'" @click="showArchivedThreads = !showArchivedThreads"><Archive :size="14" /><span v-if="archivedThreads.length">{{ archivedThreads.length }}</span></button><button class="icon-button" title="刷新会话" aria-label="刷新会话" :disabled="loading" @click="retryConnection"><RefreshCw :size="15" /></button></div></div>
-      <div v-if="error && !connected" class="sidebar-error">{{ error }}</div>
+      <div v-if="threadActionError" class="sidebar-error">{{ threadActionError }}</div>
       <div class="thread-list">
         <div v-if="loading && !filtered.length" class="skeleton-list" aria-label="正在加载会话"><div v-for="index in 6" :key="index" class="skeleton-row"><span class="skeleton-line skeleton-line-title"></span><span class="skeleton-line skeleton-line-meta"></span></div></div>
-        <div v-for="thread in filtered" :key="thread.id" class="thread-row" :class="{ 'is-swipe-open': swipeOpenId === thread.id }" @pointerdown="capabilities.rename && startThreadLongPress(thread)" @pointerup="clearThreadLongPress" @pointercancel="clearThreadLongPress" @pointerleave="clearThreadLongPress" @touchstart.passive="handleThreadTouchStart(thread, $event)" @touchmove.passive="handleThreadTouchMove(thread, $event)" @touchend="handleThreadTouchEnd(thread)" @contextmenu.prevent="capabilities.rename && beginRename(thread)">
+        <div v-for="thread in filtered" :key="thread.id" class="thread-row" :class="{ 'is-swipe-open': swipeOpenId === thread.id, 'is-menu-open': threadMenuId === thread.id }" @pointerdown="capabilities.rename && startThreadLongPress(thread)" @pointerup="clearThreadLongPress" @pointercancel="clearThreadLongPress" @pointerleave="clearThreadLongPress" @touchstart.passive="handleThreadTouchStart(thread, $event)" @touchmove.passive="handleThreadTouchMove(thread, $event)" @touchend="handleThreadTouchEnd(thread)" @contextmenu.prevent="capabilities.rename && beginRename(thread)">
           <div class="thread-row-content" :style="{ transform: swipeOpenId === thread.id ? 'translateX(-154px)' : 'translateX(0)' }">
             <button class="thread" :class="{ selected: selected?.id === thread.id }" @click="selectThread(thread)"><span class="thread-title">{{ thread.name || thread.preview || '未命名会话' }}</span><span class="thread-meta"><span>{{ date(thread.updatedAt) }}</span><span v-if="isArchived(thread.id)" class="archived-label">已归档</span></span></button>
             <button class="icon-button thread-menu-trigger" type="button" title="会话操作" aria-label="会话操作" @click.stop="openThreadMenu(thread)"><Ellipsis :size="17" /></button>
           </div>
           <div class="thread-swipe-actions" aria-label="会话快捷操作"><button type="button" title="重命名" aria-label="重命名" :disabled="!capabilities.rename || !!threadActionId" @click.stop="beginRename(thread)"><Pencil :size="15" /></button><button type="button" :title="isArchived(thread.id) ? '取消归档' : '归档'" :aria-label="isArchived(thread.id) ? '取消归档' : '归档'" :disabled="!capabilities.archive || !!threadActionId" @click.stop="isArchived(thread.id) ? unarchiveThread(thread) : archiveThread(thread)"><Archive :size="15" /></button><button type="button" title="删除" aria-label="删除" :disabled="!capabilities.delete || !!threadActionId" @click.stop="requestDeleteThread(thread)"><Trash2 :size="15" /></button></div>
-          <div v-if="threadMenuId === thread.id" class="thread-menu" @click.stop><button v-if="capabilities.rename" type="button" @click="beginRename(thread)"><Pencil :size="14" />重命名</button><button type="button" @click="copyValue(thread.id); closeThreadMenus()"><Copy :size="14" />复制会话 ID</button><button type="button" :disabled="threadActionId === thread.id" @click="refreshThread(thread)"><RefreshCw :size="14" />刷新</button><button v-if="capabilities.archive" type="button" :disabled="threadActionId === thread.id" @click="isArchived(thread.id) ? unarchiveThread(thread) : archiveThread(thread)"><Archive :size="14" />{{ isArchived(thread.id) ? '取消归档' : '归档' }}</button><button v-if="capabilities.delete" type="button" :disabled="threadActionId === thread.id" @click="requestDeleteThread(thread)"><Trash2 :size="14" />删除</button><button type="button" @click="openThreadInDesktop(thread)"><ExternalLink :size="14" />在 Desktop 打开</button></div>
+          <div v-if="threadMenuId === thread.id" class="thread-menu" @click.stop><button v-if="capabilities.rename" type="button" @click="beginRename(thread)"><Pencil :size="14" />重命名</button><button v-if="capabilities.fork" type="button" :disabled="threadActionId === thread.id" @click="forkThread(thread)"><GitFork :size="14" />Fork Chat</button><button type="button" @click="copyValue(thread.id); closeThreadMenus()"><Copy :size="14" />复制会话 ID</button><button type="button" :disabled="threadActionId === thread.id" @click="refreshThread(thread)"><RefreshCw :size="14" />刷新</button><button v-if="capabilities.archive" type="button" :disabled="threadActionId === thread.id" @click="isArchived(thread.id) ? unarchiveThread(thread) : archiveThread(thread)"><Archive :size="14" />{{ isArchived(thread.id) ? '取消归档' : '归档' }}</button><button v-if="capabilities.delete" type="button" :disabled="threadActionId === thread.id" @click="requestDeleteThread(thread)"><Trash2 :size="14" />删除</button><button v-if="!Capacitor.isNativePlatform()" type="button" @click="openThreadInDesktop(thread)"><ExternalLink :size="14" />在 Desktop 打开</button></div>
         </div>
         <div v-if="!filtered.length && !loading" class="empty-list">{{ showArchivedThreads ? '暂无已归档会话' : '暂无会话' }}</div>
+      </div>
       </div>
       <footer class="side-footer"><span class="online" :class="{ offline: !connected }"></span> {{ remoteMode ? '远程设备' : '本机模式' }} <span class="footer-label">{{ connected ? '已连接' : '未连接' }}</span></footer>
     </aside>
     <main class="main" :class="{ hiddenMobile: !mobileDetail }">
       <header class="main-head"><button class="icon-button back" title="返回会话" aria-label="返回会话" @click="mobileDetail = false"><ArrowLeft :size="19" /></button><button v-if="!sidebarOpen" class="icon-button expand-button" title="展开侧栏" aria-label="展开侧栏" aria-controls="thread-panel" :aria-expanded="sidebarOpen" @click="sidebarOpen = true"><Menu :size="19" /></button><div class="heading"><strong>{{ selected?.name || selected?.preview || '会话' }}</strong><span v-if="selected">本机设备</span></div><span v-if="activeTurnId" class="readonly">执行中</span><button v-if="!sidebarOpen && capabilities.create" class="icon-button expand-button" title="新建对话" aria-label="新建对话" @click="openCreate"><Plus :size="19" /></button></header>
-      <div class="connection-banner" :class="connectionState" role="status" aria-live="polite"><span class="online" :class="{ offline: connectionState !== 'connected' }"></span><strong>{{ connectionState === 'connected' ? '已连接' : connectionState === 'reconnecting' ? '正在重连' : '已断开' }}</strong><span v-if="connectionState === 'reconnecting'">将自动重试</span><span v-else-if="connectionState === 'offline'">部分操作暂不可用</span><button v-if="connectionState !== 'connected'" type="button" @click="retryConnection"><RotateCcw :size="14" />立即重试</button><details v-if="connectionErrorDetail"><summary>错误详情</summary><p>{{ connectionErrorDetail }}</p></details></div>
+      <div v-if="connectionState === 'connected'" class="connection-indicator" role="status" title="已连接"><span class="online"></span></div><div v-else class="connection-banner" :class="connectionState" role="status" aria-live="polite"><span class="online offline"></span><strong>{{ connectionState === 'reconnecting' ? '正在重连' : '已断开' }}</strong><span v-if="connectionState === 'reconnecting'">将自动重试</span><span v-else>部分操作暂不可用</span><button type="button" @click="retryConnection"><RotateCcw :size="14" />立即重试</button><details v-if="connectionErrorDetail"><summary>错误详情</summary><p>{{ connectionErrorDetail }}</p></details></div>
       <div v-if="error" class="error"><CircleAlert :size="18" /><span>{{ error }}</span><button @click="retryConnection">重试</button></div>
       <div v-if="!selected" class="welcome"><div class="welcome-icon"><MessageSquare :size="22" /></div><h2>选择一个会话</h2><p>查看你的 Codex 对话</p></div>
       <div v-else-if="threadLoading" class="conversation conversation-skeleton" role="status" aria-live="polite"><div class="conversation-inner"><span class="skeleton-line skeleton-line-heading"></span><span class="skeleton-line skeleton-line-wide"></span><span class="skeleton-line skeleton-line-medium"></span><span class="skeleton-line skeleton-line-wide"></span><span class="skeleton-line skeleton-line-short"></span></div></div>
       <div v-else-if="threadLoadError" class="thread-load-state" role="alert"><CircleAlert :size="20" /><span>加载会话失败：{{ threadLoadError }}</span><button type="button" @click="openThread(selected)">重试</button></div>
       <div v-else ref="conversation" class="conversation"><div class="conversation-inner"><button v-if="historyCursor" class="history-button" :disabled="historyLoading" @click="loadOlder"><LoaderCircle v-if="historyLoading" :size="14" class="working-spinner" />{{ historyLoading ? '正在加载…' : '加载更早的消息' }}</button><div class="conversation-header"><h2>{{ selected.name || selected.preview || '未命名会话' }}</h2></div><div v-if="!messages.length && !pendingMessageVisible(selected)" class="empty-messages">{{ selected.desktopDraft ? '从下方发送消息，开始新对话。' : '此会话暂无可显示的消息。' }}</div><template v-for="(message, i) in messages" :key="i"><details v-if="message.role === 'tools'" class="tool-group"><summary><Wrench :size="14" /><span>{{ toolSummary(message.items) }}</span><span v-if="message.items.some(item => item.status === 'failed' || item.status === 'declined' || item.success === false || (typeof item.exitCode === 'number' && item.exitCode !== 0))" class="group-failed">含失败</span><ChevronRight :size="14" class="group-chevron" /></summary><div class="tool-group-content"><ToolEvent v-for="(item, index) in message.items" :key="item.id || index" :item="item" /></div></details><article v-else class="message" :class="`message--${message.role}`" :aria-label="message.role === 'user' ? '用户消息' : 'Codex 回复'"><div class="message-body"><div v-if="message.images.length" class="attachments"><template v-for="(image, index) in message.images" :key="index"><a v-if="imageSource(image)" :href="imageSource(image)" target="_blank" rel="noopener noreferrer" class="attachment"><img :src="imageSource(image)" alt="图片附件" loading="lazy" /></a><span v-else class="attachment-unavailable">图片附件不可用</span></template></div><div v-if="message.text" class="message-text markdown" v-html="markdown.render(message.text)"></div></div></article></template><article v-if="pendingMessageVisible(selected)" class="message message--user" aria-label="待显示的用户消息"><div class="message-body"><div class="message-text markdown" v-html="markdown.render(pendingMessages[selected.id]!.text)"></div></div></article><div v-if="working" class="working" role="status" aria-live="polite"><LoaderCircle :size="16" class="working-spinner" /><span>{{ workLabel }}</span></div><div v-else-if="lastTurn?.status === 'failed'" class="turn-failure" role="alert">执行失败<span v-if="lastTurn.error?.message">：{{ lastTurn.error.message }}</span></div></div></div>
       <div v-if="selected && !threadLoading && !threadLoadError" class="compose-area">
+        <section v-if="queuedSubmissions.length" class="queued-followups" aria-label="排队任务"><div class="queued-followups-heading"><span>排队中</span><span class="queued-count">{{ queuedSubmissions.length }}</span></div><div v-for="item in queuedSubmissions" :key="item.id" class="queued-followup"><CornerDownRight :size="15" class="queued-followup-icon" /><span class="queued-followup-text">{{ queuedText(item) }}</span><div class="queued-followup-actions"><button type="button" class="queue-steer-button" :disabled="!!queueActionId || !activeTurnId" @click="steerQueued(item)"><CornerDownRight :size="14" />Steer</button><button type="button" class="queue-icon-button" title="删除排队任务" aria-label="删除排队任务" :disabled="!!queueActionId" @click="deleteQueued(item)"><Trash2 :size="15" /></button><button type="button" class="queue-icon-button" title="更多操作" aria-label="更多操作" :disabled="!!queueActionId" @click="queueMenuId = queueMenuId === item.id ? null : item.id"><Ellipsis :size="16" /></button></div><div v-if="queueMenuId === item.id" class="queued-followup-menu"><button type="button" @click="copyValue(queuedText(item), '已复制排队内容'); queueMenuId = null"><Copy :size="14" />复制内容</button><button type="button" @click="deleteQueued(item)"><Trash2 :size="14" />删除任务</button></div></div></section>
         <p v-if="desktopMode" class="desktop-hint">{{ capabilities.models ? '模型与推理强度可在右侧选择；权限、审批和暂停请在 Desktop 处理。' : '当前设备未提供可识别的模型目录；模型、权限、审批和暂停请在 Desktop 处理。' }}</p><div v-for="approval in (capabilities.approvals ? pendingApprovals : [])" :key="approval.id" class="approval"><strong>{{ approval.method.includes('commandExecution') ? '命令执行需要确认' : '文件修改需要确认' }}</strong><p v-if="approval.params.reason">{{ approval.params.reason }}</p><pre v-if="approval.params.command">{{ approval.params.command }}</pre><p v-if="approval.params.cwd">工作目录：{{ approval.params.cwd }}</p><p v-if="approval.params.grantRoot">授权目录：{{ approval.params.grantRoot }}</p><details><summary>完整请求信息</summary><pre>{{ JSON.stringify(approval.params, null, 2) }}</pre></details><p v-if="approval.method.includes('fileChange')">请先在上方工具调用中查看文件变更，再决定是否允许。</p><div class="approval-actions"><button @click="decide(approval, 'decline')">拒绝</button><button @click="decide(approval, 'accept')">允许本次</button></div></div>
-        <form class="composer" @submit.prevent="send"><textarea v-model="drafts[selected.id]" placeholder="给 Codex 发送消息" aria-label="消息" rows="2" :disabled="sending || !!selected.desktopDraft?.preparing || !capabilities.send" @keydown.enter.exact="onEnter"></textarea><div class="compose-actions"><PermissionMenu v-if="capabilities.permissions" :model-value="permissionMode" :disabled="working" @update:model-value="rememberPermission" /><div class="compose-right"><ModelMenu v-if="capabilities.models" :models="models" :model-value="selectedModel" :effort="selectedEffort" :loading="modelLoading" :disabled="working || sending" @update:model-value="rememberModel" @update:effort="rememberEffort" /><button v-if="working && capabilities.queue" type="button" class="follow-up-button" title="将消息加入当前会话队列" aria-label="排队发送" :disabled="sending || !drafts[selected.id]?.trim()" @click="sendFollowUp('queue')"><Plus :size="14" /><span>排队</span></button><button v-if="working && capabilities.steer" type="button" class="follow-up-button steer-button" title="引导当前任务改变方向" aria-label="引导当前任务" :disabled="sending || !drafts[selected.id]?.trim()" @click="sendFollowUp('steer')"><MessageSquare :size="14" /><span>引导</span></button><button v-if="working && capabilities.stop" type="button" class="send-button stop-button" :class="{ 'is-stopping': stopping }" :title="stopping ? '正在暂停' : '暂停任务'" :aria-label="stopping ? '正在暂停' : '暂停任务'" :disabled="stopping && !!activeTurnId" @click="stop"><Square :size="14" fill="currentColor" /></button><button v-else-if="working" type="button" class="send-button" disabled title="Desktop 正在工作"><LoaderCircle :size="18" class="working-spinner" /></button><button v-else type="submit" class="send-button" title="发送消息" aria-label="发送消息" :disabled="sending || !capabilities.send || !drafts[selected.id]?.trim()"><ArrowUp :size="18" /></button></div></div></form>
+        <form class="composer" @submit.prevent="send"><textarea v-model="drafts[selected.id]" placeholder="给 Codex 发送消息" aria-label="消息" rows="2" :disabled="sending || !!selected.desktopDraft?.preparing || !capabilities.send" @keydown.enter.exact="onEnter"></textarea><div class="compose-actions"><PermissionMenu v-if="capabilities.permissions" :model-value="permissionMode" :disabled="working" @update:model-value="rememberPermission" /><div class="compose-right"><ModelMenu v-if="capabilities.models" :models="models" :model-value="selectedModel" :effort="selectedEffort" :loading="modelLoading" :disabled="working || sending" @update:model-value="rememberModel" @update:effort="rememberEffort" /><button v-if="working && capabilities.queue" type="button" class="follow-up-button" :class="{ 'is-default': followUpMode === 'queue' }" title="将消息加入当前会话队列" aria-label="排队发送" :disabled="sending || !drafts[selected.id]?.trim()" @click="sendFollowUp('queue')"><Plus :size="14" /><span>排队</span></button><button v-if="working && capabilities.steer" type="button" class="follow-up-button steer-button" :class="{ 'is-default': followUpMode === 'steer' }" title="引导当前任务改变方向" aria-label="引导当前任务" :disabled="sending || !drafts[selected.id]?.trim()" @click="sendFollowUp('steer')"><MessageSquare :size="14" /><span>引导</span></button><button v-if="working && capabilities.stop" type="button" class="send-button stop-button" :class="{ 'is-stopping': stopping }" :title="stopping ? '正在暂停' : '暂停任务'" :aria-label="stopping ? '正在暂停' : '暂停任务'" :disabled="stopping && !!activeTurnId" @click="stop"><Square :size="14" fill="currentColor" /></button><button v-else-if="working" type="button" class="send-button" disabled title="Desktop 正在工作"><LoaderCircle :size="18" class="working-spinner" /></button><button v-else type="submit" class="send-button" title="发送消息" aria-label="发送消息" :disabled="sending || !capabilities.send || !drafts[selected.id]?.trim()"><ArrowUp :size="18" /></button></div></div></form>
       </div>
     </main>
+    <div v-if="copyFeedback" class="copy-toast" role="status" aria-live="polite">{{ copyFeedback }}</div>
+    <div v-if="showSettings" class="modal-backdrop" @click.self="showSettings = false"><section class="create-dialog settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" @keydown.esc="showSettings = false"><header><div><h2 id="settings-title">全局设置</h2><p>这些偏好会在 Web 和 Android 端保存在当前设备上。</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="showSettings = false"><X :size="18" /></button></header><div class="settings-section"><div class="settings-label"><strong>任务进行中发送方式</strong><span>按回车时使用，按钮仍可随时切换。</span></div><div class="follow-up-mode-list"><button type="button" class="follow-up-mode" :class="{ selected: followUpMode === 'queue' }" @click="rememberFollowUpMode('queue')"><Plus :size="17" /><span><strong>Queue 排队</strong><small>不打断当前任务，等它完成后执行。</small></span></button><button type="button" class="follow-up-mode steer-choice" :class="{ selected: followUpMode === 'steer' }" @click="rememberFollowUpMode('steer')"><MessageSquare :size="17" /><span><strong>Steer 引导</strong><small>立即把当前任务转向新的要求。</small></span></button></div></div><div class="settings-note">当前任务已经排队后，仍可以点击“引导”直接 steer 当前运行中的任务。</div><div class="dialog-actions"><button type="button" class="create-button" @click="showSettings = false">完成</button></div></section></div>
     <div v-if="showFullAccessConfirm" class="modal-backdrop" @click.self="showFullAccessConfirm = false"><section class="create-dialog risk-dialog" role="dialog" aria-modal="true" aria-labelledby="full-access-title" @keydown.esc="showFullAccessConfirm = false"><header><div class="risk-heading"><span class="risk-icon"><ShieldAlert :size="19" /></span><div><h2 id="full-access-title">确认使用完全访问</h2><p>这次消息将跳过 Codex 审批。</p></div></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="showFullAccessConfirm = false"><X :size="18" /></button></header><div class="risk-copy"><p>完全访问模式允许 Codex 直接执行命令、修改工作目录中的文件，并访问电脑上的网络资源。</p><p>只在你明确知道这条消息会做什么时继续。你也可以取消后切换为“请求审批”。</p></div><div class="dialog-actions"><button type="button" class="cancel-button" @click="showFullAccessConfirm = false">取消</button><button type="button" class="danger-confirm-button" @click="showFullAccessConfirm = false; fullAccessConfirmed = true; send()">继续发送</button></div></section></div>
     <div v-if="showCreate" class="modal-backdrop" @click.self="!creating && (showCreate = false)"><section class="create-dialog" role="dialog" aria-modal="true" aria-labelledby="create-title" @keydown.esc="!creating && (showCreate = false)"><header><h2 id="create-title">新建对话</h2><button class="icon-button" type="button" title="关闭" aria-label="关闭" :disabled="creating" @click="showCreate = false"><X :size="18" /></button></header><form @submit.prevent="createThread"><template v-if="desktopMode"><label>项目</label><div class="desktop-project-options"><button type="button" :class="{ chosen: !createProject }" @click="createProject = ''">独立会话</button><button v-for="project in desktopProjects" :key="project.id" type="button" :class="{ chosen: createProject === project.id }" @click="createProject = project.id">{{ project.name || project.path }}</button></div></template><template v-else><label for="working-directory">工作目录</label><input id="working-directory" v-model="createPath" required autocomplete="off" placeholder="例如 D:\WorkSpace\rmdex" /></template><p v-if="createError" class="create-error" role="alert">{{ createError }}</p><div class="dialog-actions"><button type="button" class="cancel-button" :disabled="creating" @click="showCreate = false">取消</button><button type="submit" class="create-button" :disabled="creating || (!desktopMode && !createPath.trim())">{{ creating ? '创建中…' : '创建对话' }}</button></div></form></section></div>
     <div v-if="renameThread" class="modal-backdrop" @click.self="!renaming && (renameThread = null)"><section class="create-dialog" role="dialog" aria-modal="true" aria-labelledby="rename-title" @keydown.esc="!renaming && (renameThread = null)"><header><div><h2 id="rename-title">重命名会话</h2><p>名称只影响 rmdex 显示，不会修改消息内容。</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" :disabled="renaming" @click="renameThread = null"><X :size="18" /></button></header><form @submit.prevent="submitRename"><label for="thread-name">会话名称</label><input id="thread-name" v-model="renameValue" maxlength="80" autocomplete="off" /><p v-if="renameError" class="create-error" role="alert">{{ renameError }}</p><div class="dialog-actions"><button type="button" class="cancel-button" :disabled="renaming" @click="renameThread = null">取消</button><button type="submit" class="create-button" :disabled="renaming || !renameValue.trim()">{{ renaming ? '保存中…' : '保存名称' }}</button></div></form></section></div>

@@ -260,7 +260,7 @@ const server = createServer(async (req, res) => {
   if (![ `localhost:${port}`, `127.0.0.1:${port}` ].includes(host) || (origin && !/^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin))) {
     res.writeHead(403).end(JSON.stringify({ error: 'Forbidden' })); return
   }
-  if (!['GET', 'POST'].includes(req.method || '')) { res.writeHead(405).end(JSON.stringify({ error: 'Method not allowed' })); return }
+  if (!['GET', 'POST', 'DELETE'].includes(req.method || '')) { res.writeHead(405).end(JSON.stringify({ error: 'Method not allowed' })); return }
   if (req.method === 'POST' && ((!/^http:\/\/(localhost|127\.0\.0\.1):5173$/.test(origin || '')) || !/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] || ''))) {
     res.writeHead(403).end(JSON.stringify({ error: 'Forbidden' })); return
   }
@@ -268,20 +268,23 @@ const server = createServer(async (req, res) => {
     const url = new URL(req.url || '/', 'http://localhost:18787')
     await ready
     let result: unknown
-    if (req.method === 'POST') {
+    if (req.method === 'POST' || req.method === 'DELETE') {
       let body = ''
-      for await (const chunk of req) {
+      if (req.method === 'POST') for await (const chunk of req) {
         body += chunk.toString()
         if (body.length > 65536) throw new Error('请求过大')
       }
-      const data = JSON.parse(body)
+      const data = body ? JSON.parse(body) : {}
       const sendMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/send$/)
       const stopMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/stop$/)
       const historyMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/history$/)
       const renameMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/name$/)
       const archiveMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/(archive|unarchive)$/)
       const deleteMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/delete$/)
+      const forkMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/fork$/)
       const queueMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/(queue|steer)$/)
+      const queueDeleteMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/queue\/([a-zA-Z0-9-]+)$/)
+      const queueSteerMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/queue\/([a-zA-Z0-9-]+)\/steer$/)
       const approvalMatch = url.pathname.match(/^\/api\/approvals\/([a-zA-Z0-9-]+)$/)
       if (url.pathname === '/api/settings') {
         if (!['ask', 'auto', 'full'].includes(data.permissionMode)) throw new Error('请选择有效的权限模式')
@@ -297,6 +300,21 @@ const server = createServer(async (req, res) => {
         newThreads.set(started.thread.id, started.thread)
         threadListCache = undefined
         result = { thread: started.thread }
+      } else if (forkMatch) {
+        const threadId = forkMatch[1]!
+        const source = newThreads.get(threadId) || { id: threadId, name: threadNames[threadId] || null }
+        const requestedName = typeof data.name === 'string' ? data.name.trim() : ''
+        const sourceName = typeof source.name === 'string' && source.name.trim() ? source.name.trim() : '未命名会话'
+        const name = (requestedName || `${sourceName} 副本`).slice(0, 80)
+        const forked = await rpc('thread/fork', { threadId, excludeTurns: true }) as { thread?: Record<string, unknown> }
+        if (typeof forked.thread?.id !== 'string') throw new Error('Codex 未返回 Fork 后的新会话 ID')
+        const forkedId = forked.thread.id
+        newThreads.set(forkedId, { ...forked.thread, name })
+        try { await rpc('thread/name/set', { threadId: forkedId, name }) } catch (error) { console.warn(`[rmdex] Fork thread rename unavailable, using rmdex overlay: ${error instanceof Error ? error.message : String(error)}`) }
+        threadNames[forkedId] = name
+        await persistThreadNames()
+        threadListCache = undefined
+        result = { thread: applyThreadName({ ...forked.thread, name }), sourceThreadId: threadId }
       } else if (renameMatch) {
         const threadId = renameMatch[1]!
         if (typeof data.name !== 'string' || !data.name.trim() || data.name.trim().length > 80) throw new Error('会话名称不能为空且不能超过 80 个字符')
@@ -312,7 +330,6 @@ const server = createServer(async (req, res) => {
         result = { threadId, name: threadNames[threadId] }
       } else if (archiveMatch) {
         const threadId = archiveMatch[1]!
-        if (sharedMode && !newThreads.has(threadId)) await subscribeToThread(threadId)
         await rpc(`thread/${archiveMatch[2]}`, { threadId })
         threadListCache = undefined
         result = { threadId, archived: archiveMatch[2] === 'archive' }
@@ -338,6 +355,23 @@ const server = createServer(async (req, res) => {
           const steered = await rpc('turn/steer', { threadId, expectedTurnId, input, clientUserMessageId: typeof data.clientUserMessageId === 'string' ? data.clientUserMessageId : randomUUID() })
           result = { outcome: 'steered', threadId, expectedTurnId, ...(steered && typeof steered === 'object' ? steered : {}) }
         }
+      } else if (queueDeleteMatch && req.method === 'DELETE') {
+        const threadId = queueDeleteMatch[1]!
+        const queuedSubmissionId = queueDeleteMatch[2]!
+        if (sharedMode && !newThreads.has(threadId)) await subscribeToThread(threadId)
+        result = await rpc('thread/queue/delete', { threadId, queuedSubmissionId })
+      } else if (queueSteerMatch) {
+        const threadId = queueSteerMatch[1]!
+        const queuedSubmissionId = queueSteerMatch[2]!
+        if (sharedMode && !newThreads.has(threadId)) await subscribeToThread(threadId)
+        const queued = await rpc('thread/queue/list', { threadId, limit: 100 }) as { data?: Array<{ id?: string; input?: unknown; clientUserMessageId?: string }> }
+        const submission = queued.data?.find(item => item.id === queuedSubmissionId)
+        if (!submission?.id || !Array.isArray(submission.input)) throw new Error('排队任务不存在或已执行')
+        const expectedTurnId = typeof data.expectedTurnId === 'string' && data.expectedTurnId ? data.expectedTurnId : activeTurns.get(threadId)
+        if (!expectedTurnId) throw new Error('当前没有可引导的运行中任务')
+        const steered = await rpc('turn/steer', { threadId, expectedTurnId, input: submission.input, clientUserMessageId: submission.clientUserMessageId || randomUUID() })
+        const deleted = await rpc('thread/queue/delete', { threadId, queuedSubmissionId }) as { deleted?: boolean }
+        result = { outcome: 'steered', threadId, expectedTurnId, queuedSubmissionId, deleted: deleted.deleted !== false, ...(steered && typeof steered === 'object' ? steered : {}) }
       } else if (historyMatch) {
         const threadId = historyMatch[1]!
         if (typeof data.cursor !== 'string' || !data.cursor || data.cursor.length > 4096) throw new Error('缺少有效历史游标')
@@ -394,6 +428,10 @@ const server = createServer(async (req, res) => {
       } else { res.writeHead(404).end(JSON.stringify({ error: 'Not found' })); return }
     } else if (url.pathname === '/api/settings') {
       result = { permissionMode: defaultPermissionMode, mode: sharedMode ? 'shared' : 'standalone' }
+    } else if (/^\/api\/threads\/[a-zA-Z0-9-]+\/queue$/.test(url.pathname)) {
+      const threadId = url.pathname.split('/')[3]!
+      if (sharedMode && !newThreads.has(threadId)) await subscribeToThread(threadId)
+      result = await rpc('thread/queue/list', { threadId, limit: 100 })
     } else if (url.pathname === '/api/models') {
       result = {
         data: await listModels(),
@@ -408,6 +446,7 @@ const server = createServer(async (req, res) => {
           queue: true,
           steer: true,
           rename: true,
+          fork: true,
           archive: true,
           delete: true,
           history: false,
