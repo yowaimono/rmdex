@@ -1,27 +1,36 @@
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
+import { createHash, createSign, randomBytes, scrypt, timingSafeEqual } from 'node:crypto'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { dirname, extname, join, normalize } from 'node:path'
+import { promisify } from 'node:util'
 import { WebSocket, WebSocketServer } from 'ws'
 
 type Device = { id: string; name: string; tokenHash: string; createdAt: number; revoked?: boolean }
 type Client = { tokenHash: string; deviceId: string; name: string; createdAt: number; lastSeenAt?: number; revoked?: boolean }
+type User = { id: string; username: string; passwordHash: string; role: 'admin'; createdAt: number; disabled?: boolean }
+type AuthSession = { id: string; familyId: string; userId: string; deviceId?: string; name?: string; accessHash: string; accessExpiresAt: number; refreshHash: string; refreshExpiresAt: number; usedRefreshHashes?: string[]; createdAt: number; lastSeenAt?: number; revoked?: boolean }
+type PushToken = { token: string; deviceId: string; platform: 'android'; clientName?: string; createdAt: number; lastSeenAt: number }
 type Pairing = { codeHash: string; deviceId: string; expiresAt: number }
 type PairRequest = { id: string; deviceId: string; name: string; createdAt: number; expiresAt: number; status: 'pending' | 'approved' | 'denied'; token?: string }
-type State = { devices: Device[]; clients: Client[]; pairings: Pairing[]; pairRequests: PairRequest[] }
+type State = { devices: Device[]; clients: Client[]; pairings: Pairing[]; pairRequests: PairRequest[]; users: User[]; sessions: AuthSession[]; pushTokens: PushToken[] }
+type Credentials = { accessToken: string; refreshToken: string; expiresIn: number; user: { id: string; username: string }; token?: string; clientToken?: string; deviceId?: string }
 type Pending = { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
 
 const port = Number(process.env.PORT || 8787)
 const publicOrigin = process.env.PUBLIC_ORIGIN || 'https://code.kyeai.xyz'
 const adminHash = process.env.RMDEX_ADMIN_HASH || ''
+const adminUsername = (process.env.RMDEX_ADMIN_USERNAME || 'admin').trim().slice(0, 80) || 'admin'
+const adminPassword = process.env.RMDEX_ADMIN_PASSWORD || ''
 const statePath = process.env.RMDEX_STATE || '/data/state.json'
 const webRoot = process.env.RMDEX_WEB_ROOT || '/app/web'
-const state: State = { devices: [], clients: [], pairings: [], pairRequests: [] }
-const adminSessions = new Map<string, number>()
-const approvedPairTokens = new Map<string, string>()
+const state: State = { devices: [], clients: [], pairings: [], pairRequests: [], users: [], sessions: [], pushTokens: [] }
+const approvedPairTokens = new Map<string, Credentials>()
 const deviceSockets = new Map<string, WebSocket>()
 const devicePending = new Map<string, Map<string, Pending>>()
 const authAttempts = new Map<string, { count: number; until: number }>()
+const scryptAsync = promisify(scrypt)
+const ACCESS_TTL = 15 * 60_000
+const REFRESH_TTL = 30 * 24 * 60 * 60_000
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 const randomToken = (bytes = 32) => randomBytes(bytes).toString('base64url')
@@ -29,6 +38,73 @@ function equalHash(value: string, expected: string) {
   const actual = Buffer.from(hash(value), 'hex')
   const wanted = Buffer.from(expected, 'hex')
   return actual.length === wanted.length && timingSafeEqual(actual, wanted)
+}
+function encodePart(value: string | Buffer) { return Buffer.from(value).toString('base64url') }
+async function passwordDigest(password: string) {
+  const salt = randomBytes(16)
+  const derived = await scryptAsync(password, salt, 64, { N: 16_384, r: 8, p: 1 }) as Buffer
+  return `scrypt$16384$8$1$${encodePart(salt)}$${encodePart(derived)}`
+}
+async function verifyPassword(password: string, stored: string) {
+  if (stored.startsWith('sha256:')) return password.length <= 256 && equalHash(password, stored.slice(7))
+  const parts = stored.split('$')
+  if (parts.length !== 6 || parts[0] !== 'scrypt') return false
+  const [, nText, rText, pText, saltText, expectedText] = parts
+  const n = Number(nText); const r = Number(rText); const p = Number(pText)
+  if (![n, r, p].every(Number.isSafeInteger) || n < 1024 || r < 1 || p < 1) return false
+  try {
+    const expected = Buffer.from(expectedText!, 'base64url')
+    const actual = await scryptAsync(password, Buffer.from(saltText!, 'base64url'), expected.length, { N: n, r, p }) as Buffer
+    return actual.length === expected.length && timingSafeEqual(actual, expected)
+  } catch { return false }
+}
+function bearer(req: import('node:http').IncomingMessage) { return req.headers.authorization?.match(/^Bearer\s+(.+)$/i)?.[1] }
+function userForId(id: string) { return state.users.find(user => user.id === id && !user.disabled) }
+function accessSession(token: string | undefined) {
+  if (!token) return undefined
+  const session = state.sessions.find(item => !item.revoked && item.accessExpiresAt > Date.now() && equalHash(token, item.accessHash))
+  if (session) session.lastSeenAt = Date.now()
+  return session
+}
+function sessionCredentials(session: AuthSession, accessToken: string, refreshToken: string): Credentials {
+  const user = userForId(session.userId)
+  if (!user) throw new Error('用户不存在')
+  return { accessToken, refreshToken, expiresIn: Math.max(1, Math.floor((session.accessExpiresAt - Date.now()) / 1000)), user: { id: user.id, username: user.username }, token: accessToken, ...(session.deviceId ? { clientToken: accessToken, deviceId: session.deviceId } : {}) }
+}
+async function createSession(userId: string, deviceId?: string, name?: string): Promise<Credentials> {
+  const accessToken = randomToken()
+  const refreshToken = randomToken()
+  const session: AuthSession = { id: randomToken(12), familyId: randomToken(12), userId, ...(deviceId ? { deviceId } : {}), ...(name ? { name } : {}), accessHash: hash(accessToken), accessExpiresAt: Date.now() + ACCESS_TTL, refreshHash: hash(refreshToken), refreshExpiresAt: Date.now() + REFRESH_TTL, createdAt: Date.now() }
+  state.sessions.push(session)
+  await persist()
+  return sessionCredentials(session, accessToken, refreshToken)
+}
+async function rotateSession(refreshToken: string): Promise<Credentials | undefined> {
+  const session = state.sessions.find(item => !item.revoked && equalHash(refreshToken, item.refreshHash))
+  if (!session) {
+    const replayed = state.sessions.find(item => !item.revoked && item.usedRefreshHashes?.some(value => equalHash(refreshToken, value)))
+    if (replayed) {
+      for (const item of state.sessions) if (item.familyId === replayed.familyId) item.revoked = true
+      await persist()
+    }
+    return undefined
+  }
+  if (session.refreshExpiresAt <= Date.now()) { session.revoked = true; await persist(); return undefined }
+  const nextAccess = randomToken()
+  const nextRefresh = randomToken()
+  session.usedRefreshHashes = [...(session.usedRefreshHashes || []), session.refreshHash].slice(-5)
+  session.accessHash = hash(nextAccess)
+  session.accessExpiresAt = Date.now() + ACCESS_TTL
+  session.refreshHash = hash(nextRefresh)
+  session.refreshExpiresAt = Date.now() + REFRESH_TTL
+  session.lastSeenAt = Date.now()
+  await persist()
+  return sessionCredentials(session, nextAccess, nextRefresh)
+}
+function revokeAccess(token: string | undefined) {
+  const session = accessSession(token)
+  if (session) session.revoked = true
+  return session
 }
 let saveQueue = Promise.resolve()
 async function persist() {
@@ -47,11 +123,23 @@ async function load() {
     const saved = JSON.parse(await readFile(statePath, 'utf8')) as State
     state.devices = Array.isArray(saved.devices) ? saved.devices : []
     state.clients = Array.isArray(saved.clients) ? saved.clients : []
+    state.users = Array.isArray(saved.users) ? saved.users : []
+    state.sessions = Array.isArray(saved.sessions) ? saved.sessions : []
+    state.pushTokens = Array.isArray(saved.pushTokens) ? saved.pushTokens : []
     state.pairings = Array.isArray(saved.pairings) ? saved.pairings.filter(pair => pair.expiresAt > Date.now()) : []
     state.pairRequests = Array.isArray(saved.pairRequests) ? saved.pairRequests.filter(pair => pair.expiresAt > Date.now() && pair.status === 'pending') : []
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
   }
+}
+async function ensureAdminUser() {
+  if (state.users.length) return
+  let passwordHash = ''
+  if (adminPassword) passwordHash = await passwordDigest(adminPassword)
+  else if (/^[a-f0-9]{64}$/i.test(adminHash)) passwordHash = `sha256:${adminHash}`
+  if (!passwordHash) throw new Error('需要配置 RMDEX_ADMIN_PASSWORD，或兼容旧版的 RMDEX_ADMIN_HASH')
+  state.users.push({ id: randomToken(12), username: adminUsername, passwordHash, role: 'admin', createdAt: Date.now() })
+  await persist()
 }
 function json(res: import('node:http').ServerResponse, status: number, data: unknown) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' })
@@ -68,17 +156,17 @@ async function body(req: import('node:http').IncomingMessage) {
   return raw ? JSON.parse(raw) as Record<string, unknown> : {}
 }
 function clientFor(req: import('node:http').IncomingMessage) {
-  const token = req.headers.authorization?.match(/^Bearer\s+(.+)$/i)?.[1]
+  const token = bearer(req)
+  const session = accessSession(token)
+  if (session?.deviceId && userForId(session.userId)) return { tokenHash: session.accessHash, deviceId: session.deviceId, name: session.name || '已登录设备', createdAt: session.createdAt, lastSeenAt: session.lastSeenAt } satisfies Client
   const client = token ? state.clients.find(item => !item.revoked && equalHash(token, item.tokenHash)) : undefined
   if (client) client.lastSeenAt = Date.now()
   return client
 }
 function adminFor(req: import('node:http').IncomingMessage) {
-  const token = req.headers.authorization?.match(/^Bearer\s+(.+)$/i)?.[1]
-  if (!token) return false
-  const expires = adminSessions.get(token)
-  if (!expires || expires <= Date.now()) { adminSessions.delete(token); return false }
-  return true
+  const session = accessSession(bearer(req))
+  const user = session ? userForId(session.userId) : undefined
+  return user?.role === 'admin' && !session?.deviceId ? user : undefined
 }
 function rpc(deviceId: string, path: string, method: string, data?: unknown): Promise<unknown> {
   const socket = deviceSockets.get(deviceId)
@@ -91,6 +179,86 @@ function rpc(deviceId: string, path: string, method: string, data?: unknown): Pr
     devicePending.set(deviceId, requests)
     socket.send(JSON.stringify({ type: 'request', id, path, method, data }))
   })
+}
+
+const fcmServiceAccountPath = process.env.RMDEX_FCM_SERVICE_ACCOUNT_PATH || ''
+const fcmServiceAccountJson = process.env.RMDEX_FCM_SERVICE_ACCOUNT_JSON || ''
+let fcmConfigPromise: Promise<{ projectId: string; clientEmail: string; privateKey: string } | undefined> | undefined
+let fcmAccess: { token: string; expiresAt: number } | undefined
+let fcmUnavailableLogged = false
+const taskWatchers = new Map<string, NodeJS.Timeout>()
+async function fcmConfig() {
+  if (!fcmConfigPromise) {
+    fcmConfigPromise = (async () => {
+      try {
+        const raw = fcmServiceAccountJson || (fcmServiceAccountPath ? await readFile(fcmServiceAccountPath, 'utf8') : '')
+        if (!raw) return undefined
+        const parsed = JSON.parse(raw) as { project_id?: string; client_email?: string; private_key?: string }
+        if (!parsed.project_id || !parsed.client_email || !parsed.private_key) throw new Error('FCM 服务账号缺少 project_id、client_email 或 private_key')
+        return { projectId: parsed.project_id, clientEmail: parsed.client_email, privateKey: parsed.private_key.replace(/\\n/g, '\n') }
+      } catch (error) {
+        if (!fcmUnavailableLogged) { console.warn(`[rmdex] FCM disabled: ${error instanceof Error ? error.message : 'invalid service account'}`); fcmUnavailableLogged = true }
+        return undefined
+      }
+    })()
+  }
+  return fcmConfigPromise
+}
+async function fcmAccessToken() {
+  if (fcmAccess && fcmAccess.expiresAt > Date.now() + 60_000) return fcmAccess.token
+  const config = await fcmConfig()
+  if (!config) return undefined
+  const now = Math.floor(Date.now() / 1000)
+  const header = encodePart(JSON.stringify({ alg: 'RS256', typ: 'JWT' }))
+  const claim = encodePart(JSON.stringify({ iss: config.clientEmail, scope: 'https://www.googleapis.com/auth/firebase.messaging', aud: 'https://oauth2.googleapis.com/token', iat: now, exp: now + 3600 }))
+  const signer = createSign('RSA-SHA256')
+  signer.update(`${header}.${claim}`)
+  const assertion = `${header}.${claim}.${signer.sign(config.privateKey).toString('base64url')}`
+  const response = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion }) })
+  const data = await response.json() as { access_token?: string; expires_in?: number }
+  if (!response.ok || !data.access_token) throw new Error(`FCM OAuth failed (${response.status})`)
+  fcmAccess = { token: data.access_token, expiresAt: Date.now() + Math.max(60, data.expires_in || 3600) * 1000 }
+  return fcmAccess.token
+}
+async function sendPush(deviceId: string, title: string, bodyText: string, data: Record<string, string>) {
+  const tokens = state.pushTokens.filter(item => item.deviceId === deviceId)
+  if (!tokens.length) return
+  const config = await fcmConfig()
+  if (!config) return
+  try {
+    const accessToken = await fcmAccessToken()
+    if (!accessToken) return
+    const invalid = new Set<string>()
+    for (const item of tokens) {
+      const response = await fetch(`https://fcm.googleapis.com/v1/projects/${encodeURIComponent(config.projectId)}/messages:send`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: { token: item.token, notification: { title, body: bodyText }, data, android: { priority: 'high', notification: { channel_id: 'rmdex-tasks' } } } }),
+      })
+      if (!response.ok && [400, 404].includes(response.status)) invalid.add(item.token)
+    }
+    if (invalid.size) { state.pushTokens = state.pushTokens.filter(item => !invalid.has(item.token)); await persist() }
+  } catch (error) { console.warn(`[rmdex] FCM notification failed: ${error instanceof Error ? error.message : 'unknown error'}`) }
+}
+function watchTask(deviceId: string, threadId: string, turnId: string, name: string) {
+  const key = `${deviceId}:${threadId}:${turnId}`
+  if (taskWatchers.has(key)) return
+  const startedAt = Date.now()
+  const poll = async () => {
+    taskWatchers.delete(key)
+    if (Date.now() - startedAt > 24 * 60 * 60_000) return
+    try {
+      const result = await rpc(deviceId, `/api/threads/${threadId}/status`, 'GET') as { activeTurnId?: string | null; lastTurn?: { id?: string; status?: string } | null }
+      const status = result.lastTurn?.status || ''
+      if (result.lastTurn?.id === turnId && !result.activeTurnId && status && !['inProgress', 'running', 'active', 'started'].includes(status)) {
+        await sendPush(deviceId, `${name || 'Codex 会话'}已完成`, status === 'completed' ? '任务已完成，点击查看结果' : `任务${status === 'interrupted' ? '已暂停' : '已结束'}，点击查看详情`, { threadId, turnId, status })
+        return
+      }
+    } catch { /* The desktop agent may be reconnecting; keep watching. */ }
+    const timer = setTimeout(() => void poll(), 3000)
+    taskWatchers.set(key, timer)
+  }
+  void poll()
 }
 
 const server = createServer(async (req, res) => {
@@ -119,19 +287,41 @@ const server = createServer(async (req, res) => {
       const attempts = authAttempts.get(ip)
       if (attempts && attempts.until > Date.now() && attempts.count >= 8) { json(res, 429, { error: '登录尝试过多，请稍后重试' }); return }
       const data = await body(req)
+      const username = typeof data.username === 'string' ? data.username.trim() : adminUsername
       const password = typeof data.password === 'string' ? data.password : ''
-      const valid = /^[a-f0-9]{64}$/i.test(adminHash) && password.length <= 256 && equalHash(password, adminHash)
+      const user = state.users.find(item => item.username === username && !item.disabled)
+      const valid = Boolean(user && password.length <= 256 && await verifyPassword(password, user.passwordHash))
       if (!valid) {
         const next = attempts?.until && attempts.until > Date.now() ? attempts : { count: 0, until: Date.now() + 15 * 60_000 }
         next.count++
         authAttempts.set(ip, next)
-        json(res, 401, { error: '密码不正确' }); return
+        json(res, 401, { error: '账号或密码不正确' }); return
       }
       authAttempts.delete(ip)
-      const token = randomToken()
-      adminSessions.set(token, Date.now() + 8 * 60 * 60_000)
-      for (const [session, expires] of adminSessions) if (expires <= Date.now()) adminSessions.delete(session)
-      json(res, 200, { token }); return
+      json(res, 200, await createSession(user!.id)); return
+    }
+    if (req.method === 'POST' && url.pathname === '/api/auth/refresh') {
+      const data = await body(req)
+      const refreshToken = typeof data.refreshToken === 'string' ? data.refreshToken : ''
+      const credentials = refreshToken ? await rotateSession(refreshToken) : undefined
+      if (!credentials) { json(res, 401, { error: '刷新凭证已失效，请重新登录' }); return }
+      json(res, 200, credentials); return
+    }
+    if (req.method === 'POST' && url.pathname === '/api/auth/logout') {
+      const data = await body(req)
+      const access = accessSession(bearer(req))
+      const refresh = typeof data.refreshToken === 'string' ? data.refreshToken : ''
+      const refreshSession = refresh ? state.sessions.find(item => !item.revoked && equalHash(refresh, item.refreshHash)) : undefined
+      if (access) access.revoked = true
+      if (refreshSession) refreshSession.revoked = true
+      await persist()
+      json(res, 200, { ok: true }); return
+    }
+    if (req.method === 'GET' && url.pathname === '/api/auth/me') {
+      const session = accessSession(bearer(req))
+      const user = session ? userForId(session.userId) : undefined
+      if (!session || !user) { json(res, 401, { error: '登录已失效' }); return }
+      json(res, 200, { user: { id: user.id, username: user.username }, expiresAt: session.accessExpiresAt, deviceId: session.deviceId || null }); return
     }
     if (req.method === 'POST' && url.pathname === '/api/pair/claim') {
       const data = await body(req)
@@ -153,23 +343,23 @@ const server = createServer(async (req, res) => {
       if (!request || request.expiresAt <= Date.now()) { json(res, 410, { status: 'expired' }); return }
       if (request.status === 'pending') { json(res, 200, { status: 'pending' }); return }
       if (request.status === 'denied') { state.pairRequests = state.pairRequests.filter(item => item.id !== request.id); await persist(); json(res, 200, { status: 'denied' }); return }
-      const token = approvedPairTokens.get(request.id)
-      if (!token) { json(res, 410, { status: 'expired' }); return }
+      const credentials = approvedPairTokens.get(request.id)
+      if (!credentials) { json(res, 410, { status: 'expired' }); return }
       approvedPairTokens.delete(request.id)
       state.pairRequests = state.pairRequests.filter(item => item.id !== request.id)
       await persist()
-      json(res, 200, { status: 'approved', token, deviceId: request.deviceId }); return
+      json(res, 200, { status: 'approved', ...credentials, token: credentials.accessToken, deviceId: request.deviceId }); return
     }
     if (req.method === 'POST' && url.pathname === '/api/devices') {
-      if (!adminFor(req)) { json(res, 401, { error: '需要管理员登录' }); return }
+      const admin = adminFor(req)
+      if (!admin) { json(res, 401, { error: '需要管理员登录' }); return }
       const data = await body(req)
       const token = randomToken()
       const device = { id: randomToken(12), name: typeof data.name === 'string' ? data.name.slice(0, 80) : 'Codex 设备', tokenHash: hash(token), createdAt: Date.now() }
       state.devices.push(device)
-      const clientToken = randomToken()
-      state.clients.push({ tokenHash: hash(clientToken), deviceId: device.id, name: '管理网页', createdAt: Date.now() })
+      const credentials = await createSession(admin.id, device.id, '管理网页')
       await persist()
-      json(res, 201, { id: device.id, token, clientToken, name: device.name }); return
+      json(res, 201, { id: device.id, ...credentials, token, clientToken: credentials.accessToken, name: device.name }); return
     }
     if (req.method === 'GET' && url.pathname === '/api/devices') {
       if (!adminFor(req)) { json(res, 401, { error: '需要管理员登录' }); return }
@@ -177,13 +367,13 @@ const server = createServer(async (req, res) => {
     }
     const webClientMatch = url.pathname.match(/^\/api\/devices\/([\w-]+)\/web-client$/)
     if (req.method === 'POST' && webClientMatch) {
-      if (!adminFor(req)) { json(res, 401, { error: '需要管理员登录' }); return }
+      const admin = adminFor(req)
+      if (!admin) { json(res, 401, { error: '需要管理员登录' }); return }
       const device = state.devices.find(item => item.id === webClientMatch[1] && !item.revoked)
       if (!device) { json(res, 404, { error: '设备不存在' }); return }
-      const clientToken = randomToken()
-      state.clients.push({ tokenHash: hash(clientToken), deviceId: device.id, name: '管理网页', createdAt: Date.now() })
+      const credentials = await createSession(admin.id, device.id, '管理网页')
       await persist()
-      json(res, 201, { clientToken, device: { id: device.id, name: device.name, online: deviceSockets.get(device.id)?.readyState === WebSocket.OPEN } }); return
+      json(res, 201, { ...credentials, clientToken: credentials.accessToken, device: { id: device.id, name: device.name, online: deviceSockets.get(device.id)?.readyState === WebSocket.OPEN } }); return
     }
     if (req.method === 'GET' && url.pathname === '/api/pair-requests') {
       if (!adminFor(req)) { json(res, 401, { error: '需要管理员登录' }); return }
@@ -191,15 +381,14 @@ const server = createServer(async (req, res) => {
     }
     const pairDecision = url.pathname.match(/^\/api\/pair-requests\/([A-Za-z0-9_-]+)$/)
     if (req.method === 'POST' && pairDecision) {
-      if (!adminFor(req)) { json(res, 401, { error: '需要管理员登录' }); return }
+      const admin = adminFor(req)
+      if (!admin) { json(res, 401, { error: '需要管理员登录' }); return }
       const data = await body(req)
       const request = state.pairRequests.find(item => item.id === pairDecision[1] && item.status === 'pending' && item.expiresAt > Date.now())
       if (!request || !['approve', 'deny'].includes(String(data.decision))) { json(res, 404, { error: '配对请求不存在或已过期' }); return }
       request.status = data.decision === 'approve' ? 'approved' : 'denied'
       if (request.status === 'approved') {
-        const token = randomToken()
-        state.clients.push({ tokenHash: hash(token), deviceId: request.deviceId, name: request.name, createdAt: Date.now() })
-        approvedPairTokens.set(request.id, token)
+        approvedPairTokens.set(request.id, await createSession(admin.id, request.deviceId, request.name))
       }
       await persist()
       json(res, 200, { ok: true }); return
@@ -222,6 +411,8 @@ const server = createServer(async (req, res) => {
       if (!device) { json(res, 404, { error: '设备不存在' }); return }
       device.revoked = true
       state.clients = state.clients.filter(client => client.deviceId !== device.id)
+      for (const session of state.sessions) if (session.deviceId === device.id) session.revoked = true
+      state.pushTokens = state.pushTokens.filter(item => item.deviceId !== device.id)
       state.pairings = state.pairings.filter(pair => pair.deviceId !== device.id)
       state.pairRequests = state.pairRequests.filter(pair => pair.deviceId !== device.id)
       deviceSockets.get(device.id)?.close(4001, 'Device revoked')
@@ -245,6 +436,22 @@ const server = createServer(async (req, res) => {
         .map(item => ({ name: item.name, lastSeenAt: item.lastSeenAt, online: Boolean(item.lastSeenAt && Date.now() - item.lastSeenAt < 90_000) }))
       json(res, 200, { device: { id: device.id, name: device.name, online: deviceSockets.get(device.id)?.readyState === WebSocket.OPEN }, phones }); return
     }
+    if (req.method === 'POST' && (url.pathname === '/api/push/register' || url.pathname === '/api/push/unregister')) {
+      const client = clientFor(req)
+      if (!client) { json(res, 401, { error: '需要登录或扫码配对' }); return }
+      const device = state.devices.find(item => item.id === client.deviceId && !item.revoked)
+      if (!device) { json(res, 401, { error: '设备已撤销' }); return }
+      const data = await body(req)
+      const token = typeof data.token === 'string' ? data.token.trim() : ''
+      if (!token || token.length > 4096) { json(res, 400, { error: '推送凭证无效' }); return }
+      if (url.pathname.endsWith('/unregister')) state.pushTokens = state.pushTokens.filter(item => item.token !== token)
+      else {
+        state.pushTokens = state.pushTokens.filter(item => item.token !== token)
+        state.pushTokens.push({ token, deviceId: device.id, platform: 'android', clientName: typeof data.clientName === 'string' ? data.clientName.slice(0, 80) : client.name, createdAt: Date.now(), lastSeenAt: Date.now() })
+      }
+      await persist()
+      json(res, 200, { ok: true }); return
+    }
     const client = clientFor(req)
     if (!client) { json(res, 401, { error: '需要登录或扫码配对' }); return }
     const device = state.devices.find(item => item.id === client.deviceId && !item.revoked)
@@ -254,7 +461,13 @@ const server = createServer(async (req, res) => {
       ? /^\/api\/(?:models|settings|threads(?:\/[a-zA-Z0-9-]+(?:\/(?:status|incremental))?)?|images\/[a-f0-9-]+)$/.test(url.pathname)
       : /^\/api\/(?:settings|threads|threads\/[a-zA-Z0-9-]+\/(?:send|stop|history|name)|approvals\/[a-zA-Z0-9-]+)$/.test(url.pathname)
     if (!allowed || url.search) { json(res, 404, { error: 'Not found' }); return }
-    const result = await rpc(device.id, url.pathname + url.search, req.method!, req.method === 'POST' ? await body(req) : undefined)
+    const requestData = req.method === 'POST' ? await body(req) : undefined
+    const result = await rpc(device.id, url.pathname + url.search, req.method!, requestData)
+    const sendMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/send$/)
+    if (sendMatch && result && typeof result === 'object') {
+      const turn = (result as { turn?: { id?: string } }).turn
+      if (turn?.id) watchTask(device.id, sendMatch[1]!, turn.id, typeof requestData?.name === 'string' ? requestData.name : 'Codex 会话')
+    }
     if (url.pathname.startsWith('/api/images/') && result && typeof result === 'object' && (result as { __rmdexBinary?: boolean }).__rmdexBinary) {
       const image = result as { contentType: string; data: string }
       res.writeHead(200, { 'Content-Type': image.contentType, 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' })
@@ -314,5 +527,5 @@ sockets.on('connection', ws => {
 })
 
 await load()
-if (!/^[a-f0-9]{64}$/i.test(adminHash)) throw new Error('RMDEX_ADMIN_HASH must be a SHA-256 password hash')
+await ensureAdminUser()
 server.listen(port, '0.0.0.0', () => console.log(`rmdex relay listening on ${port}`))

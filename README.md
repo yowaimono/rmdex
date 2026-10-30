@@ -161,7 +161,19 @@ are stored under `work/` and are ignored by Git.
 
 ## Remote relay
 
-Build the relay image with `docker build -t rmdex-relay:local .`. Production configuration must provide `PUBLIC_ORIGIN=https://code.kyeai.xyz`, `RMDEX_ADMIN_HASH` (SHA-256 hex of an admin password of at least 24 characters), and a persistent `/data` volume. Put the relay behind HTTPS/WSS; never publish port 8787 directly. The computer agent requires `RMDEX_RELAY_URL=wss://code.kyeai.xyz/agent` and its one-time `RMDEX_DEVICE_TOKEN`. Pairing codes expire after three minutes and must be explicitly approved in the desktop device panel before the phone receives a client credential.
+Build the relay image with `docker build -t rmdex-relay:local .`. Production configuration must provide `PUBLIC_ORIGIN=https://code.kyeai.xyz`, a persistent `/data` volume, and either `RMDEX_ADMIN_PASSWORD` plus `RMDEX_ADMIN_USERNAME`, or the legacy `RMDEX_ADMIN_HASH` (SHA-256 hex). On first boot the relay hashes the password with scrypt and stores the account in `state.json`; the plaintext password is never persisted. Access tokens last 15 minutes and refresh tokens last 30 days. Refresh tokens rotate on every use, and reuse of an older refresh token revokes that token family.
+
+Existing state files with `clients` and old SHA-256 admin hashes remain readable. New web/mobile sessions use the account access/refresh pair, while old device tokens and client tokens continue to work during migration. Put the relay behind HTTPS/WSS; never publish port 8787 directly. The computer agent requires `RMDEX_RELAY_URL=wss://code.kyeai.xyz/agent` and its one-time `RMDEX_DEVICE_TOKEN`. Pairing codes expire after three minutes and must be explicitly approved in the desktop device panel before the phone receives a client credential.
+
+For true Android background notifications, create a Firebase Android app for
+`xyz.kyeai.rmdex`, place its `google-services.json` at
+`android/app/google-services.json` for the Android build, and configure the
+relay with either `RMDEX_FCM_SERVICE_ACCOUNT_JSON` or
+`RMDEX_FCM_SERVICE_ACCOUNT_PATH`. The service account needs permission to send
+Firebase Cloud Messaging messages. When configured, the relay watches turns
+started through the remote device and sends a notification when they finish;
+without Firebase credentials the existing in-process local notification remains
+available as a fallback.
 
 
 ## Android app
@@ -177,4 +189,4 @@ cd android
 ./gradlew assembleDebug
 ```
 
-On Windows, use `gradlew.bat assembleDebug`. The debug APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`. Use `npx cap open android` to open the native project in Android Studio.
+On Windows, use `gradlew.bat assembleDebug`. The debug APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`. Use `npx cap open android` to open the native project in Android Studio. The push plugin is included in the project; FCM registration only becomes active after the Firebase config file is supplied.

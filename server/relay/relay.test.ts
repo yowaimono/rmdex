@@ -43,9 +43,14 @@ try {
   assert.equal((await request('/api/threads')).status, 401)
   assert.equal((await request('/api/auth/login', json({ password: 'incorrect' }))).status, 401)
   assert.equal((await request('/api/auth/login', { ...json({ password }), headers: { 'Content-Type': 'application/json', Origin: 'https://attacker.invalid' } })).status, 403)
-  const admin = (await request('/api/auth/login', json({ password }))).data.token as string
-  assert.ok(admin)
-  const device = (await request('/api/devices', json({ name: 'Synthetic test device' }, admin))).data
+  const login = (await request('/api/auth/login', json({ username: 'admin', password }))).data
+  assert.ok(login.accessToken && login.refreshToken)
+  const refreshed = await request('/api/auth/refresh', json({ refreshToken: login.refreshToken }))
+  assert.equal(refreshed.status, 200)
+  assert.equal((await request('/api/auth/refresh', json({ refreshToken: login.refreshToken }))).status, 401)
+  const admin = (await request('/api/auth/login', json({ username: 'admin', password }))).data.accessToken as string
+  const deviceResponse = await request('/api/devices', json({ name: 'Synthetic test device' }, admin))
+  const device = deviceResponse.data
   assert.ok(device.token && device.id)
   ws = new WebSocket(`ws://127.0.0.1:${port}/agent`)
   await new Promise<void>((resolve, reject) => { ws!.once('open', () => resolve()); ws!.once('error', reject) })
@@ -74,6 +79,8 @@ try {
   assert.equal((await request('/api/pair/status', statusBody)).data.status, 'expired')
   const client = claimedStatus.data.token as string
   const headers = { Authorization: `Bearer ${client}` }
+  assert.equal((await request('/api/push/register', { ...json({ token: 'test-fcm-token' }), headers: { ...headers, 'Content-Type': 'application/json' } })).status, 200)
+  assert.equal((await request('/api/devices', { headers })).status, 401)
   assert.equal((await request('/api/client', { headers })).data.device.online, true)
   assert.equal((await request('/api/threads', { headers })).data.data[0].id, 'test-thread')
   assert.equal((await request('/api/unknown', { headers })).status, 404)

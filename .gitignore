@@ -28,6 +28,7 @@ dist-relay
 .device-token
 .device-id
 .web-client-token
+android/app/google-services.json
 
 # Local diagnostics and generated handoff artifacts
 work/

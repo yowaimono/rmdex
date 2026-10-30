@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { Capacitor } from '@capacitor/core'
 import { App as NativeApp } from '@capacitor/app'
 import { LocalNotifications } from '@capacitor/local-notifications'
+import { PushNotifications } from '@capacitor/push-notifications'
 import { CapacitorBarcodeScanner, CapacitorBarcodeScannerTypeHint } from '@capacitor/barcode-scanner'
 import MarkdownIt from 'markdown-it'
 import { ArrowLeft, ArrowUp, ChevronRight, CircleAlert, Ellipsis, LoaderCircle, Menu, MessageSquare, Monitor, PanelLeftClose, Pencil, Plus, RefreshCw, Search, Square, Wrench, X, QrCode, Copy, Smartphone, Trash2, ShieldAlert } from 'lucide-vue-next'
@@ -31,9 +32,12 @@ const remoteDevice = ref<{ id: string; name: string; online: boolean } | null>(n
 const authenticatedImages = ref<Record<string, string>>({})
 const imageLoads = new Map<string, Promise<string | undefined>>()
 const showDevices = ref(false)
+const adminUsername = ref(localStorage.getItem('rmdex-admin-username') || 'admin')
 const adminPassword = ref('')
-const adminToken = ref(sessionStorage.getItem('rmdex-admin-token') || '')
-const clientToken = ref(localStorage.getItem('rmdex-client-token') || '')
+const adminToken = ref(sessionStorage.getItem('rmdex-admin-token') || localStorage.getItem('rmdex-admin-access-token') || '')
+const adminRefreshToken = ref(localStorage.getItem('rmdex-admin-refresh-token') || '')
+const clientToken = ref(localStorage.getItem('rmdex-client-token') || localStorage.getItem('rmdex-client-access-token') || '')
+const clientRefreshToken = ref(localStorage.getItem('rmdex-client-refresh-token') || '')
 const devices = ref<Array<{ id: string; name: string; online: boolean }>>([])
 const newDeviceToken = ref('')
 const pairCode = ref('')
@@ -92,6 +96,8 @@ let poll: ReturnType<typeof setInterval> | undefined
 let pollBusy = false
 let appStateListener: { remove: () => Promise<void> } | undefined
 let notificationListener: { remove: () => Promise<void> } | undefined
+let pushRegistrationListener: { remove: () => Promise<void> } | undefined
+let pushActionListener: { remove: () => Promise<void> } | undefined
 let appActive = true
 const trackedTasks = new Map<string, { turnId: string; text: string; name: string }>()
 const cacheHydratedKeys = new Set<string>()
@@ -199,6 +205,28 @@ async function setupNotifications() {
     })
   } catch { /* Notifications are optional on devices that deny permission. */ }
 }
+async function setupPushNotifications() {
+  if (!Capacitor.isNativePlatform() || !clientToken.value || pushRegistrationListener) return
+  try {
+    const permission = await PushNotifications.checkPermissions()
+    if (permission.receive !== 'granted') {
+      const requested = await PushNotifications.requestPermissions()
+      if (requested.receive !== 'granted') return
+    }
+    await PushNotifications.createChannel({ id: 'rmdex-tasks', name: '任务完成', description: 'Codex 任务完成提醒', importance: 5, visibility: 1 })
+    pushRegistrationListener = await PushNotifications.addListener('registration', token => {
+      void post('/api/push/register', { token: token.value, clientName: 'rmdex Android' }).catch(() => {})
+    })
+    pushActionListener = await PushNotifications.addListener('pushNotificationActionPerformed', async action => {
+      const threadId = typeof action.notification.data?.threadId === 'string' ? action.notification.data.threadId : ''
+      if (!threadId) return
+      await refresh()
+      const thread = threads.value.find(item => item.id === threadId)
+      if (thread) await openThread(thread)
+    })
+    await PushNotifications.register()
+  } catch { /* FCM is optional until the Android Firebase project is configured. */ }
+}
 function maybeNotifyTaskComplete(result: ThreadStatus) {
   const task = trackedTasks.get(result.threadId)
   if (!task || result.activeTurnId || result.lastTurn?.id !== task.turnId) return
@@ -297,8 +325,70 @@ async function readJsonResponse(response: Response, fallback: string) {
     throw new Error(`${fallback}（服务器返回了无效 JSON）`)
   }
 }
+type AuthKind = 'admin' | 'client'
+let adminRefreshPromise: Promise<boolean> | undefined
+let clientRefreshPromise: Promise<boolean> | undefined
+function storeSession(kind: AuthKind, result: { accessToken?: string; refreshToken?: string; token?: string; clientToken?: string }) {
+  const access = result.accessToken || result.token || result.clientToken || ''
+  if (kind === 'admin') {
+    adminToken.value = access
+    adminRefreshToken.value = result.refreshToken || adminRefreshToken.value
+    sessionStorage.setItem('rmdex-admin-token', access)
+    localStorage.setItem('rmdex-admin-access-token', access)
+    if (result.refreshToken) localStorage.setItem('rmdex-admin-refresh-token', result.refreshToken)
+  } else {
+    clientToken.value = access
+    clientRefreshToken.value = result.refreshToken || clientRefreshToken.value
+    localStorage.setItem('rmdex-client-token', access)
+    localStorage.setItem('rmdex-client-access-token', access)
+    if (result.refreshToken) localStorage.setItem('rmdex-client-refresh-token', result.refreshToken)
+    if (Capacitor.isNativePlatform()) void setupPushNotifications()
+  }
+}
+function clearSession(kind: AuthKind) {
+  if (kind === 'admin') {
+    adminToken.value = ''; adminRefreshToken.value = ''
+    sessionStorage.removeItem('rmdex-admin-token')
+    localStorage.removeItem('rmdex-admin-access-token'); localStorage.removeItem('rmdex-admin-refresh-token')
+  } else {
+    clientToken.value = ''; clientRefreshToken.value = ''
+    localStorage.removeItem('rmdex-client-token'); localStorage.removeItem('rmdex-client-access-token'); localStorage.removeItem('rmdex-client-refresh-token')
+  }
+}
+async function refreshSession(kind: AuthKind) {
+  const refreshToken = kind === 'admin' ? adminRefreshToken.value : clientRefreshToken.value
+  if (!refreshToken) return false
+  const current = kind === 'admin' ? adminRefreshPromise : clientRefreshPromise
+  if (current) return current
+  const promise = (async () => {
+    try {
+      const response = await fetch(apiUrl('/api/auth/refresh'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ refreshToken }) })
+      const result = await readJsonResponse(response, '凭证续期失败')
+      if (!response.ok || !result.accessToken) throw new Error(result?.error || '凭证续期失败')
+      storeSession(kind, result)
+      return true
+    } catch {
+      clearSession(kind)
+      return false
+    } finally {
+      if (kind === 'admin') adminRefreshPromise = undefined
+      else clientRefreshPromise = undefined
+    }
+  })()
+  if (kind === 'admin') adminRefreshPromise = promise
+  else clientRefreshPromise = promise
+  return promise
+}
+async function authenticatedFetch(path: string, init: RequestInit, kind: AuthKind, retried = false) {
+  const token = kind === 'admin' ? adminToken.value : clientToken.value
+  const headers = new Headers(init.headers || {})
+  if (token) headers.set('Authorization', `Bearer ${token}`)
+  const response = await fetch(apiUrl(path), { ...init, headers })
+  if (response.status === 401 && !retried && await refreshSession(kind)) return authenticatedFetch(path, init, kind, true)
+  return response
+}
 async function get<T>(path: string): Promise<T> {
-  const response = await fetch(apiUrl(path), { headers: clientToken.value ? { Authorization: `Bearer ${clientToken.value}` } : {} })
+  const response = await authenticatedFetch(path, {}, 'client')
   const data = await readJsonResponse(response, `加载 ${path} 失败`)
   if (!response.ok) throw new Error(data?.error || 'Request failed')
   return data as T
@@ -308,10 +398,9 @@ async function bindOnlineDevice() {
   await loadDevices()
   const device = devices.value.find(item => item.online)
   if (!device) return false
-  const result = await adminFetch<{ clientToken: string; device: { id: string; name: string; online: boolean } }>(`/api/devices/${device.id}/web-client`, 'POST', {})
-  clientToken.value = result.clientToken
+  const result = await adminFetch<{ accessToken?: string; refreshToken?: string; clientToken: string; device: { id: string; name: string; online: boolean } }>(`/api/devices/${device.id}/web-client`, 'POST', {})
+  storeSession('client', result)
   remoteDevice.value = result.device
-  localStorage.setItem('rmdex-client-token', result.clientToken)
   return true
 }
 async function loadModels() {
@@ -423,16 +512,14 @@ async function refresh() {
         try {
           client = await get('/api/client')
         } catch (firstError) {
-          localStorage.removeItem('rmdex-client-token')
-          clientToken.value = ''
+          clearSession('client')
           if (!(await bindOnlineDevice())) throw firstError
           client = await get('/api/client')
         }
       }
       remoteDevice.value = client.device
       if (!client.device.online) {
-        localStorage.removeItem('rmdex-client-token')
-        clientToken.value = ''
+        clearSession('client')
         if (!(await bindOnlineDevice())) throw new Error(adminToken.value ? '本地 Codex 设备当前离线，请先启动电脑端代理' : '当前绑定的电脑已离线，请在“连接设备”中重新选择在线电脑')
         client = await get('/api/client')
         remoteDevice.value = client.device
@@ -529,17 +616,15 @@ async function updateThread() {
   finally { pollBusy = false }
 }
 async function post(path: string, body: unknown) {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-  if (clientToken.value) headers.Authorization = `Bearer ${clientToken.value}`
-  const response = await fetch(apiUrl(path), { method: 'POST', headers, body: JSON.stringify(body) })
+  const response = await authenticatedFetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, 'client')
   const result = await readJsonResponse(response, `请求 ${path} 失败`)
   if (!response.ok) throw new Error(result?.error || '请求失败')
   return result
 }
 async function adminFetch<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
-  const headers: Record<string, string> = { Authorization: `Bearer ${adminToken.value}` }
+  const headers: Record<string, string> = {}
   if (body !== undefined) headers['Content-Type'] = 'application/json'
-  const response = await fetch(apiUrl(path), { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
+  const response = await authenticatedFetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }, 'admin')
   const data = await readJsonResponse(response, `请求 ${path} 失败`)
   if (!response.ok) throw new Error(data?.error || '请求失败')
   return data as T
@@ -547,10 +632,10 @@ async function adminFetch<T>(path: string, method = 'GET', body?: unknown): Prom
 async function loginAdmin() {
   pairError.value = ''
   try {
-    const response = await fetch(apiUrl('/api/auth/login'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: adminPassword.value }) })
+    const response = await fetch(apiUrl('/api/auth/login'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: adminUsername.value, password: adminPassword.value }) })
     const result = await readJsonResponse(response, '登录失败')
     if (!response.ok) throw new Error(result?.error || '登录失败')
-    adminToken.value = result.token; sessionStorage.setItem('rmdex-admin-token', result.token); adminPassword.value = ''
+    storeSession('admin', result); localStorage.setItem('rmdex-admin-username', adminUsername.value); adminPassword.value = ''
     await loadDevices()
     if (!clientToken.value) {
       const device = devices.value.find(item => item.online)
@@ -569,15 +654,14 @@ async function loadDevices() {
     ])
     devices.value = deviceResult.data; pairRequests.value = requestResult.data
   }
-  catch (e) { adminToken.value = ''; sessionStorage.removeItem('rmdex-admin-token'); pairError.value = e instanceof Error ? e.message : String(e) }
+  catch (e) { clearSession('admin'); pairError.value = e instanceof Error ? e.message : String(e) }
 }
 async function connectDevice(deviceId: string) {
   pairError.value = ''
   try {
-    const result = await adminFetch<{ clientToken: string; device: { id: string; name: string; online: boolean } }>(`/api/devices/${deviceId}/web-client`, 'POST', {})
-    clientToken.value = result.clientToken
+    const result = await adminFetch<{ accessToken?: string; refreshToken?: string; clientToken: string; device: { id: string; name: string; online: boolean } }>(`/api/devices/${deviceId}/web-client`, 'POST', {})
+    storeSession('client', result)
     remoteDevice.value = result.device
-    localStorage.setItem('rmdex-client-token', result.clientToken)
     showDevices.value = false
     await refresh()
   } catch (e) { pairError.value = e instanceof Error ? e.message : String(e) }
@@ -585,10 +669,9 @@ async function connectDevice(deviceId: string) {
 async function registerDevice() {
   pairError.value = ''; newDeviceToken.value = ''; pairCode.value = ''; pairQr.value = ''
   try {
-    const result = await adminFetch<{ token: string; clientToken: string }>('/api/devices', 'POST', { name: deviceName.value })
+    const result = await adminFetch<{ token: string; clientToken: string; accessToken?: string; refreshToken?: string }>('/api/devices', 'POST', { name: deviceName.value })
     newDeviceToken.value = result.token
-    clientToken.value = result.clientToken
-    localStorage.setItem('rmdex-client-token', result.clientToken)
+    storeSession('client', result)
     await loadDevices()
     await refresh()
   }
@@ -615,8 +698,8 @@ async function claimPair(code = pairInput.value) {
     for (let attempt = 0; attempt < 150; attempt++) {
       const status = await fetch(apiUrl('/api/pair/status'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestId: result.requestId }) })
       const state = await status.json()
-      if (state.status === 'approved' && state.token) {
-        clientToken.value = state.token; localStorage.setItem('rmdex-client-token', state.token)
+      if (state.status === 'approved' && (state.accessToken || state.token)) {
+        storeSession('client', state)
         pairApprovalPage.value = false; pairLanding.value = false; showDevices.value = false; await refresh(); return
       }
       if (state.status === 'denied') { pairApprovalState.value = 'denied'; pairError.value = '电脑端拒绝了配对请求'; return }
@@ -778,6 +861,7 @@ async function send() {
       text, ...settings, operationId: operationId(key, settings.model ? JSON.stringify([text, settings]) : text),
     } : {
       text,
+      name: thread.name || thread.preview || 'Codex 会话',
       permissionMode: permissionMode.value,
       model: selectedModel.value,
       effort: selectedEffort.value,
@@ -833,6 +917,7 @@ onMounted(async () => {
   let handledLaunch = false
   for (const task of notificationTasks()) trackedTasks.set(task.threadId, { turnId: task.turnId, text: task.text, name: task.name })
   await setupNotifications()
+  if (clientToken.value) void setupPushNotifications()
   if (Capacitor.isNativePlatform()) {
     appUrlListener = await NativeApp.addListener('appUrlOpen', ({ url }) => { void handlePairLink(url) })
     const launch = await NativeApp.getLaunchUrl()
@@ -847,7 +932,7 @@ onMounted(async () => {
   poll = setInterval(() => { updateThread(); if (adminToken.value && showDevices.value) void loadDevices() }, 2000)
   if (adminToken.value) void loadDevices()
 })
-onUnmounted(() => { if (poll) clearInterval(poll); clearThreadLongPress(); void appUrlListener?.remove(); void appStateListener?.remove(); void notificationListener?.remove() })
+onUnmounted(() => { if (poll) clearInterval(poll); clearThreadLongPress(); void appUrlListener?.remove(); void appStateListener?.remove(); void notificationListener?.remove(); void pushRegistrationListener?.remove(); void pushActionListener?.remove() })
 </script>
 
 <template>
@@ -883,7 +968,7 @@ onUnmounted(() => { if (poll) clearInterval(poll); clearThreadLongPress(); void 
     <div v-if="renameThread" class="modal-backdrop" @click.self="!renaming && (renameThread = null)"><section class="create-dialog" role="dialog" aria-modal="true" aria-labelledby="rename-title" @keydown.esc="!renaming && (renameThread = null)"><header><div><h2 id="rename-title">重命名会话</h2><p>名称只影响 rmdex 显示，不会修改消息内容。</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" :disabled="renaming" @click="renameThread = null"><X :size="18" /></button></header><form @submit.prevent="submitRename"><label for="thread-name">会话名称</label><input id="thread-name" v-model="renameValue" maxlength="80" autocomplete="off" /><p v-if="renameError" class="create-error" role="alert">{{ renameError }}</p><div class="dialog-actions"><button type="button" class="cancel-button" :disabled="renaming" @click="renameThread = null">取消</button><button type="submit" class="create-button" :disabled="renaming || !renameValue.trim()">{{ renaming ? '保存中…' : '保存名称' }}</button></div></form></section></div>
     <div v-if="pairApprovalPage" class="pair-status-backdrop"><section class="pair-status-page" role="dialog" aria-modal="true" aria-labelledby="pair-status-title"><button class="icon-button pair-status-close" type="button" title="返回设备连接" aria-label="返回设备连接" @click="returnToPairingEntry"><X :size="18" /></button><div class="pair-status-icon" :class="`is-${pairApprovalState}`"><LoaderCircle v-if="pairApprovalState === 'waiting'" :size="28" class="working-spinner" /><CircleAlert v-else :size="28" /></div><h2 id="pair-status-title">{{ pairApprovalState === 'waiting' ? '等待电脑端确认' : pairApprovalState === 'denied' ? '配对请求未通过' : pairApprovalState === 'expired' ? '配对请求已过期' : '配对暂时没有完成' }}</h2><p class="pair-status-copy">{{ pairApprovalState === 'waiting' ? '配对申请已经发送到电脑端，请在 Codex Desktop 中允许这台手机连接。' : pairError }}</p><div v-if="pairApprovalState === 'waiting'" class="pair-status-waiting"><span class="online"></span><span>正在等待电脑端审批</span></div><div v-else class="pair-status-actions"><button class="create-button" type="button" :disabled="scanningPair" @click="scanPairCode"><QrCode :size="16" />重新扫描二维码</button><button class="cancel-button" type="button" @click="returnToPairingEntry">手动输入配对码</button></div><form v-if="pairApprovalState !== 'waiting'" class="pair-status-manual" @submit.prevent="claimPair()"><label for="pair-status-code">输入 32 位配对码</label><div><input id="pair-status-code" v-model="pairInput" maxlength="32" inputmode="text" autocomplete="off" placeholder="输入配对码" /><button class="create-button" type="submit" :disabled="pairInput.length !== 32 || mobilePairing">继续</button></div></form></section></div>
     <div v-if="showDevices" class="modal-backdrop" @click.self="showDevices = false"><section class="create-dialog device-dialog" role="dialog" aria-modal="true" aria-labelledby="devices-title" @keydown.esc="showDevices = false"><header><div><h2 id="devices-title">设备连接</h2><p>管理 Codex 电脑与手机配对</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="showDevices = false"><X :size="18" /></button></header>
-      <form v-if="!adminToken && !pairLanding" class="admin-login" @submit.prevent="loginAdmin"><label for="admin-password">设备管理员密码</label><p class="dialog-hint">登录后才能管理 Codex 电脑、生成手机配对码和审批手机连接。</p><input id="admin-password" v-model="adminPassword" type="password" autocomplete="current-password" required placeholder="输入服务器管理员密码" /><button class="create-button" type="submit">登录管理设备</button></form>
+      <form v-if="!adminToken && !pairLanding" class="admin-login" @submit.prevent="loginAdmin"><label for="admin-username">管理员账号</label><input id="admin-username" v-model="adminUsername" autocomplete="username" required placeholder="输入管理员账号" /><label for="admin-password">管理员密码</label><p class="dialog-hint">登录后才能管理 Codex 电脑、生成手机配对码和审批手机连接。登录凭证会自动续期。</p><input id="admin-password" v-model="adminPassword" type="password" autocomplete="current-password" required placeholder="输入服务器管理员密码" /><button class="create-button" type="submit">登录管理设备</button></form>
       <template v-else-if="adminToken"><div class="admin-status"><span class="online"></span><span>管理员已验证</span></div><form class="register-device" @submit.prevent="registerDevice"><input v-model="deviceName" aria-label="设备名称" maxlength="80" /><button class="create-button" type="submit"><Plus :size="15" />注册此电脑</button></form>
         <div v-if="newDeviceToken" class="device-secret"><strong>设备密钥只显示这一次</strong><p>将它配置在运行 Codex Desktop 的电脑上。不要发送给其他人。</p><code>{{ newDeviceToken }}</code><button class="copy-button" type="button" @click="copyValue(newDeviceToken)"><Copy :size="15" />复制密钥</button><small>电脑代理环境变量：RMDEX_RELAY_URL=wss://code.kyeai.xyz/agent，RMDEX_DEVICE_TOKEN=上方密钥</small></div>
         <div v-if="pairRequests.length" class="pair-requests"><strong>等待确认的手机</strong><div v-for="request in pairRequests" :key="request.id" class="pair-request"><span>{{ request.name }}</span><button type="button" @click="decidePair(request.id, 'deny')">拒绝</button><button type="button" class="approve-pair" @click="decidePair(request.id, 'approve')">允许</button></div></div>
