@@ -2,15 +2,17 @@
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { Capacitor } from '@capacitor/core'
 import { App as NativeApp } from '@capacitor/app'
+import { LocalNotifications } from '@capacitor/local-notifications'
 import { CapacitorBarcodeScanner, CapacitorBarcodeScannerTypeHint } from '@capacitor/barcode-scanner'
 import MarkdownIt from 'markdown-it'
-import { ArrowLeft, ArrowUp, ChevronRight, CircleAlert, LoaderCircle, Menu, MessageSquare, Monitor, PanelLeftClose, Plus, RefreshCw, Search, Square, Wrench, X, QrCode, Copy, Smartphone, Trash2, ShieldAlert } from 'lucide-vue-next'
+import { ArrowLeft, ArrowUp, ChevronRight, CircleAlert, Ellipsis, LoaderCircle, Menu, MessageSquare, Monitor, PanelLeftClose, Pencil, Plus, RefreshCw, Search, Square, Wrench, X, QrCode, Copy, Smartphone, Trash2, ShieldAlert } from 'lucide-vue-next'
 import QRCode from 'qrcode'
 import logoUrl from './assets/rmdex-logo.jpg'
 import ToolEvent from './components/ToolEvent.vue'
 import PermissionMenu from './components/PermissionMenu.vue'
 import ModelMenu, { type ModelOption } from './components/ModelMenu.vue'
 import { timeline, type ContentPart, type Turn } from './conversation'
+import { loadThreadCache, queueThreadCacheWrite } from './thread-cache'
 
 type Thread = { id: string; name?: string | null; preview?: string; cwd?: string; updatedAt?: number; status?: { type: string }; turns?: Turn[]; desktopDraft?: { projectId: string | null; deviceKey: string; preparing?: boolean } }
 const apiBase = Capacitor.isNativePlatform() ? 'https://code.kyeai.xyz' : ''
@@ -46,6 +48,11 @@ const pairLanding = ref(false)
 const scanningPair = ref(false)
 const pairApprovalPage = ref(false)
 const pairApprovalState = ref<'waiting' | 'denied' | 'expired' | 'error'>('waiting')
+const threadMenuId = ref<string | null>(null)
+const renameThread = ref<Thread | null>(null)
+const renameValue = ref('')
+const renameError = ref('')
+const renaming = ref(false)
 let selectionVersion = 0
 const mobileDetail = ref(false)
 const sidebarOpen = ref(true)
@@ -55,7 +62,7 @@ const createPath = ref('')
 const createError = ref('')
 const createProject = ref('')
 const desktopProjects = ref<Array<{ id: string; name: string; path: string }>>([])
-const defaultCapabilities = { mode: 'app-server', models: true, permissions: true, stop: true, approvals: true, create: true, send: true, history: false, createRequiresPrompt: false }
+const defaultCapabilities = { mode: 'app-server', models: true, permissions: true, stop: true, approvals: true, create: true, send: true, rename: true, history: false, createRequiresPrompt: false }
 const capabilities = ref({ ...defaultCapabilities })
 const desktopMode = computed(() => capabilities.value.mode === 'desktop')
 const historyCursor = ref<string | null>(null)
@@ -83,6 +90,13 @@ type Approval = { id: string; method: string; params: { command?: string; reason
 const pendingApprovals = ref<Approval[]>([])
 let poll: ReturnType<typeof setInterval> | undefined
 let pollBusy = false
+let appStateListener: { remove: () => Promise<void> } | undefined
+let notificationListener: { remove: () => Promise<void> } | undefined
+let appActive = true
+const trackedTasks = new Map<string, { turnId: string; text: string; name: string }>()
+const cacheHydratedKeys = new Set<string>()
+const threadListCache = new Map<string, { savedAt: number; data: Thread[] }>()
+const threadListRequests = new Map<string, Promise<Thread[]>>()
 type ReadResult = { thread: Thread; activeTurnId: string | null; approvals: Approval[]; lastTurn?: { id?: string; status: string; error?: { message?: string } } | null; page?: { hasMore: boolean; nextCursor: string | null } }
 type ThreadStatus = {
   threadId: string
@@ -101,7 +115,11 @@ markdown.renderer.rules.link_open = (tokens, idx, options, env, renderer) => {
   tokens[idx]!.attrSet('rel', 'noopener noreferrer')
   return defaultLink(tokens, idx, options, env, renderer)
 }
-const filtered = computed(() => threads.value.filter((t) => `${t.name || ''} ${t.preview || ''} ${t.cwd || ''}`.toLowerCase().includes(query.value.toLowerCase())))
+const orderedThreads = computed(() => [...threads.value].sort((a, b) => {
+  const active = (value: Thread) => ['active', 'inProgress', 'running'].includes(value.status?.type || '') ? 1 : 0
+  return active(b) - active(a) || (b.updatedAt || 0) - (a.updatedAt || 0)
+}))
+const filtered = computed(() => orderedThreads.value.filter((t) => `${t.name || ''} ${t.preview || ''} ${t.cwd || ''}`.toLowerCase().includes(query.value.toLowerCase())))
 const remoteMode = computed(() => Capacitor.isNativePlatform() || !!clientToken.value || !['localhost', '127.0.0.1'].includes(location.hostname))
 const messages = computed(() => timeline(selected.value?.turns || []))
 const working = computed(() => !!activeTurnId.value || sendingThreadId.value === selected.value?.id || !!selected.value?.desktopDraft?.preparing)
@@ -120,7 +138,73 @@ function cloneRead(result: ReadResult): ReadResult {
   return structuredClone(result)
 }
 function rememberThreadRead(result: ReadResult) {
-  threadCache.set(threadCacheKey(result.thread.id), cloneRead(result))
+  const key = threadCacheKey(result.thread.id)
+  const copy = cloneRead(result)
+  threadCache.set(key, copy)
+  queueThreadCacheWrite(key, copy)
+}
+async function hydrateThreadCache() {
+  const prefix = `${remoteDevice.value?.id || 'local'}:${desktopMode.value ? 'desktop' : 'app-server'}:`
+  if (cacheHydratedKeys.has(prefix)) return
+  cacheHydratedKeys.add(prefix)
+  for (const entry of await loadThreadCache(prefix)) {
+    if (entry.result && typeof entry.result === 'object' && 'thread' in entry.result) threadCache.set(entry.key, entry.result as ReadResult)
+  }
+}
+function notificationTasks() {
+  try { return JSON.parse(localStorage.getItem('rmdex-active-tasks') || '[]') as Array<{ deviceKey: string; threadId: string; turnId: string; text: string; name: string }> } catch { return [] }
+}
+function persistNotificationTasks() {
+  localStorage.setItem('rmdex-active-tasks', JSON.stringify([...trackedTasks.entries()].map(([threadId, task]) => ({ deviceKey: remoteDevice.value?.id || 'local', threadId, ...task }))))
+}
+function trackTask(threadId: string, turnId: string, text: string, name: string) {
+  trackedTasks.set(threadId, { turnId, text, name })
+  persistNotificationTasks()
+}
+function clearTask(threadId: string) {
+  if (!trackedTasks.delete(threadId)) return
+  persistNotificationTasks()
+}
+async function notifyTaskComplete(threadId: string, task: { turnId: string; text: string; name: string }, status: string) {
+  clearTask(threadId)
+  if (appActive || !Capacitor.isNativePlatform()) return
+  try {
+    const permission = await LocalNotifications.checkPermissions()
+    if (permission.display !== 'granted') return
+    await LocalNotifications.schedule({ notifications: [{
+      id: Math.abs([...task.turnId].reduce((hash, char) => ((hash << 5) - hash + char.charCodeAt(0)) | 0, 0)),
+      title: `${task.name || 'Codex 会话'}已完成`,
+      body: status === 'completed' ? '任务已完成，点击查看结果' : `任务${status === 'interrupted' ? '已暂停' : '未完成'}，点击查看详情`,
+      channelId: 'rmdex-tasks',
+      extra: { threadId },
+    }] })
+  } catch { /* Notification permission or channel may be unavailable on this device. */ }
+}
+async function setupNotifications() {
+  if (!Capacitor.isNativePlatform()) return
+  try {
+    const permission = await LocalNotifications.checkPermissions()
+    if (permission.display !== 'granted') await LocalNotifications.requestPermissions()
+    await LocalNotifications.createChannel({ id: 'rmdex-tasks', name: '任务完成', description: 'Codex 任务完成提醒', importance: 5, visibility: 1 })
+    notificationListener = await LocalNotifications.addListener('localNotificationActionPerformed', async action => {
+      const threadId = typeof action.notification.extra?.threadId === 'string' ? action.notification.extra.threadId : ''
+      if (!threadId) return
+      await refresh()
+      const thread = threads.value.find(item => item.id === threadId)
+      if (thread) await openThread(thread)
+    })
+    appStateListener = await NativeApp.addListener('appStateChange', ({ isActive }) => {
+      appActive = isActive
+      if (isActive) void updateThread()
+    })
+  } catch { /* Notifications are optional on devices that deny permission. */ }
+}
+function maybeNotifyTaskComplete(result: ThreadStatus) {
+  const task = trackedTasks.get(result.threadId)
+  if (!task || result.activeTurnId || result.lastTurn?.id !== task.turnId) return
+  const status = result.lastTurn.status
+  if (!['completed', 'interrupted', 'failed', 'error'].includes(status)) return
+  void notifyTaskComplete(result.threadId, task, status)
 }
 async function readThread(id: string, force = false) {
   const key = threadCacheKey(id)
@@ -156,6 +240,7 @@ function mergeThreadStatus(result: ThreadStatus) {
   pendingApprovals.value = result.approvals || []
   lastTurn.value = result.lastTurn || null
   rememberThreadRead({ thread: selected.value, activeTurnId: activeTurnId.value, approvals: pendingApprovals.value, lastTurn: lastTurn.value, page: threadCache.get(threadCacheKey(result.threadId))?.page })
+  maybeNotifyTaskComplete(result)
 }
 function applyRead(result: ReadResult) {
   if (desktopMode.value && selected.value?.id === result.thread.id) {
@@ -258,6 +343,56 @@ async function loadModels() {
     error.value = `设备设置暂不可用：${e instanceof Error ? e.message : String(e)}`
   } finally { modelLoading.value = false }
 }
+async function loadThreads(force = false) {
+  const scope = `${remoteDevice.value?.id || 'local'}:${desktopMode.value ? 'desktop' : 'app-server'}`
+  const cached = threadListCache.get(scope)
+  if (!force && cached && Date.now() - cached.savedAt < 5000) return cached.data.map(thread => ({ ...thread }))
+  const existing = threadListRequests.get(scope)
+  if (existing) return existing.then(data => data.map(thread => ({ ...thread })))
+  const request = get<{ data: Thread[] }>('/api/threads').then(result => {
+    const data = result.data || []
+    threadListCache.set(scope, { savedAt: Date.now(), data: data.map(thread => ({ ...thread })) })
+    return data
+  }).finally(() => threadListRequests.delete(scope))
+  threadListRequests.set(scope, request)
+  return request.then(data => data.map(thread => ({ ...thread })))
+}
+let threadLongPressTimer: ReturnType<typeof setTimeout> | undefined
+function clearThreadLongPress() {
+  if (threadLongPressTimer) clearTimeout(threadLongPressTimer)
+  threadLongPressTimer = undefined
+}
+function openThreadMenu(thread: Thread) {
+  threadMenuId.value = threadMenuId.value === thread.id ? null : thread.id
+}
+function beginRename(thread: Thread) {
+  threadMenuId.value = null
+  renameThread.value = thread
+  renameValue.value = thread.name || thread.preview || ''
+  renameError.value = ''
+}
+function startThreadLongPress(thread: Thread) {
+  clearThreadLongPress()
+  threadLongPressTimer = setTimeout(() => beginRename(thread), 550)
+}
+async function submitRename() {
+  const thread = renameThread.value
+  const name = renameValue.value.trim()
+  if (!thread || renaming.value) return
+  if (!name || name.length > 80) { renameError.value = '名称不能为空且不能超过 80 个字符'; return }
+  renaming.value = true; renameError.value = ''
+  try {
+    await post(`/api/threads/${thread.id}/name`, { name })
+    const update = (item: Thread) => item.id === thread.id ? { ...item, name } : item
+    threads.value = threads.value.map(update)
+    localDraftThreads.value = localDraftThreads.value.map(update)
+    if (selected.value?.id === thread.id) selected.value = { ...selected.value, name }
+    const cached = threadCache.get(threadCacheKey(thread.id))
+    if (cached) { cached.thread = { ...cached.thread, name }; rememberThreadRead(cached) }
+    renameThread.value = null
+  } catch (e) { renameError.value = e instanceof Error ? e.message : String(e) }
+  finally { renaming.value = false }
+}
 function rememberPermission(value: 'ask' | 'auto' | 'full') {
   permissionMode.value = value
   localStorage.setItem('rmdex-permission-mode', value)
@@ -303,12 +438,13 @@ async function refresh() {
         remoteDevice.value = client.device
       }
     }
+    await hydrateThreadCache()
     const [result] = await Promise.all([
-      get<{ data: Thread[] }>('/api/threads'),
+      loadThreads(),
       loadModels(),
     ])
     const deviceKey = remoteDevice.value?.id || 'local'
-    threads.value = [...localDraftThreads.value.filter(thread => thread.desktopDraft?.deviceKey === deviceKey), ...new Map(result.data.map((thread) => [thread.id, thread])).values()]
+    threads.value = [...localDraftThreads.value.filter(thread => thread.desktopDraft?.deviceKey === deviceKey), ...new Map(result.map((thread) => [thread.id, thread])).values()]
     connected.value = true
   }
   catch (e) { connected.value = false; error.value = e instanceof Error ? e.message : String(e) }
@@ -377,7 +513,17 @@ async function updateThread() {
       if (version === selectionVersion) { applyRead(result); if (follow) await scrollToLatest() }
     } else {
       const result = await get<ThreadStatus>(`/api/threads/${id}/status`)
-      if (version === selectionVersion) { mergeThreadStatus(result); if (follow) await scrollToLatest() }
+      if (version === selectionVersion) {
+        mergeThreadStatus(result)
+        if (result.lastTurn?.id && !selected.value?.turns?.some(turn => turn.id === result.lastTurn?.id)) {
+          const delta = await get<ReadResult>(`/api/threads/${id}/incremental`)
+          if (version !== selectionVersion || !selected.value) return
+          const mergedThread = { ...selected.value, ...delta.thread, turns: [...new Map([...(selected.value.turns || []), ...(delta.thread.turns || [])].map(turn => [turn.id, turn])).values()] }
+          applyRead({ ...delta, thread: mergedThread, activeTurnId: result.activeTurnId, approvals: result.approvals, lastTurn: result.lastTurn })
+          historyCursor.value = delta.page?.hasMore ? delta.page.nextCursor : historyCursor.value
+        }
+        if (follow) await scrollToLatest()
+      }
     }
   } catch (e) { if (version === selectionVersion) error.value = e instanceof Error ? e.message : String(e) }
   finally { pollBusy = false }
@@ -641,6 +787,7 @@ async function send() {
     if (desktopMode.value) queuedUntil = Date.now() + 60000
     if (drafts.value[id]?.trim() === text) drafts.value[id] = ''
     if (selected.value?.id === id) activeTurnId.value = result.turn?.id || activeTurnId.value
+    if (result.turn?.id) trackTask(id, result.turn.id, text, thread.name || thread.preview || 'Codex 会话')
     if (stopRequested.value) {
       try { if (result.turn?.id) await post(`/api/threads/${id}/stop`, {}) }
       catch (e) { if (selected.value?.id === id) error.value = e instanceof Error ? e.message : String(e) }
@@ -684,6 +831,8 @@ async function handlePairLink(rawUrl: string) {
 }
 onMounted(async () => {
   let handledLaunch = false
+  for (const task of notificationTasks()) trackedTasks.set(task.threadId, { turnId: task.turnId, text: task.text, name: task.name })
+  await setupNotifications()
   if (Capacitor.isNativePlatform()) {
     appUrlListener = await NativeApp.addListener('appUrlOpen', ({ url }) => { void handlePairLink(url) })
     const launch = await NativeApp.getLaunchUrl()
@@ -698,7 +847,7 @@ onMounted(async () => {
   poll = setInterval(() => { updateThread(); if (adminToken.value && showDevices.value) void loadDevices() }, 2000)
   if (adminToken.value) void loadDevices()
 })
-onUnmounted(() => { if (poll) clearInterval(poll); void appUrlListener?.remove() })
+onUnmounted(() => { if (poll) clearInterval(poll); clearThreadLongPress(); void appUrlListener?.remove(); void appStateListener?.remove(); void notificationListener?.remove() })
 </script>
 
 <template>
@@ -714,7 +863,7 @@ onUnmounted(() => { if (poll) clearInterval(poll); void appUrlListener?.remove()
       <label class="search"><Search :size="16" /><input v-model="query" placeholder="搜索会话" aria-label="搜索会话" /></label>
       <div class="section-label"><span>会话 <span class="count">{{ filtered.length }}</span></span><button class="icon-button" title="刷新会话" aria-label="刷新会话" :disabled="loading" @click="refresh"><RefreshCw :size="15" /></button></div>
       <div v-if="error && !connected" class="sidebar-error">{{ error }}</div>
-      <div class="thread-list"><button v-for="thread in filtered" :key="thread.id" class="thread" :class="{ selected: selected?.id === thread.id }" @click="openThread(thread)"><span class="thread-title">{{ thread.name || thread.preview || '未命名会话' }}</span><span class="thread-meta">{{ date(thread.updatedAt) }}</span></button><div v-if="!filtered.length && !loading" class="empty-list">暂无会话</div></div>
+      <div class="thread-list"><div v-for="thread in filtered" :key="thread.id" class="thread-row" @pointerdown="capabilities.rename && startThreadLongPress(thread)" @pointerup="clearThreadLongPress" @pointercancel="clearThreadLongPress" @pointerleave="clearThreadLongPress" @contextmenu.prevent="capabilities.rename && beginRename(thread)"><button class="thread" :class="{ selected: selected?.id === thread.id }" @click="threadMenuId = null; openThread(thread)"><span class="thread-title">{{ thread.name || thread.preview || '未命名会话' }}</span><span class="thread-meta">{{ date(thread.updatedAt) }}</span></button><button v-if="capabilities.rename" class="icon-button thread-menu-trigger" type="button" title="会话操作" aria-label="会话操作" @click.stop="openThreadMenu(thread)"><Ellipsis :size="17" /></button><div v-if="capabilities.rename && threadMenuId === thread.id" class="thread-menu" @click.stop><button type="button" @click="beginRename(thread)"><Pencil :size="14" />重命名</button><button type="button" @click="copyValue(thread.id); threadMenuId = null"><Copy :size="14" />复制会话 ID</button></div></div><div v-if="!filtered.length && !loading" class="empty-list">暂无会话</div></div>
       <footer class="side-footer"><span class="online" :class="{ offline: !connected }"></span> {{ remoteMode ? '远程设备' : '本机模式' }} <span class="footer-label">{{ connected ? '已连接' : '未连接' }}</span></footer>
     </aside>
     <main class="main" :class="{ hiddenMobile: !mobileDetail }">
@@ -731,6 +880,7 @@ onUnmounted(() => { if (poll) clearInterval(poll); void appUrlListener?.remove()
     </main>
     <div v-if="showFullAccessConfirm" class="modal-backdrop" @click.self="showFullAccessConfirm = false"><section class="create-dialog risk-dialog" role="dialog" aria-modal="true" aria-labelledby="full-access-title" @keydown.esc="showFullAccessConfirm = false"><header><div class="risk-heading"><span class="risk-icon"><ShieldAlert :size="19" /></span><div><h2 id="full-access-title">确认使用完全访问</h2><p>这次消息将跳过 Codex 审批。</p></div></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="showFullAccessConfirm = false"><X :size="18" /></button></header><div class="risk-copy"><p>完全访问模式允许 Codex 直接执行命令、修改工作目录中的文件，并访问电脑上的网络资源。</p><p>只在你明确知道这条消息会做什么时继续。你也可以取消后切换为“请求审批”。</p></div><div class="dialog-actions"><button type="button" class="cancel-button" @click="showFullAccessConfirm = false">取消</button><button type="button" class="danger-confirm-button" @click="showFullAccessConfirm = false; fullAccessConfirmed = true; send()">继续发送</button></div></section></div>
     <div v-if="showCreate" class="modal-backdrop" @click.self="!creating && (showCreate = false)"><section class="create-dialog" role="dialog" aria-modal="true" aria-labelledby="create-title" @keydown.esc="!creating && (showCreate = false)"><header><h2 id="create-title">新建对话</h2><button class="icon-button" type="button" title="关闭" aria-label="关闭" :disabled="creating" @click="showCreate = false"><X :size="18" /></button></header><form @submit.prevent="createThread"><template v-if="desktopMode"><label>项目</label><div class="desktop-project-options"><button type="button" :class="{ chosen: !createProject }" @click="createProject = ''">独立会话</button><button v-for="project in desktopProjects" :key="project.id" type="button" :class="{ chosen: createProject === project.id }" @click="createProject = project.id">{{ project.name || project.path }}</button></div></template><template v-else><label for="working-directory">工作目录</label><input id="working-directory" v-model="createPath" required autocomplete="off" placeholder="例如 D:\WorkSpace\rmdex" /></template><p v-if="createError" class="create-error" role="alert">{{ createError }}</p><div class="dialog-actions"><button type="button" class="cancel-button" :disabled="creating" @click="showCreate = false">取消</button><button type="submit" class="create-button" :disabled="creating || (!desktopMode && !createPath.trim())">{{ creating ? '创建中…' : '创建对话' }}</button></div></form></section></div>
+    <div v-if="renameThread" class="modal-backdrop" @click.self="!renaming && (renameThread = null)"><section class="create-dialog" role="dialog" aria-modal="true" aria-labelledby="rename-title" @keydown.esc="!renaming && (renameThread = null)"><header><div><h2 id="rename-title">重命名会话</h2><p>名称只影响 rmdex 显示，不会修改消息内容。</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" :disabled="renaming" @click="renameThread = null"><X :size="18" /></button></header><form @submit.prevent="submitRename"><label for="thread-name">会话名称</label><input id="thread-name" v-model="renameValue" maxlength="80" autocomplete="off" /><p v-if="renameError" class="create-error" role="alert">{{ renameError }}</p><div class="dialog-actions"><button type="button" class="cancel-button" :disabled="renaming" @click="renameThread = null">取消</button><button type="submit" class="create-button" :disabled="renaming || !renameValue.trim()">{{ renaming ? '保存中…' : '保存名称' }}</button></div></form></section></div>
     <div v-if="pairApprovalPage" class="pair-status-backdrop"><section class="pair-status-page" role="dialog" aria-modal="true" aria-labelledby="pair-status-title"><button class="icon-button pair-status-close" type="button" title="返回设备连接" aria-label="返回设备连接" @click="returnToPairingEntry"><X :size="18" /></button><div class="pair-status-icon" :class="`is-${pairApprovalState}`"><LoaderCircle v-if="pairApprovalState === 'waiting'" :size="28" class="working-spinner" /><CircleAlert v-else :size="28" /></div><h2 id="pair-status-title">{{ pairApprovalState === 'waiting' ? '等待电脑端确认' : pairApprovalState === 'denied' ? '配对请求未通过' : pairApprovalState === 'expired' ? '配对请求已过期' : '配对暂时没有完成' }}</h2><p class="pair-status-copy">{{ pairApprovalState === 'waiting' ? '配对申请已经发送到电脑端，请在 Codex Desktop 中允许这台手机连接。' : pairError }}</p><div v-if="pairApprovalState === 'waiting'" class="pair-status-waiting"><span class="online"></span><span>正在等待电脑端审批</span></div><div v-else class="pair-status-actions"><button class="create-button" type="button" :disabled="scanningPair" @click="scanPairCode"><QrCode :size="16" />重新扫描二维码</button><button class="cancel-button" type="button" @click="returnToPairingEntry">手动输入配对码</button></div><form v-if="pairApprovalState !== 'waiting'" class="pair-status-manual" @submit.prevent="claimPair()"><label for="pair-status-code">输入 32 位配对码</label><div><input id="pair-status-code" v-model="pairInput" maxlength="32" inputmode="text" autocomplete="off" placeholder="输入配对码" /><button class="create-button" type="submit" :disabled="pairInput.length !== 32 || mobilePairing">继续</button></div></form></section></div>
     <div v-if="showDevices" class="modal-backdrop" @click.self="showDevices = false"><section class="create-dialog device-dialog" role="dialog" aria-modal="true" aria-labelledby="devices-title" @keydown.esc="showDevices = false"><header><div><h2 id="devices-title">设备连接</h2><p>管理 Codex 电脑与手机配对</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="showDevices = false"><X :size="18" /></button></header>
       <form v-if="!adminToken && !pairLanding" class="admin-login" @submit.prevent="loginAdmin"><label for="admin-password">设备管理员密码</label><p class="dialog-hint">登录后才能管理 Codex 电脑、生成手机配对码和审批手机连接。</p><input id="admin-password" v-model="adminPassword" type="password" autocomplete="current-password" required placeholder="输入服务器管理员密码" /><button class="create-button" type="submit">登录管理设备</button></form>

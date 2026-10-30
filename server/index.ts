@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { readFile, stat } from 'node:fs/promises'
+import { readFile, stat, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { homedir } from 'node:os'
 import { extname, isAbsolute, join } from 'node:path'
@@ -22,6 +22,11 @@ const codexExecutable = process.env.RMDEX_CODEX || 'codex'
 const codexHome = process.env.CODEX_HOME || join(homedir(), '.codex')
 const sharedSocket = process.env.RMDEX_CODEX_SOCKET || join(codexHome, 'app-server-control', 'app-server-control.sock')
 const sharedMode = ['shared', 'proxy'].includes(requestedMode)
+const threadNamesPath = join(codexHome, 'rmdex-thread-names.json')
+let threadNames: Record<string, string> = {}
+const threadNamesReady = readFile(threadNamesPath, 'utf8').then(raw => { threadNames = JSON.parse(raw) }).catch(error => { if (error.code !== 'ENOENT') console.warn(`[rmdex] Thread names could not be loaded: ${error.message}`) })
+let threadListCache: { expiresAt: number; data: Array<Record<string, unknown>> } | undefined
+let threadListRequest: Promise<Array<Record<string, unknown>>> | undefined
 const codexArgs = sharedMode ? ['app-server', 'proxy', '--sock', sharedSocket] : ['app-server']
 console.log(`[rmdex] Codex connection mode: ${sharedMode ? `shared proxy (${sharedSocket})` : requestedMode === 'desktop' ? 'Desktop-compatible app-server' : 'standalone app-server'}`)
 // Windows npm installs may expose Codex as a PowerShell shim. Node's spawn
@@ -70,6 +75,30 @@ const port = Number(process.env.RMDEX_AGENT_PORT || 18787)
 const imageTypes: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' }
 
 type ThreadRead = { thread?: { turns?: Array<{ items?: Array<{ type?: string; content?: Array<{ type?: string; path?: string; assetUrl?: string }> }> }> } }
+function applyThreadName(thread: Record<string, unknown>) {
+  const id = typeof thread.id === 'string' ? thread.id : ''
+  return id && threadNames[id] ? { ...thread, name: threadNames[id] } : thread
+}
+async function persistThreadNames() {
+  await writeFile(threadNamesPath, JSON.stringify(threadNames, null, 2), { mode: 0o600 })
+}
+async function listThreads() {
+  await threadNamesReady
+  if (threadListCache && threadListCache.expiresAt > Date.now()) return threadListCache.data
+  if (threadListRequest) return threadListRequest
+  threadListRequest = rpc('thread/list', { limit: 100, sortKey: 'updated_at' }).then(raw => {
+    const list = raw as { data?: Array<Record<string, unknown>> }
+    const data = (list.data || []).map(applyThreadName)
+    threadListCache = { expiresAt: Date.now() + 3000, data }
+    return data
+  }).finally(() => { threadListRequest = undefined })
+  return threadListRequest
+}
+async function listThreadTurns(threadId: string, cursor?: string) {
+  const page = await rpc('thread/turns/list', { threadId, limit: 10, sortDirection: 'desc', itemsView: 'full', ...(cursor ? { cursor } : {}) }) as { data?: Array<Record<string, unknown>>; nextCursor?: string | null }
+  const turns = [...(page.data || [])].reverse()
+  return { turns, page: { hasMore: Boolean(page.nextCursor), nextCursor: page.nextCursor || null } }
+}
 function registerImages(result: unknown) {
   const thread = result as ThreadRead
   for (const turn of thread.thread?.turns || []) {
@@ -239,6 +268,8 @@ const server = createServer(async (req, res) => {
       const data = JSON.parse(body)
       const sendMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/send$/)
       const stopMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/stop$/)
+      const historyMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/history$/)
+      const renameMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/name$/)
       const approvalMatch = url.pathname.match(/^\/api\/approvals\/([a-zA-Z0-9-]+)$/)
       if (url.pathname === '/api/settings') {
         if (!['ask', 'auto', 'full'].includes(data.permissionMode)) throw new Error('请选择有效的权限模式')
@@ -252,7 +283,33 @@ const server = createServer(async (req, res) => {
         const started = await rpc('thread/start', { cwd }) as { thread?: Record<string, unknown> }
         if (typeof started.thread?.id !== 'string') throw new Error('Codex 未返回会话 ID')
         newThreads.set(started.thread.id, started.thread)
+        threadListCache = undefined
         result = { thread: started.thread }
+      } else if (renameMatch) {
+        const threadId = renameMatch[1]!
+        if (typeof data.name !== 'string' || !data.name.trim() || data.name.trim().length > 80) throw new Error('会话名称不能为空且不能超过 80 个字符')
+        await threadNamesReady
+        if (!newThreads.has(threadId)) {
+          if (sharedMode) await subscribeToThread(threadId)
+          else await rpc('thread/resume', { threadId, excludeTurns: true })
+        }
+        try { await rpc('thread/name/set', { threadId, name: data.name.trim() }) } catch (error) { console.warn(`[rmdex] Codex thread rename unavailable, using rmdex overlay: ${error instanceof Error ? error.message : String(error)}`) }
+        threadNames[threadId] = data.name.trim()
+        await persistThreadNames()
+        threadListCache = undefined
+        result = { threadId, name: threadNames[threadId] }
+      } else if (historyMatch) {
+        const threadId = historyMatch[1]!
+        if (typeof data.cursor !== 'string' || !data.cursor || data.cursor.length > 4096) throw new Error('缺少有效历史游标')
+        if (sharedMode && !newThreads.has(threadId)) await subscribeToThread(threadId)
+        const page = await listThreadTurns(threadId, data.cursor)
+        const base = newThreads.get(threadId) || { id: threadId, name: threadNames[threadId] || null }
+        result = { thread: { ...applyThreadName(base), turns: page.turns }, page: page.page }
+        const read = result as { thread?: Record<string, unknown> }
+        if (read.thread) read.thread = applyThreadName(read.thread)
+        registerImages(result)
+        const live = liveTurns.get(threadId)
+        result = { ...(result as object), activeTurnId: activeTurns.get(threadId) || null, lastTurn: live ? { id: live.id, status: live.status, error: live.error } : null, approvals: [...approvals.entries()].filter(([, request]) => request.params.threadId === threadId).map(([id, request]) => ({ id, method: request.method, params: request.params })) }
       } else if (sendMatch) {
         const threadId = sendMatch[1]!
         if (typeof data.text !== 'string' || !data.text.trim() || data.text.length > 32000) throw new Error('消息不能为空或超过长度限制')
@@ -308,14 +365,23 @@ const server = createServer(async (req, res) => {
           approvals: true,
           create: true,
           send: true,
+          rename: true,
           history: false,
           createRequiresPrompt: false,
         },
       }
     } else if (url.pathname === '/api/threads') {
-      const list = await rpc('thread/list', { limit: 100, sortKey: 'updated_at' }) as { data: Array<{ id: string }> }
-      const listed = new Set(list.data.map(thread => thread.id))
-      result = { ...list, data: [...[...newThreads.values()].filter(thread => !listed.has(String(thread.id))), ...list.data] }
+      const data = await listThreads()
+      const listed = new Set(data.map(thread => String(thread.id)))
+      result = { data: [...[...newThreads.values()].filter(thread => !listed.has(String(thread.id))).map(applyThreadName), ...data] }
+    } else if (/^\/api\/threads\/[a-zA-Z0-9-]+\/incremental$/.test(url.pathname)) {
+      const threadId = url.pathname.split('/')[3]!
+      if (sharedMode && !newThreads.has(threadId)) await subscribeToThread(threadId)
+      const page = await listThreadTurns(threadId)
+      const base = newThreads.get(threadId) || { id: threadId, name: threadNames[threadId] || null }
+      const live = liveTurns.get(threadId)
+      result = { thread: { ...applyThreadName(base), turns: page.turns }, page: page.page, activeTurnId: activeTurns.get(threadId) || null, lastTurn: live ? { id: live.id, status: live.status, error: live.error } : null, approvals: [...approvals.entries()].filter(([, request]) => request.params.threadId === threadId).map(([id, request]) => ({ id, method: request.method, params: request.params })) }
+      registerImages(result)
     } else if (/^\/api\/threads\/[a-zA-Z0-9-]+\/status$/.test(url.pathname)) {
       const threadId = url.pathname.split('/')[3]!
       const live = liveTurns.get(threadId)
@@ -331,11 +397,21 @@ const server = createServer(async (req, res) => {
     } else if (/^\/api\/threads\/[a-zA-Z0-9-]+$/.test(url.pathname)) {
       const threadId = url.pathname.split('/').pop()
       if (sharedMode && !newThreads.has(threadId!)) await subscribeToThread(threadId!)
-      try { result = await rpc('thread/read', { threadId, includeTurns: true }) }
+      try {
+        const metadata = await rpc('thread/read', { threadId, includeTurns: false }) as { thread?: Record<string, unknown> }
+        const page = await listThreadTurns(threadId!)
+        result = { thread: { ...(metadata.thread || { id: threadId }), turns: page.turns }, page: page.page }
+      }
       catch (error) {
-        const thread = newThreads.get(threadId!)
-        if (!thread) throw error
-        result = { thread: { ...thread, turns: [] } }
+        try { result = await rpc('thread/read', { threadId, includeTurns: true }) }
+        catch {
+          const thread = newThreads.get(threadId!)
+          if (!thread) throw error
+          result = { thread: { ...thread, turns: [] }, page: { hasMore: false, nextCursor: null } }
+        }
+      }
+      if ((result as { thread?: Record<string, unknown> }).thread) {
+        (result as { thread: Record<string, unknown> }).thread = applyThreadName((result as { thread: Record<string, unknown> }).thread)
       }
       const currentRead = result as { thread?: { turns?: Array<{ id: string; status: string }> } }
       const runningTurn = currentRead.thread?.turns?.findLast(turn => turn.status === 'inProgress')

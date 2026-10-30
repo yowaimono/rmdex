@@ -86,6 +86,16 @@ test('shared client observes a turn started by another client', { timeout: 40000
     }
     const active = await waitFor(read)
     assert.equal(active.activeTurnId, turn.id)
+    const renamed = await fetch(`http://127.0.0.1:${agentPort}/api/threads/${thread.id}/name`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'http://localhost:5173' }, body: JSON.stringify({ name: 'Shared integration thread' }),
+    })
+    assert.equal(renamed.status, 200, JSON.stringify(await renamed.json()))
+    const status = await fetch(`http://127.0.0.1:${agentPort}/api/threads/${thread.id}/status`)
+    assert.equal(status.status, 200)
+    assert.equal((await status.json()).activeTurnId, turn.id)
+    const incremental = await fetch(`http://127.0.0.1:${agentPort}/api/threads/${thread.id}/incremental`)
+    assert.equal(incremental.status, 200)
+    assert.ok(Array.isArray((await incremental.json()).thread.turns))
     response.end(`event: response.completed\ndata: ${JSON.stringify({ type: 'response.completed', response: { id: 'test-response', object: 'response', created_at: 1, status: 'completed', output: [], usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } })}\n\n`)
     const finished = await waitFor(async () => { const result = await read(); return result.activeTurnId === null && result.lastTurn?.status === 'completed' ? result : null })
     assert.equal(finished.lastTurn.status, 'completed')
