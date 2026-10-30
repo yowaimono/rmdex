@@ -283,8 +283,8 @@ const server = createServer(async (req, res) => {
       const deleteMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/delete$/)
       const forkMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/fork$/)
       const queueMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/(queue|steer)$/)
-      const queueDeleteMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/queue\/([a-zA-Z0-9-]+)$/)
-      const queueSteerMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/queue\/([a-zA-Z0-9-]+)\/steer$/)
+      const queueDeleteMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/queue\/([^/]+)$/)
+      const queueSteerMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/queue\/([^/]+)\/steer$/)
       const approvalMatch = url.pathname.match(/^\/api\/approvals\/([a-zA-Z0-9-]+)$/)
       if (url.pathname === '/api/settings') {
         if (!['ask', 'auto', 'full'].includes(data.permissionMode)) throw new Error('请选择有效的权限模式')
@@ -357,12 +357,12 @@ const server = createServer(async (req, res) => {
         }
       } else if (queueDeleteMatch && req.method === 'DELETE') {
         const threadId = queueDeleteMatch[1]!
-        const queuedSubmissionId = queueDeleteMatch[2]!
+        const queuedSubmissionId = decodeURIComponent(queueDeleteMatch[2]!)
         if (sharedMode && !newThreads.has(threadId)) await subscribeToThread(threadId)
         result = await rpc('thread/queue/delete', { threadId, queuedSubmissionId })
       } else if (queueSteerMatch) {
         const threadId = queueSteerMatch[1]!
-        const queuedSubmissionId = queueSteerMatch[2]!
+        const queuedSubmissionId = decodeURIComponent(queueSteerMatch[2]!)
         if (sharedMode && !newThreads.has(threadId)) await subscribeToThread(threadId)
         const queued = await rpc('thread/queue/list', { threadId, limit: 100 }) as { data?: Array<{ id?: string; input?: unknown; clientUserMessageId?: string }> }
         const submission = queued.data?.find(item => item.id === queuedSubmissionId)
