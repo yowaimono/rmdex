@@ -17,7 +17,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .thread-panel.collapsed { display: none; }
 .thread-panel-scroll { min-height: 0; flex: 1; overflow-x: hidden; overflow-y: auto; }
 .brand-row { height: 72px; flex: none; padding: 0 18px 0 15px; display: flex; align-items: center; justify-content: space-between; }
-.settings-trigger { margin-left: auto; }
+.collapse-button { margin-left: auto; }
 .brand { display: flex; align-items: center; gap: 5px; font-size: 19px; font-weight: 700; color: #172538; }
 .brand img { width: 39px; height: 39px; object-fit: contain; mix-blend-mode: multiply; }
 .new-thread { display: flex; align-items: center; gap: 9px; flex: none; margin: 0 16px 12px; padding: 9px 10px; border: 0; border-radius: 6px; background: transparent; color: #3a5066; text-align: left; font-size: 13px; font-weight: 600; }
@@ -198,13 +198,6 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .compose-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #9ca9b7; font-size: 11px; }
 .send-button { width: 32px; height: 32px; border: 0; border-radius: 50%; display: grid; place-items: center; color: white; background: #0879f9; }
 .send-button:disabled { opacity: 1; background: #d3dce5; cursor: default; }
-.follow-up-button { display: inline-flex; align-items: center; gap: 4px; height: 30px; padding: 0 8px; border: 1px solid #d9e7f5; border-radius: 6px; color: #4775a8; background: #f7fbff; font-size: 11px; }
-.follow-up-button:hover { border-color: #a8c9eb; color: #0879f9; background: #eef6ff; }
-.follow-up-button.is-default { border-color: #79b4f3; box-shadow: inset 0 0 0 1px #79b4f3; }
-.follow-up-button.steer-button { border-color: #e6ddf2; color: #765b99; background: #fbf8ff; }
-.follow-up-button.steer-button:hover { border-color: #cdb8e6; color: #694192; background: #f5effc; }
-.follow-up-button.steer-button.is-default { border-color: #b99bdd; box-shadow: inset 0 0 0 1px #b99bdd; }
-.follow-up-button:disabled { opacity: .5; cursor: wait; }
 .stop-button { background: #191a1c; }
 .stop-button:hover { background: #303236; }
 .stop-button:disabled { opacity: .72; cursor: wait; }
@@ -253,20 +246,6 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .risk-copy p + p { margin-top: 9px; color: #8b786b; font-size: 12px; }
 .danger-confirm-button { padding: 8px 14px; border: 1px solid #c56226; border-radius: 5px; background: #c56226; color: #fff; font-size: 13px; }
 .danger-confirm-button:hover { border-color: #ae501c; background: #ae501c; }
-.settings-dialog { width: min(100%, 500px); }
-.settings-dialog header p { margin: 5px 0 0; color: #93a1af; font-size: 12px; }
-.settings-section { padding: 14px 0 4px; border-top: 1px solid #edf1f5; }
-.settings-label { display: flex; flex-direction: column; gap: 4px; color: #344252; font-size: 13px; }
-.settings-label span { color: #8d9aa7; font-size: 12px; }
-.follow-up-mode-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
-.follow-up-mode { display: flex; align-items: flex-start; gap: 9px; min-width: 0; padding: 12px; border: 1px solid #e1e8ef; border-radius: 6px; color: #4775a8; background: #fbfdff; text-align: left; }
-.follow-up-mode:hover, .follow-up-mode.selected { border-color: #8dbef9; background: #eef6ff; }
-.follow-up-mode.steer-choice { color: #765b99; background: #fdfbff; }
-.follow-up-mode.steer-choice:hover, .follow-up-mode.steer-choice.selected { border-color: #c4a9e0; background: #f7f0fc; }
-.follow-up-mode > span { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
-.follow-up-mode strong { color: #344252; font-size: 12px; }
-.follow-up-mode small { color: #8b99a7; font-size: 11px; line-height: 1.45; }
-.settings-note { margin-top: 14px; padding: 10px 11px; border: 1px solid #edf1f5; border-radius: 5px; color: #7e8d9c; background: #f8fafc; font-size: 11px; line-height: 1.55; }
 .delete-copy { margin: 0; padding: 13px; border: 1px solid #f1d9d5; border-radius: 6px; color: #86504a; background: #fff8f7; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
 
 .create-dialog h2 { margin: 0; font-size: 17px; }
@@ -356,7 +335,6 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .effort-option { display: inline-flex; align-items: center; gap: 4px; padding: 5px 7px; border: 1px solid #e2e9f0; border-radius: 5px; background: #fff; color: #71808e; font-size: 11px; text-transform: capitalize; }
 .effort-option:hover, .effort-option.is-selected { border-color: #b5d2f5; background: #eef5ff; color: #0879f9; }
 @media (max-width: 520px) {
-  .follow-up-mode-list { grid-template-columns: 1fr; }
   .model-trigger { max-width: 180px; }
   .model-popup { position: fixed; z-index: 20; left: 12px; right: 12px; bottom: calc(env(safe-area-inset-bottom, 0px) + 76px); width: auto; max-width: none; max-height: min(62dvh, 520px); }
   .model-options { max-height: min(42dvh, 300px); }
@@ -364,16 +342,20 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
   .effort-option { max-width: 100%; }
 }
 @media (max-width: 700px) {
-  .compose-actions { align-items: flex-end; flex-wrap: wrap; }
-  .compose-right { width: 100%; margin-left: 0; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
-  .compose-right .model-menu { min-width: 0; flex: 1 1 128px; }
+  .compose-actions { align-items: center; flex-wrap: nowrap; gap: 4px; }
+  .compose-right { width: auto; flex: 1 1 auto; margin-left: auto; flex-wrap: nowrap; justify-content: flex-end; gap: 4px; }
+  .compose-right .model-menu { min-width: 0; flex: 1 1 110px; max-width: 180px; }
   .compose-right .model-trigger { width: 100%; max-width: none; }
-  .follow-up-button { flex: 0 0 auto; padding: 0 6px; }
-  .follow-up-button span { display: inline; }
   .compose-right .send-button { flex: 0 0 32px; }
   .queued-followup { padding-left: 9px; }
   .queued-followup-text { font-size: 12px; }
   .queue-steer-button { padding-left: 3px; padding-right: 3px; }
+}
+@media (max-width: 420px) {
+  .permission-trigger { max-width: 112px; padding: 0 5px; gap: 3px; }
+  .permission-trigger span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .compose-right .model-menu { flex-basis: 88px; }
+  .compose-right .model-trigger { gap: 3px; padding: 0 4px; }
 }
 .desktop-hint { margin: 0 0 8px; color: #77869a; font-size: 12px; line-height: 1.5; }
 .history-button { display: flex; align-items: center; gap: 6px; margin: 0 auto 20px; padding: 6px 12px; border: 1px solid #dce8f5; border-radius: 16px; background: #f5f9ff; color: #4775a8; font: inherit; font-size: 12px; cursor: pointer; }
