@@ -288,13 +288,13 @@ export class PcManager {
   async enroll(username: string, password: string, deviceName: string) {
     const cleanUsername = username.trim()
     const cleanName = deviceName.trim().slice(0, 80)
-    if (!cleanUsername || password.length < 1 || !cleanName) throw new Error('请输入工作空间管理员账号、密码和电脑名称')
+    if (!cleanUsername || password.length < 1 || !cleanName) throw new Error('请输入用户账号、密码和电脑名称')
     const httpUrl = this.relayUrl.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:').replace(/\/agent$/, '')
     const loginResponse = await fetch(`${httpUrl}/api/auth/login`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: cleanUsername, password }), signal: AbortSignal.timeout(10_000),
     })
     const login = await loginResponse.json() as { accessToken?: string; error?: string }
-    if (!loginResponse.ok || !login.accessToken) throw new Error(login.error || '工作空间登录失败')
+    if (!loginResponse.ok || !login.accessToken) throw new Error(login.error || '用户登录失败')
     const registerResponse = await fetch(`${httpUrl}/api/devices`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${login.accessToken}` }, body: JSON.stringify({ name: cleanName }), signal: AbortSignal.timeout(10_000),
     })

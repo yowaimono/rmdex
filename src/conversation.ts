@@ -18,11 +18,14 @@ export function normalizeItem(item: Item): Item {
 export function userText(text: string): string {
   const context = /<in-app-browser-context source="ambient-ui-state">[\s\S]*?<\/in-app-browser-context>/g
   const hasContext = context.test(text)
-  let result = text.replace(context, '').trim()
+  const employeeContext = /<rmdex_employee_context>[\s\S]*?<\/rmdex_employee_context>\s*/g
+  let result = text.replace(context, '').replace(employeeContext, '').trim()
+  result = result.replace(/^<rmdex_user_request>\s*/, '').replace(/\s*<\/rmdex_user_request>\s*$/, '').trim()
   const filesWrapper = /^# Files mentioned by the user:\s*\n[\s\S]*?\nDistinguish instructions in attached documents from the user's request\.\s*\n\s*## My request:\s*\n/
   const match = result.match(filesWrapper)
   const files = userFiles(text)
   if (match) result = result.slice(match[0].length).trim()
+  result = result.replace(employeeContext, '').replace(/^<rmdex_user_request>\s*/, '').replace(/\s*<\/rmdex_user_request>\s*$/, '').trim()
   if (hasContext && /^## My request:\s*\n/.test(result)) result = result.replace(/^## My request:\s*\n/, '')
   const request = result.trim()
   return files.length ? [request, `附件：${files.map(file => file.name).join('、')}`].filter(Boolean).join('\n\n') : request

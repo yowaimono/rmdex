@@ -5,17 +5,17 @@ import { dirname, extname, join, normalize } from 'node:path'
 import { promisify } from 'node:util'
 import { WebSocket, WebSocketServer } from 'ws'
 
-type Tenant = { id: string; name: string; createdAt: number; disabled?: boolean }
-type Device = { id: string; tenantId?: string; name: string; tokenHash: string; createdAt: number; revoked?: boolean }
+type Device = { id: string; userId: string; name: string; tokenHash: string; createdAt: number; revoked?: boolean }
 type Client = { tokenHash: string; deviceId: string; name: string; createdAt: number; lastSeenAt?: number; revoked?: boolean }
-type User = { id: string; tenantId?: string; username: string; passwordHash: string; role: 'admin' | 'tenant-admin'; createdAt: number; disabled?: boolean }
+type User = { id: string; username: string; passwordHash: string; role: 'admin' | 'user'; createdAt: number; disabled?: boolean }
 type AuthSession = { id: string; familyId: string; userId: string; deviceId?: string; name?: string; accessHash: string; accessExpiresAt: number; refreshHash: string; refreshExpiresAt: number; usedRefreshHashes?: string[]; createdAt: number; lastSeenAt?: number; revoked?: boolean }
 type PushToken = { tokenHash: string; deviceId: string; installationId: string; platform: 'android'; clientName?: string; createdAt: number; lastSeenAt: number }
 type NotificationEvent = { id: string; deviceId: string; threadId: string; turnId: string; status: string; title: string; body: string; createdAt: number }
-type Pairing = { codeHash: string; deviceId: string; tenantId?: string; expiresAt: number }
-type PairRequest = { id: string; deviceId: string; tenantId?: string; name: string; createdAt: number; expiresAt: number; status: 'pending' | 'approved' | 'denied'; token?: string }
-type State = { tenants: Tenant[]; devices: Device[]; clients: Client[]; pairings: Pairing[]; pairRequests: PairRequest[]; users: User[]; sessions: AuthSession[]; pushTokens: PushToken[]; notifications: NotificationEvent[] }
-type Credentials = { accessToken: string; refreshToken: string; expiresIn: number; user: { id: string; username: string; role?: User['role']; tenantId?: string | null }; token?: string; clientToken?: string; deviceId?: string }
+type Employee = { id: string; userId: string; name: string; role: string; instructions: string; memory: string; deviceId: string; projectPath: string; threadId?: string; initializedThreadId?: string; createdAt: number; updatedAt: number; archived?: boolean }
+type Pairing = { codeHash: string; deviceId: string; userId: string; expiresAt: number }
+type PairRequest = { id: string; deviceId: string; userId: string; name: string; createdAt: number; expiresAt: number; status: 'pending' | 'approved' | 'denied'; token?: string }
+type State = { devices: Device[]; clients: Client[]; pairings: Pairing[]; pairRequests: PairRequest[]; users: User[]; sessions: AuthSession[]; pushTokens: PushToken[]; notifications: NotificationEvent[]; employees: Employee[] }
+type Credentials = { accessToken: string; refreshToken: string; expiresIn: number; user: { id: string; username: string; role?: User['role'] }; token?: string; clientToken?: string; deviceId?: string }
 type Pending = { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
 
 const port = Number(process.env.PORT || 8787)
@@ -25,7 +25,7 @@ const adminUsername = (process.env.RMDEX_ADMIN_USERNAME || 'admin').trim().slice
 const adminPassword = process.env.RMDEX_ADMIN_PASSWORD || ''
 const statePath = process.env.RMDEX_STATE || '/data/state.json'
 const webRoot = process.env.RMDEX_WEB_ROOT || '/app/web'
-const state: State = { tenants: [], devices: [], clients: [], pairings: [], pairRequests: [], users: [], sessions: [], pushTokens: [], notifications: [] }
+const state: State = { devices: [], clients: [], pairings: [], pairRequests: [], users: [], sessions: [], pushTokens: [], notifications: [], employees: [] }
 const approvedPairTokens = new Map<string, Credentials>()
 const deviceSockets = new Map<string, WebSocket>()
 const devicePending = new Map<string, Map<string, Pending>>()
@@ -72,7 +72,7 @@ function accessSession(token: string | undefined) {
 function sessionCredentials(session: AuthSession, accessToken: string, refreshToken: string): Credentials {
   const user = userForId(session.userId)
   if (!user) throw new Error('用户不存在')
-  return { accessToken, refreshToken, expiresIn: Math.max(1, Math.floor((session.accessExpiresAt - Date.now()) / 1000)), user: { id: user.id, username: user.username, role: user.role, tenantId: user.tenantId || null }, token: accessToken, ...(session.deviceId ? { clientToken: accessToken, deviceId: session.deviceId } : {}) }
+  return { accessToken, refreshToken, expiresIn: Math.max(1, Math.floor((session.accessExpiresAt - Date.now()) / 1000)), user: { id: user.id, username: user.username, role: user.role }, token: accessToken, ...(session.deviceId ? { clientToken: accessToken, deviceId: session.deviceId } : {}) }
 }
 async function createSession(userId: string, deviceId?: string, name?: string): Promise<Credentials> {
   const accessToken = randomToken()
@@ -123,11 +123,16 @@ async function persist() {
 }
 async function load() {
   try {
-    const saved = JSON.parse(await readFile(statePath, 'utf8')) as State
-    state.tenants = Array.isArray(saved.tenants) ? saved.tenants : []
-    state.devices = Array.isArray(saved.devices) ? saved.devices : []
+    const saved = JSON.parse(await readFile(statePath, 'utf8')) as Record<string, any>
+    const savedUsers = Array.isArray(saved.users) ? saved.users : []
+    state.users = savedUsers.filter(item => item && typeof item.id === 'string' && typeof item.username === 'string' && typeof item.passwordHash === 'string' && (item.role === 'admin' || item.role === 'user')).map(item => ({
+      id: item.id, username: item.username, passwordHash: item.passwordHash, role: item.role, createdAt: Number(item.createdAt) || Date.now(), ...(item.disabled ? { disabled: true } : {}),
+    }))
+    const savedDevices = Array.isArray(saved.devices) ? saved.devices : []
+    state.devices = savedDevices.filter(item => item && typeof item.id === 'string' && typeof item.userId === 'string' && typeof item.name === 'string' && typeof item.tokenHash === 'string' && state.users.some(user => user.id === item.userId)).map(item => ({
+      id: item.id, userId: item.userId, name: item.name, tokenHash: item.tokenHash, createdAt: Number(item.createdAt) || Date.now(), ...(item.revoked ? { revoked: true } : {}),
+    }))
     state.clients = Array.isArray(saved.clients) ? saved.clients : []
-    state.users = Array.isArray(saved.users) ? saved.users : []
     state.sessions = Array.isArray(saved.sessions) ? saved.sessions : []
     state.pushTokens = Array.isArray(saved.pushTokens) ? saved.pushTokens.flatMap(item => {
       if (typeof item.tokenHash === 'string') return [item]
@@ -135,30 +140,22 @@ async function load() {
       return []
     }) : []
     state.notifications = Array.isArray(saved.notifications) ? saved.notifications.filter(item => item && typeof item.deviceId === 'string' && typeof item.threadId === 'string') : []
-    state.pairings = Array.isArray(saved.pairings) ? saved.pairings.filter(pair => pair.expiresAt > Date.now()) : []
-    state.pairRequests = Array.isArray(saved.pairRequests) ? saved.pairRequests.filter(pair => pair.expiresAt > Date.now() && pair.status === 'pending') : []
+    state.employees = Array.isArray(saved.employees) ? saved.employees.filter(item => item && typeof item.id === 'string' && typeof item.userId === 'string' && typeof item.name === 'string' && typeof item.deviceId === 'string' && typeof item.projectPath === 'string' && state.users.some(user => user.id === item.userId)).map(item => ({
+      id: item.id, userId: item.userId, name: item.name, role: typeof item.role === 'string' ? item.role : '', instructions: typeof item.instructions === 'string' ? item.instructions : '', memory: typeof item.memory === 'string' ? item.memory : '', deviceId: item.deviceId, projectPath: item.projectPath, ...(typeof item.threadId === 'string' ? { threadId: item.threadId } : {}), ...(typeof item.initializedThreadId === 'string' ? { initializedThreadId: item.initializedThreadId } : {}), createdAt: Number(item.createdAt) || Date.now(), updatedAt: Number(item.updatedAt) || Date.now(), ...(item.archived ? { archived: true } : {}),
+    })) : []
+    state.pairings = Array.isArray(saved.pairings) ? saved.pairings.filter(pair => pair && pair.expiresAt > Date.now() && typeof pair.codeHash === 'string' && typeof pair.deviceId === 'string' && typeof pair.userId === 'string' && state.users.some(user => user.id === pair.userId)).map(pair => ({ codeHash: pair.codeHash, deviceId: pair.deviceId, userId: pair.userId, expiresAt: pair.expiresAt })) : []
+    state.pairRequests = Array.isArray(saved.pairRequests) ? saved.pairRequests.filter(pair => pair && pair.expiresAt > Date.now() && pair.status === 'pending' && typeof pair.id === 'string' && typeof pair.deviceId === 'string' && typeof pair.userId === 'string' && typeof pair.name === 'string' && state.users.some(user => user.id === pair.userId)).map(pair => ({ id: pair.id, deviceId: pair.deviceId, userId: pair.userId, name: pair.name, createdAt: pair.createdAt, expiresAt: pair.expiresAt, status: pair.status })) : []
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
   }
 }
 async function ensureAdminUser() {
-  if (state.users.length) return
+  if (state.users.some(user => user.role === 'admin')) return
   let passwordHash = ''
   if (adminPassword) passwordHash = await passwordDigest(adminPassword)
   else if (/^[a-f0-9]{64}$/i.test(adminHash)) passwordHash = `sha256:${adminHash}`
   if (!passwordHash) throw new Error('需要配置 RMDEX_ADMIN_PASSWORD，或兼容旧版的 RMDEX_ADMIN_HASH')
   state.users.push({ id: randomToken(12), username: adminUsername, passwordHash, role: 'admin', createdAt: Date.now() })
-  await persist()
-}
-async function migrateTenants() {
-  let defaultTenant = state.tenants.find(tenant => tenant.id === 'legacy-default')
-  if (!defaultTenant) {
-    defaultTenant = { id: 'legacy-default', name: '默认工作空间', createdAt: Date.now() }
-    state.tenants.push(defaultTenant)
-  }
-  for (const device of state.devices) if (!device.tenantId) device.tenantId = defaultTenant.id
-  for (const pairing of state.pairings) if (!pairing.tenantId) pairing.tenantId = state.devices.find(device => device.id === pairing.deviceId)?.tenantId || defaultTenant.id
-  for (const request of state.pairRequests) if (!request.tenantId) request.tenantId = state.devices.find(device => device.id === request.deviceId)?.tenantId || defaultTenant.id
   await persist()
 }
 function json(res: import('node:http').ServerResponse, status: number, data: unknown) {
@@ -178,7 +175,7 @@ async function body(req: import('node:http').IncomingMessage) {
 function clientFor(req: import('node:http').IncomingMessage) {
   const token = bearer(req)
   const session = accessSession(token)
-  if (session?.deviceId && userForId(session.userId)) return { tokenHash: session.accessHash, deviceId: session.deviceId, name: session.name || '已登录设备', createdAt: session.createdAt, lastSeenAt: session.lastSeenAt } satisfies Client
+  if (session?.deviceId && userForId(session.userId) && state.devices.some(device => !device.revoked && device.id === session.deviceId && device.userId === session.userId)) return { tokenHash: session.accessHash, deviceId: session.deviceId, name: session.name || '已登录设备', createdAt: session.createdAt, lastSeenAt: session.lastSeenAt } satisfies Client
   const client = token ? state.clients.find(item => !item.revoked && equalHash(token, item.tokenHash)) : undefined
   if (client) client.lastSeenAt = Date.now()
   return client
@@ -192,10 +189,32 @@ function pushFor(req: import('node:http').IncomingMessage) {
 function adminFor(req: import('node:http').IncomingMessage) {
   const session = accessSession(bearer(req))
   const user = session ? userForId(session.userId) : undefined
-  return user && ['admin', 'tenant-admin'].includes(user.role) && !session?.deviceId ? user : undefined
+  return user && !session?.deviceId ? user : undefined
 }
-function canManageTenant(user: User, tenantId: string | undefined) {
-  return user.role === 'admin' || Boolean(tenantId && user.tenantId === tenantId)
+function canManageUser(user: User, userId: string | undefined) {
+  return user.role === 'admin' || Boolean(userId && user.id === userId)
+}
+function employeeFor(id: string, userId: string) {
+  return state.employees.find(item => !item.archived && item.id === id && item.userId === userId)
+}
+function deviceForUser(deviceId: string, userId: string) {
+  return state.devices.find(item => !item.revoked && item.id === deviceId && item.userId === userId)
+}
+function employeeView(employee: Employee) {
+  return { ...employee }
+}
+function employeeContext(employee: Employee) {
+  return [
+    '<rmdex_employee_context>',
+    `Employee name: ${employee.name}`,
+    `Role: ${employee.role || 'AI work employee'}`,
+    'Instructions:',
+    employee.instructions || '(Follow the user request carefully and report concrete results.)',
+    'Long-term memory:',
+    employee.memory || '(No durable memory has been recorded yet.)',
+    '</rmdex_employee_context>',
+    '<rmdex_user_request>',
+  ].join('\n')
 }
 function rpc(deviceId: string, path: string, method: string, data?: unknown): Promise<unknown> {
   const socket = deviceSockets.get(deviceId)
@@ -275,7 +294,7 @@ const server = createServer(async (req, res) => {
       const data = await body(req)
       const username = typeof data.username === 'string' ? data.username.trim() : adminUsername
       const password = typeof data.password === 'string' ? data.password : ''
-      const user = state.users.find(item => item.username.toLowerCase() === username.toLowerCase() && !item.disabled && (!item.tenantId || state.tenants.some(tenant => tenant.id === item.tenantId && !tenant.disabled)))
+      const user = state.users.find(item => item.username.toLowerCase() === username.toLowerCase() && !item.disabled)
       const valid = Boolean(user && password.length <= 256 && await verifyPassword(password, user.passwordHash))
       if (!valid) {
         const next = attempts?.until && attempts.until > Date.now() ? attempts : { count: 0, until: Date.now() + 15 * 60_000 }
@@ -307,7 +326,7 @@ const server = createServer(async (req, res) => {
       const session = accessSession(bearer(req))
       const user = session ? userForId(session.userId) : undefined
       if (!session || !user) { json(res, 401, { error: '登录已失效' }); return }
-      json(res, 200, { user: { id: user.id, username: user.username, role: user.role, tenantId: user.tenantId || null }, expiresAt: session.accessExpiresAt, deviceId: session.deviceId || null }); return
+      json(res, 200, { user: { id: user.id, username: user.username, role: user.role }, expiresAt: session.accessExpiresAt, deviceId: session.deviceId || null }); return
     }
     if (req.method === 'POST' && url.pathname === '/api/pair/claim') {
       const data = await body(req)
@@ -317,7 +336,7 @@ const server = createServer(async (req, res) => {
       if (index < 0) { json(res, 400, { error: '配对码无效或已过期' }); return }
       const [pairing] = state.pairings.splice(index, 1)
       const id = randomToken()
-      const request: PairRequest = { id, deviceId: pairing!.deviceId, tenantId: pairing!.tenantId, name: typeof data.name === 'string' ? data.name.slice(0, 80) : '手机', createdAt: Date.now(), expiresAt: Date.now() + 5 * 60_000, status: 'pending' }
+      const request: PairRequest = { id, deviceId: pairing!.deviceId, userId: pairing!.userId, name: typeof data.name === 'string' ? data.name.slice(0, 80) : '手机', createdAt: Date.now(), expiresAt: Date.now() + 5 * 60_000, status: 'pending' }
       state.pairRequests.push(request)
       await persist()
       json(res, 202, { requestId: id, status: 'pending' }); return
@@ -340,57 +359,57 @@ const server = createServer(async (req, res) => {
       const admin = adminFor(req)
       if (!admin) { json(res, 401, { error: '需要管理员登录' }); return }
       const data = await body(req)
-      const tenantId = admin.role === 'admin' ? (typeof data.tenantId === 'string' ? data.tenantId : '') : admin.tenantId || ''
-      const tenant = state.tenants.find(item => item.id === tenantId && !item.disabled)
-      if (!tenant || !canManageTenant(admin, tenantId)) { json(res, 400, { error: '工作空间不存在或无权管理' }); return }
+      const requestedUserId = typeof data.userId === 'string' ? data.userId : undefined
+      if (requestedUserId && admin.role !== 'admin' && requestedUserId !== admin.id) { json(res, 403, { error: '无权为其他用户创建设备' }); return }
+      const userId = requestedUserId || admin.id
+      if (!userForId(userId) || !canManageUser(admin, userId)) { json(res, 400, { error: '用户不存在或无权管理' }); return }
       const token = randomToken()
-      const device = { id: randomToken(12), tenantId, name: typeof data.name === 'string' ? data.name.slice(0, 80) : 'Codex 设备', tokenHash: hash(token), createdAt: Date.now() }
+      const device: Device = { id: randomToken(12), userId, name: typeof data.name === 'string' ? data.name.slice(0, 80) : 'Codex 设备', tokenHash: hash(token), createdAt: Date.now() }
       state.devices.push(device)
-      const credentials = await createSession(admin.id, device.id, '管理网页')
+      const credentials = await createSession(device.userId, device.id, '管理网页')
       await persist()
-      json(res, 201, { id: device.id, tenantId, ...credentials, token, clientToken: credentials.accessToken, name: device.name }); return
+      json(res, 201, { id: device.id, userId, ...credentials, token, clientToken: credentials.accessToken, name: device.name }); return
     }
-    if (url.pathname === '/api/tenants' && req.method === 'GET') {
+    if (url.pathname === '/api/users' && req.method === 'GET') {
       const admin = adminFor(req)
       if (!admin) { json(res, 401, { error: '需要管理员登录' }); return }
-      const tenants = admin.role === 'admin' ? state.tenants.filter(item => !item.disabled) : state.tenants.filter(item => item.id === admin.tenantId && !item.disabled)
-      json(res, 200, { data: tenants.map(tenant => ({ ...tenant, deviceCount: state.devices.filter(device => device.tenantId === tenant.id && !device.revoked).length })) }); return
+      const users = admin.role === 'admin' ? state.users.filter(user => !user.disabled) : [admin]
+      json(res, 200, { data: users.map(user => ({ id: user.id, username: user.username, role: user.role, deviceCount: state.devices.filter(device => device.userId === user.id && !device.revoked).length })) }); return
     }
-    if (url.pathname === '/api/tenants' && req.method === 'POST') {
+    if (url.pathname === '/api/users' && req.method === 'POST') {
       const admin = adminFor(req)
-      if (!admin || admin.role !== 'admin') { json(res, 403, { error: '仅平台管理员可以创建工作空间' }); return }
+      if (!admin || admin.role !== 'admin') { json(res, 403, { error: '仅平台管理员可以创建用户' }); return }
       const data = await body(req)
-      const name = typeof data.name === 'string' ? data.name.trim().slice(0, 80) : ''
       const username = typeof data.username === 'string' ? data.username.trim().slice(0, 80) : ''
       const password = typeof data.password === 'string' ? data.password : ''
-      if (!name || !/^[A-Za-z0-9_.@-]{3,80}$/.test(username) || password.length < 12 || password.length > 256) { json(res, 400, { error: '名称不能为空；账号需 3-80 位；初始密码需 12-256 位' }); return }
+      if (!/^[A-Za-z0-9_.@-]{3,80}$/.test(username) || password.length < 12 || password.length > 256) { json(res, 400, { error: '账号需 3-80 位；初始密码需 12-256 位' }); return }
       if (state.users.some(user => user.username.toLowerCase() === username.toLowerCase())) { json(res, 409, { error: '账号已存在' }); return }
-      const tenant: Tenant = { id: randomToken(12), name, createdAt: Date.now() }
-      const user: User = { id: randomToken(12), tenantId: tenant.id, username, passwordHash: await passwordDigest(password), role: 'tenant-admin', createdAt: Date.now() }
-      state.tenants.push(tenant); state.users.push(user); await persist()
-      json(res, 201, { tenant: { ...tenant, deviceCount: 0 }, user: { id: user.id, username: user.username, role: user.role } }); return
+      const user: User = { id: randomToken(12), username, passwordHash: await passwordDigest(password), role: 'user', createdAt: Date.now() }
+      state.users.push(user); await persist()
+      json(res, 201, { user: { id: user.id, username: user.username, role: user.role, deviceCount: 0 } }); return
     }
     if (req.method === 'GET' && url.pathname === '/api/devices') {
       const admin = adminFor(req)
       if (!admin) { json(res, 401, { error: '需要管理员登录' }); return }
-      const tenantId = admin.role === 'admin' ? url.searchParams.get('tenantId') : admin.tenantId
-      if (!tenantId || !canManageTenant(admin, tenantId)) { json(res, 403, { error: '请选择有权管理的工作空间' }); return }
-      json(res, 200, { data: state.devices.filter(device => !device.revoked && device.tenantId === tenantId).map(({ id, tenantId, name, createdAt }) => ({ id, tenantId, name, createdAt, online: deviceSockets.get(id)?.readyState === WebSocket.OPEN })) }); return
+      const requestedUserId = url.searchParams.get('userId')
+      const userId = admin.role === 'admin' ? (requestedUserId || admin.id) : (requestedUserId && requestedUserId !== admin.id ? '' : admin.id)
+      if (!userForId(userId) || !canManageUser(admin, userId)) { json(res, 403, { error: '用户不存在或无权管理' }); return }
+      json(res, 200, { data: state.devices.filter(device => !device.revoked && device.userId === userId).map(({ id, userId, name, createdAt }) => ({ id, userId, name, createdAt, online: deviceSockets.get(id)?.readyState === WebSocket.OPEN })) }); return
     }
     const webClientMatch = url.pathname.match(/^\/api\/devices\/([\w-]+)\/web-client$/)
     if (req.method === 'POST' && webClientMatch) {
       const admin = adminFor(req)
       if (!admin) { json(res, 401, { error: '需要管理员登录' }); return }
       const device = state.devices.find(item => item.id === webClientMatch[1] && !item.revoked)
-      if (!device || !canManageTenant(admin, device.tenantId)) { json(res, 404, { error: '设备不存在' }); return }
-      const credentials = await createSession(admin.id, device.id, '管理网页')
+      if (!device || !canManageUser(admin, device.userId)) { json(res, 404, { error: '设备不存在' }); return }
+      const credentials = await createSession(device.userId, device.id, '管理网页')
       await persist()
       json(res, 201, { ...credentials, clientToken: credentials.accessToken, device: { id: device.id, name: device.name, online: deviceSockets.get(device.id)?.readyState === WebSocket.OPEN } }); return
     }
     if (req.method === 'GET' && url.pathname === '/api/pair-requests') {
       const admin = adminFor(req)
       if (!admin) { json(res, 401, { error: '需要管理员登录' }); return }
-      json(res, 200, { data: state.pairRequests.filter(pair => pair.status === 'pending' && pair.expiresAt > Date.now() && canManageTenant(admin, pair.tenantId)).map(({ id, deviceId, tenantId, name, createdAt }) => ({ id, deviceId, tenantId, name, createdAt })) }); return
+      json(res, 200, { data: state.pairRequests.filter(pair => pair.status === 'pending' && pair.expiresAt > Date.now() && canManageUser(admin, pair.userId)).map(({ id, deviceId, userId, name, createdAt }) => ({ id, deviceId, userId, name, createdAt })) }); return
     }
     const pairDecision = url.pathname.match(/^\/api\/pair-requests\/([A-Za-z0-9_-]+)$/)
     if (req.method === 'POST' && pairDecision) {
@@ -398,10 +417,10 @@ const server = createServer(async (req, res) => {
       if (!admin) { json(res, 401, { error: '需要管理员登录' }); return }
       const data = await body(req)
       const request = state.pairRequests.find(item => item.id === pairDecision[1] && item.status === 'pending' && item.expiresAt > Date.now())
-      if (!request || !canManageTenant(admin, request.tenantId) || !['approve', 'deny'].includes(String(data.decision))) { json(res, 404, { error: '配对请求不存在或已过期' }); return }
+      if (!request || !canManageUser(admin, request.userId) || !['approve', 'deny'].includes(String(data.decision))) { json(res, 404, { error: '配对请求不存在或已过期' }); return }
       request.status = data.decision === 'approve' ? 'approved' : 'denied'
       if (request.status === 'approved') {
-        approvedPairTokens.set(request.id, await createSession(admin.id, request.deviceId, request.name))
+        approvedPairTokens.set(request.id, await createSession(request.userId, request.deviceId, request.name))
       }
       await persist()
       json(res, 200, { ok: true }); return
@@ -411,10 +430,10 @@ const server = createServer(async (req, res) => {
       if (!adminFor(req)) { json(res, 401, { error: '需要管理员登录' }); return }
       const device = state.devices.find(item => item.id === pairMatch[1] && !item.revoked)
       const admin = adminFor(req)!
-      if (!device || !canManageTenant(admin, device.tenantId)) { json(res, 404, { error: '设备不存在' }); return }
+      if (!device || !canManageUser(admin, device.userId)) { json(res, 404, { error: '设备不存在' }); return }
       const code = randomToken(24)
       state.pairings = state.pairings.filter(pair => pair.deviceId !== device.id && pair.expiresAt > Date.now())
-      state.pairings.push({ codeHash: hash(code), deviceId: device.id, tenantId: device.tenantId, expiresAt: Date.now() + 180_000 })
+      state.pairings.push({ codeHash: hash(code), deviceId: device.id, userId: device.userId, expiresAt: Date.now() + 180_000 })
       await persist()
       json(res, 200, { code, url: `${publicOrigin}/#pair=${encodeURIComponent(code)}`, expiresAt: Date.now() + 180_000 }); return
     }
@@ -423,7 +442,7 @@ const server = createServer(async (req, res) => {
       const admin = adminFor(req)
       if (!admin) { json(res, 401, { error: '需要管理员登录' }); return }
       const device = state.devices.find(item => item.id === revokeMatch[1])
-      if (!device || !canManageTenant(admin, device.tenantId)) { json(res, 404, { error: '设备不存在' }); return }
+      if (!device || !canManageUser(admin, device.userId)) { json(res, 404, { error: '设备不存在' }); return }
       device.revoked = true
       state.clients = state.clients.filter(client => client.deviceId !== device.id)
       for (const session of state.sessions) if (session.deviceId === device.id) session.revoked = true
@@ -498,18 +517,94 @@ const server = createServer(async (req, res) => {
     if (!client) { json(res, 401, { error: '需要登录或扫码配对' }); return }
     const device = state.devices.find(item => item.id === client.deviceId && !item.revoked)
     if (!device) { json(res, 401, { error: '设备已撤销' }); return }
+    const userId = device.userId
+    if (req.method === 'GET' && url.pathname === '/api/employees') {
+      json(res, 200, { data: state.employees.filter(item => !item.archived && item.userId === userId).map(employeeView) }); return
+    }
+    if (req.method === 'POST' && url.pathname === '/api/employees') {
+      const data = await body(req)
+      const name = typeof data.name === 'string' ? data.name.trim().slice(0, 80) : ''
+      const role = typeof data.role === 'string' ? data.role.trim().slice(0, 120) : ''
+      const instructions = typeof data.instructions === 'string' ? data.instructions.trim().slice(0, 12_000) : ''
+      const memory = typeof data.memory === 'string' ? data.memory.trim().slice(0, 20_000) : ''
+      const projectPath = typeof data.projectPath === 'string' ? data.projectPath.trim().slice(0, 1000) : ''
+      const deviceId = typeof data.deviceId === 'string' ? data.deviceId : device.id
+      if (!name || !projectPath || !deviceForUser(deviceId, userId)) { json(res, 400, { error: '请填写员工名称、Project 路径，并选择本用户的设备' }); return }
+      if (state.employees.some(item => !item.archived && item.userId === userId && item.name.toLowerCase() === name.toLowerCase())) { json(res, 409, { error: '员工名称已存在' }); return }
+      const now = Date.now()
+      const employee: Employee = { id: randomToken(12), userId, name, role, instructions, memory, deviceId, projectPath, createdAt: now, updatedAt: now }
+      state.employees.push(employee)
+      await persist()
+      json(res, 201, { employee: employeeView(employee) }); return
+    }
+    const employeeMatch = url.pathname.match(/^\/api\/employees\/([A-Za-z0-9_-]+)(?:\/(update|ensure-thread|reset-thread))?$/)
+    if (employeeMatch) {
+      const employee = employeeFor(employeeMatch[1]!, userId)
+      if (!employee) { json(res, 404, { error: '员工不存在' }); return }
+      const action = employeeMatch[2]
+      if (req.method === 'POST' && action === 'update') {
+        const data = await body(req)
+        const nextName = typeof data.name === 'string' ? data.name.trim().slice(0, 80) : employee.name
+        const nextRole = typeof data.role === 'string' ? data.role.trim().slice(0, 120) : employee.role
+        const nextInstructions = typeof data.instructions === 'string' ? data.instructions.trim().slice(0, 12_000) : employee.instructions
+        const nextMemory = typeof data.memory === 'string' ? data.memory.trim().slice(0, 20_000) : employee.memory
+        const nextPath = typeof data.projectPath === 'string' ? data.projectPath.trim().slice(0, 1000) : employee.projectPath
+        const nextDeviceId = typeof data.deviceId === 'string' ? data.deviceId : employee.deviceId
+        if (!nextName || !nextPath || !deviceForUser(nextDeviceId, userId)) { json(res, 400, { error: '员工名称、Project 路径或设备无效' }); return }
+        if (state.employees.some(item => !item.archived && item.id !== employee.id && item.userId === userId && item.name.toLowerCase() === nextName.toLowerCase())) { json(res, 409, { error: '员工名称已存在' }); return }
+        const contextChanged = nextInstructions !== employee.instructions || nextMemory !== employee.memory
+        const bindingChanged = nextPath !== employee.projectPath || nextDeviceId !== employee.deviceId
+        Object.assign(employee, { name: nextName, role: nextRole, instructions: nextInstructions, memory: nextMemory, projectPath: nextPath, deviceId: nextDeviceId, updatedAt: Date.now(), ...(contextChanged || bindingChanged ? { initializedThreadId: undefined } : {}), ...(bindingChanged ? { threadId: undefined } : {}) })
+        await persist()
+        json(res, 200, { employee: employeeView(employee) }); return
+      }
+      if (req.method !== 'POST' || !['ensure-thread', 'reset-thread'].includes(action || '')) { json(res, 405, { error: 'Method not allowed' }); return }
+      const targetDevice = deviceForUser(employee.deviceId, userId)
+      if (!targetDevice) { json(res, 404, { error: '员工绑定的设备不存在' }); return }
+      if (!employee.projectPath) { json(res, 400, { error: '请先为员工绑定 Project 路径' }); return }
+      if (action === 'ensure-thread' && employee.threadId) {
+        json(res, 200, { employee: employeeView(employee), thread: { id: employee.threadId, name: employee.name, cwd: employee.projectPath } }); return
+      }
+      if (action === 'reset-thread' && employee.threadId) await rpc(targetDevice.id, `/api/threads/${employee.threadId}/archive`, 'POST', {})
+      const started = await rpc(targetDevice.id, '/api/threads', 'POST', { cwd: employee.projectPath }) as { thread?: Record<string, unknown> }
+      const threadId = typeof started.thread?.id === 'string' ? started.thread.id : ''
+      if (!threadId) throw new Error('Codex 未返回员工 Thread ID')
+      try { await rpc(targetDevice.id, `/api/threads/${threadId}/name`, 'POST', { name: employee.name }) } catch { /* Thread naming is an overlay; execution can continue. */ }
+      employee.threadId = threadId
+      employee.initializedThreadId = undefined
+      employee.updatedAt = Date.now()
+      await persist()
+      json(res, 200, { employee: employeeView(employee), thread: { ...(started.thread || {}), id: threadId, name: employee.name, cwd: employee.projectPath } }); return
+    }
     if (!['GET', 'POST', 'DELETE'].includes(req.method || '')) { json(res, 405, { error: 'Method not allowed' }); return }
     const allowed = req.method === 'GET'
       ? /^\/api\/(?:models|projects|settings|threads(?:\/[a-zA-Z0-9-]+(?:\/(?:status|incremental|queue))?)?|images\/[a-f0-9-]+)$/.test(url.pathname)
       : /^\/api\/(?:settings|threads|threads\/[a-zA-Z0-9-]+\/(?:send|stop|history|name|fork|archive|unarchive|delete|queue|steer)|threads\/[a-zA-Z0-9-]+\/queue\/[^/]+(?:\/(?:steer|delete))?|approvals\/[a-zA-Z0-9-]+)$/.test(url.pathname)
     const projectMutation = req.method === 'POST' && /^\/api\/projects(?:\/[a-zA-Z0-9-]+\/(?:update|delete))?$/.test(url.pathname)
     if ((!allowed && !(req.method === 'POST' && url.pathname === '/api/attachments') && !projectMutation) || url.search) { json(res, 404, { error: 'Not found' }); return }
-    const requestData = req.method === 'POST' ? await body(req) : undefined
+    let requestData = req.method === 'POST' ? await body(req) : undefined
+    const employeeId = typeof requestData?.employeeId === 'string' ? requestData.employeeId : ''
+    const employee = employeeId ? employeeFor(employeeId, userId) : undefined
+    const employeeNeedsContext = Boolean(employee && employee.threadId === url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/send$/)?.[1] && employee.initializedThreadId !== employee.threadId)
+    if (employeeId && !employee) { json(res, 404, { error: '员工不存在' }); return }
+    if (employee && employeeNeedsContext && typeof requestData?.text === 'string') {
+      requestData = { ...requestData, text: `${employeeContext(employee)}\n${requestData.text}\n</rmdex_user_request>` }
+    }
+    if (requestData && 'employeeId' in requestData) {
+      const forwarded = { ...requestData }
+      delete forwarded.employeeId
+      requestData = forwarded
+    }
     const result = await rpc(device.id, url.pathname + url.search, req.method!, requestData)
+    if (employee && employeeNeedsContext) {
+      employee.initializedThreadId = employee.threadId
+      employee.updatedAt = Date.now()
+      await persist()
+    }
     const sendMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/send$/)
     if (sendMatch && result && typeof result === 'object') {
       const turn = (result as { turn?: { id?: string } }).turn
-      if (turn?.id) watchTask(device.id, sendMatch[1]!, turn.id, typeof requestData?.name === 'string' ? requestData.name : 'Codex 会话')
+      if (turn?.id) watchTask(device.id, sendMatch[1]!, turn.id, employee?.name || (typeof requestData?.name === 'string' ? requestData.name : 'Codex 会话'))
     }
     if (url.pathname.startsWith('/api/images/') && result && typeof result === 'object' && (result as { __rmdexBinary?: boolean }).__rmdexBinary) {
       const image = result as { contentType: string; data: string }
@@ -571,5 +666,4 @@ sockets.on('connection', ws => {
 
 await load()
 await ensureAdminUser()
-await migrateTenants()
 server.listen(port, '0.0.0.0', () => console.log(`rmdex relay listening on ${port}`))

@@ -17,7 +17,7 @@ test('Codex Desktop app-server processes are treated as Desktop processes', () =
   assert.equal(isCodexDesktopProcess('codex.exe -c plugins.codex-app-tools@openai-bundled.mcp_servers.codex_app.enabled=true'), true)
 })
 
-test('PC enrollment registers a tenant-owned device without persisting the account password', async () => {
+test('PC enrollment registers a user-owned device without persisting the account password', async () => {
   const root = await mkdtemp(join(tmpdir(), 'rmdex-pc-enroll-'))
   const previousRelay = process.env.RMDEX_RELAY_URL
   let registrationAuth = ''
@@ -26,7 +26,7 @@ test('PC enrollment registers a tenant-owned device without persisting the accou
     for await (const chunk of req) raw += String(chunk)
     res.setHeader('Content-Type', 'application/json')
     if (req.url === '/api/auth/login') {
-      assert.deepEqual(JSON.parse(raw), { username: 'tenant-user', password: 'never-save-this-password' })
+      assert.deepEqual(JSON.parse(raw), { username: 'user-account', password: 'never-save-this-password' })
       res.end(JSON.stringify({ accessToken: 'login-access' })); return
     }
     if (req.url === '/api/devices') {
@@ -44,7 +44,7 @@ test('PC enrollment registers a tenant-owned device without persisting the accou
   try {
     const manager = new PcManager(root)
     manager.start = async () => ({ enrolled: true })
-    const result = await manager.enroll('tenant-user', 'never-save-this-password', 'Office PC')
+    const result = await manager.enroll('user-account', 'never-save-this-password', 'Office PC')
     assert.equal(result.enrolled, true)
     assert.equal(registrationAuth, 'Bearer login-access')
     assert.equal(await readFile(join(root, 'work', '.device-token'), 'utf8'), 'device-secret')
@@ -75,7 +75,7 @@ test('PC enrollment rejects incomplete credentials before contacting the relay',
   const root = await mkdtemp(join(tmpdir(), 'rmdex-pc-enroll-validation-'))
   try {
     const manager = new PcManager(root)
-    await assert.rejects(manager.enroll(' ', '', ' '), /工作空间管理员账号/)
+    await assert.rejects(manager.enroll(' ', '', ' '), /用户账号/)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

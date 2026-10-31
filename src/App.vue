@@ -5,7 +5,7 @@ import { App as NativeApp } from '@capacitor/app'
 import { LocalNotifications } from '@capacitor/local-notifications'
 import { CapacitorBarcodeScanner, CapacitorBarcodeScannerTypeHint } from '@capacitor/barcode-scanner'
 import MarkdownIt from 'markdown-it'
-import { Archive, ArrowLeft, ArrowUp, ChevronDown, ChevronRight, CircleAlert, CircleCheck, CornerDownRight, Ellipsis, ExternalLink, Folder, FolderPlus, GitFork, LoaderCircle, Menu, MessageSquare, Monitor, PanelLeftClose, Paperclip, Pencil, Pin, Plus, RefreshCw, RotateCcw, Search, Square, Wrench, X, QrCode, Copy, Smartphone, Trash2, ShieldAlert } from 'lucide-vue-next'
+import { Archive, ArrowLeft, ArrowUp, Bot, ChevronDown, ChevronRight, CircleAlert, CircleCheck, CornerDownRight, Ellipsis, ExternalLink, Folder, FolderPlus, GitFork, LoaderCircle, Menu, MessageSquare, Monitor, PanelLeftClose, Paperclip, Pencil, Pin, Plus, RefreshCw, RotateCcw, Search, Square, Wrench, X, QrCode, Copy, Smartphone, Trash2, ShieldAlert } from 'lucide-vue-next'
 import QRCode from 'qrcode'
 import logoUrl from './assets/rmdex-logo.jpg'
 import ToolEvent from './components/ToolEvent.vue'
@@ -14,15 +14,18 @@ import ModelMenu, { type ModelOption } from './components/ModelMenu.vue'
 import { timeline, type ContentPart, type Turn } from './conversation'
 import { loadThreadCache, queueThreadCacheWrite, removeThreadCache } from './thread-cache'
 
-type Thread = { id: string; name?: string | null; preview?: string; cwd?: string; updatedAt?: number; status?: { type: string }; turns?: Turn[]; desktopDraft?: { projectId: string | null; deviceKey: string; preparing?: boolean } }
+type Thread = { id: string; name?: string | null; preview?: string; cwd?: string; updatedAt?: number; status?: { type: string }; turns?: Turn[]; employeeId?: string; desktopDraft?: { projectId: string | null; deviceKey: string; preparing?: boolean } }
 type Project = { id: string; name: string; path: string; source: 'local' | 'desktop'; nativeProjectId?: string }
+type Employee = { id: string; name: string; role: string; instructions: string; memory: string; deviceId: string; projectPath: string; threadId?: string; initializedThreadId?: string; createdAt: number; updatedAt: number }
 const apiBase = Capacitor.isNativePlatform() ? 'https://code.kyeai.xyz' : ''
 const apiUrl = (path: string) => path.startsWith('http://') || path.startsWith('https://') ? path : `${apiBase}${path}`
 const RmdexBackgroundService = registerPlugin<{ start(options: { relayUrl: string; pushToken: string }): Promise<void>; stop(): Promise<void> }>('RmdexBackgroundService')
 let appUrlListener: { remove: () => Promise<void> } | undefined
 const threads = ref<Thread[]>([])
+const employees = ref<Employee[]>([])
 const localDraftThreads = ref<Thread[]>([])
 const selected = ref<Thread | null>(null)
+const activeEmployeeId = ref<string | null>(null)
 const query = ref('')
 const loading = ref(false)
 const threadLoading = ref(false)
@@ -48,12 +51,11 @@ const isPlatformAdmin = ref(false)
 const clientToken = ref(localStorage.getItem('rmdex-client-token') || localStorage.getItem('rmdex-client-access-token') || '')
 const clientRefreshToken = ref(localStorage.getItem('rmdex-client-refresh-token') || '')
 const devices = ref<Array<{ id: string; name: string; online: boolean }>>([])
-const tenants = ref<Array<{ id: string; name: string; deviceCount?: number }>>([])
-const selectedTenantId = ref('')
-const tenantName = ref('')
-const tenantUsername = ref('')
-const tenantPassword = ref('')
-const createdTenantCredentials = ref<{ name: string; username: string; password: string } | null>(null)
+const users = ref<Array<{ id: string; username: string; role?: string; deviceCount?: number }>>([])
+const selectedUserId = ref('')
+const userUsername = ref('')
+const userPassword = ref('')
+const createdUserCredentials = ref<{ username: string; password: string } | null>(null)
 const newDeviceToken = ref('')
 const pairCode = ref('')
 const pairQr = ref('')
@@ -90,6 +92,16 @@ const mobileDetail = ref(false)
 const sidebarOpen = ref(true)
 const creating = ref(false)
 const showCreate = ref(false)
+const employeeEditor = ref(false)
+const editingEmployeeId = ref<string | null>(null)
+const employeeName = ref('')
+const employeeRole = ref('')
+const employeeInstructions = ref('')
+const employeeMemory = ref('')
+const employeeProjectPath = ref('')
+const employeeError = ref('')
+const employeeSaving = ref(false)
+const employeeResetting = ref<string | null>(null)
 const createPath = ref('')
 const createError = ref('')
 const createProject = ref('')
@@ -617,6 +629,79 @@ async function loadProjects() {
     projects.value = desktopProjects.value.map(project => ({ ...project, source: 'desktop' as const, nativeProjectId: project.id }))
   }
 }
+async function loadEmployees() {
+  if (!remoteMode.value) { employees.value = []; return }
+  try {
+    const result = await get<{ data: Employee[] }>('/api/employees')
+    employees.value = (result.data || []).sort((a, b) => a.name.localeCompare(b.name))
+  } catch (e) {
+    if (!(e instanceof Error) || !/not found/i.test(e.message)) throw e
+    employees.value = []
+  }
+}
+function employeeForThread(threadId: string) {
+  return employees.value.find(employee => employee.threadId === threadId)
+}
+function decorateEmployeeThread(thread: Thread): Thread {
+  const employee = employeeForThread(thread.id)
+  return employee ? { ...thread, employeeId: employee.id, name: thread.name || employee.name } : thread
+}
+function openEmployeeEditor(employee?: Employee) {
+  editingEmployeeId.value = employee?.id || null
+  employeeName.value = employee?.name || ''
+  employeeRole.value = employee?.role || ''
+  employeeInstructions.value = employee?.instructions || ''
+  employeeMemory.value = employee?.memory || ''
+  employeeProjectPath.value = employee?.projectPath || projects.value[0]?.path || selected.value?.cwd || ''
+  employeeError.value = ''
+  employeeEditor.value = true
+}
+async function saveEmployee() {
+  if (employeeSaving.value) return
+  employeeSaving.value = true
+  employeeError.value = ''
+  try {
+    const payload = { name: employeeName.value, role: employeeRole.value, instructions: employeeInstructions.value, memory: employeeMemory.value, projectPath: employeeProjectPath.value, deviceId: remoteDevice.value?.id }
+    if (editingEmployeeId.value) await post(`/api/employees/${editingEmployeeId.value}/update`, payload)
+    else await post('/api/employees', payload)
+    await loadEmployees()
+    employeeEditor.value = false
+  } catch (e) { employeeError.value = e instanceof Error ? e.message : String(e) }
+  finally { employeeSaving.value = false }
+}
+async function openEmployee(employee: Employee) {
+  if (employeeResetting.value) return
+  closeThreadMenus()
+  error.value = ''
+  try {
+    if (employee.deviceId !== remoteDevice.value?.id) throw new Error('请先连接员工绑定的 Codex 电脑')
+    const result = await post(`/api/employees/${employee.id}/ensure-thread`, {}) as { employee: Employee; thread: Thread }
+    employees.value = employees.value.map(item => item.id === employee.id ? result.employee : item)
+    const thread = decorateEmployeeThread({ ...result.thread, employeeId: employee.id, name: employee.name, cwd: employee.projectPath })
+    threads.value = [thread, ...threads.value.filter(item => item.id !== thread.id)]
+    activeEmployeeId.value = employee.id
+    await openThread(thread)
+  } catch (e) { error.value = e instanceof Error ? e.message : String(e) }
+}
+async function resetEmployeeThread(employee: Employee) {
+  if (employeeResetting.value) return
+  employeeResetting.value = employee.id
+  error.value = ''
+  try {
+    if (employee.deviceId !== remoteDevice.value?.id) throw new Error('请先连接员工绑定的 Codex 电脑')
+    const oldThreadId = employee.threadId
+    const result = await post(`/api/employees/${employee.id}/reset-thread`, {}) as { employee: Employee; thread: Thread }
+    employees.value = employees.value.map(item => item.id === employee.id ? result.employee : item)
+    const oldThread = oldThreadId ? threads.value.find(item => item.id === oldThreadId) : undefined
+    if (oldThread) rememberArchived(oldThread)
+    if (oldThreadId) threads.value = threads.value.filter(item => item.id !== oldThreadId)
+    const thread = decorateEmployeeThread({ ...result.thread, employeeId: employee.id, name: employee.name, cwd: employee.projectPath })
+    threads.value = [thread, ...threads.value.filter(item => item.id !== thread.id)]
+    activeEmployeeId.value = employee.id
+    await openThread(thread)
+  } catch (e) { error.value = e instanceof Error ? e.message : String(e) }
+  finally { employeeResetting.value = null }
+}
 function archiveScope() {
   return `${remoteDevice.value?.id || 'local'}:${desktopMode.value ? 'desktop' : 'app-server'}`
 }
@@ -999,12 +1084,14 @@ async function refresh(force = true) {
       loadThreads(force),
       loadModels(),
       loadProjects(),
+      loadEmployees(),
     ])
     if (!projects.value.length && desktopProjects.value.length) {
       projects.value = desktopProjects.value.map(project => ({ ...project, source: 'desktop', nativeProjectId: project.id }))
     }
     const deviceKey = remoteDevice.value?.id || 'local'
-    threads.value = [...localDraftThreads.value.filter(thread => thread.desktopDraft?.deviceKey === deviceKey), ...new Map(result.filter(thread => !isArchived(thread.id)).map((thread) => [thread.id, thread])).values()]
+    const decorated = result.map(decorateEmployeeThread)
+    threads.value = [...localDraftThreads.value.filter(thread => thread.desktopDraft?.deviceKey === deviceKey), ...new Map(decorated.filter(thread => !isArchived(thread.id)).map((thread) => [thread.id, thread])).values()]
     connected.value = true
     connectionState.value = 'connected'
     connectionErrorDetail.value = ''
@@ -1084,7 +1171,7 @@ async function openThread(thread: Thread) {
   const version = ++selectionVersion
   const cached = threadCache.get(threadCacheKey(thread.id))
   threadLoading.value = !cached; threadLoadError.value = ''; historyCursor.value = cached?.page?.hasMore ? cached.page.nextCursor : null; historyLoading.value = false; queuedUntil = 0
-  selected.value = thread; activeTurnId.value = null; pendingApprovals.value = []; lastTurn.value = null; queuedSubmissions.value = []; queueMenuId.value = null; mobileDetail.value = true; error.value = ''
+  selected.value = thread; activeEmployeeId.value = thread.employeeId || employeeForThread(thread.id)?.id || null; activeTurnId.value = null; pendingApprovals.value = []; lastTurn.value = null; queuedSubmissions.value = []; queueMenuId.value = null; mobileDetail.value = true; error.value = ''
   void loadQueuedSubmissions(thread.id)
   if (cached) {
     applyRead(cloneRead(cached))
@@ -1215,32 +1302,32 @@ async function loginAdmin() {
 async function loadDevices() {
   if (!adminToken.value) return
   try {
-    const me = await adminFetch<{ user: { role: string; tenantId?: string | null } }>('/api/auth/me').catch(() => undefined)
+    const me = await adminFetch<{ user: { role: string } }>('/api/auth/me').catch(() => undefined)
     if (me) isPlatformAdmin.value = me.user.role === 'admin'
-    const tenantResult = await adminFetch<{ data: typeof tenants.value }>('/api/tenants')
-    tenants.value = tenantResult.data
-    if (!tenants.value.some(item => item.id === selectedTenantId.value)) selectedTenantId.value = tenants.value[0]?.id || ''
-    const tenantQuery = selectedTenantId.value ? `?tenantId=${encodeURIComponent(selectedTenantId.value)}` : ''
+    const userResult = await adminFetch<{ data: typeof users.value }>('/api/users')
+    users.value = userResult.data
+    if (!users.value.some(item => item.id === selectedUserId.value)) selectedUserId.value = users.value[0]?.id || ''
+    const userQuery = selectedUserId.value ? `?userId=${encodeURIComponent(selectedUserId.value)}` : ''
     const [deviceResult, requestResult] = await Promise.all([
-      selectedTenantId.value ? adminFetch<{ data: typeof devices.value }>(`/api/devices${tenantQuery}`) : Promise.resolve({ data: [] as typeof devices.value }),
+      selectedUserId.value ? adminFetch<{ data: typeof devices.value }>(`/api/devices${userQuery}`) : Promise.resolve({ data: [] as typeof devices.value }),
       adminFetch<{ data: typeof pairRequests.value }>('/api/pair-requests'),
     ])
     devices.value = deviceResult.data; pairRequests.value = requestResult.data
   }
   catch (e) { clearSession('admin'); pairError.value = e instanceof Error ? e.message : String(e) }
 }
-async function createTenant() {
-  pairError.value = ''; createdTenantCredentials.value = null
+async function createUser() {
+  pairError.value = ''; createdUserCredentials.value = null
   try {
-    const result = await adminFetch<{ tenant: { id: string; name: string } }>('/api/tenants', 'POST', { name: tenantName.value, username: tenantUsername.value, password: tenantPassword.value })
-    tenants.value = [...tenants.value, result.tenant]
-    selectedTenantId.value = result.tenant.id
-    createdTenantCredentials.value = { name: result.tenant.name, username: tenantUsername.value, password: tenantPassword.value }
-    tenantName.value = ''; tenantUsername.value = ''; tenantPassword.value = ''
+    const result = await adminFetch<{ user: { id: string; username: string; role: string } }>('/api/users', 'POST', { username: userUsername.value, password: userPassword.value })
+    users.value = [...users.value, result.user]
+    selectedUserId.value = result.user.id
+    createdUserCredentials.value = { username: userUsername.value, password: userPassword.value }
+    userUsername.value = ''; userPassword.value = ''
     await loadDevices()
   } catch (e) { pairError.value = e instanceof Error ? e.message : String(e) }
 }
-async function selectTenant() { await loadDevices() }
+async function selectUser() { await loadDevices() }
 async function connectDevice(deviceId: string) {
   pairError.value = ''
   try {
@@ -1254,7 +1341,7 @@ async function connectDevice(deviceId: string) {
 async function registerDevice() {
   pairError.value = ''; newDeviceToken.value = ''; pairCode.value = ''; pairQr.value = ''
   try {
-    const result = await adminFetch<{ token: string; clientToken: string; accessToken?: string; refreshToken?: string }>('/api/devices', 'POST', { name: deviceName.value, tenantId: selectedTenantId.value })
+    const result = await adminFetch<{ token: string; clientToken: string; accessToken?: string; refreshToken?: string }>('/api/devices', 'POST', { name: deviceName.value, userId: selectedUserId.value })
     newDeviceToken.value = result.token
     storeSession('client', result)
     await loadDevices()
@@ -1483,6 +1570,7 @@ async function send() {
       text,
       attachments: uploaded.map(file => file.id),
       name: thread.name || thread.preview || 'Codex 会话',
+      ...(activeEmployeeId.value ? { employeeId: activeEmployeeId.value } : {}),
       permissionMode: permissionMode.value,
       model: selectedModel.value,
       effort: selectedEffort.value,
@@ -1523,7 +1611,7 @@ async function sendFollowUp(mode: 'queue' | 'steer') {
   threads.value = threads.value.map(item => item.id === id ? { ...item, status: { ...(item.status || {}), type: 'active' } } : item)
   try {
     const clientUserMessageId = crypto.randomUUID()
-    const result = await post(`/api/threads/${id}/${mode}`, { text, expectedTurnId, clientUserMessageId }) as { outcome?: string; turn?: { id?: string }; queuedSubmission?: QueuedSubmission }
+    const result = await post(`/api/threads/${id}/${mode}`, { text, expectedTurnId, clientUserMessageId, ...(activeEmployeeId.value ? { employeeId: activeEmployeeId.value } : {}) }) as { outcome?: string; turn?: { id?: string }; queuedSubmission?: QueuedSubmission }
     if (drafts.value[id]?.trim() === text) drafts.value[id] = ''
     if (mode === 'queue' && result.queuedSubmission?.id) queuedSubmissions.value = [...queuedSubmissions.value.filter(item => item.id !== result.queuedSubmission!.id), result.queuedSubmission]
     if (result.turn?.id) trackTask(id, result.turn.id, text, thread.name || thread.preview || 'Codex 会话')
@@ -1607,6 +1695,14 @@ onUnmounted(() => { if (poll) clearInterval(poll); clearThreadLongPress(); void 
       <div class="device"><span class="device-icon"><Monitor :size="16" /></span><div class="device-copy"><strong>{{ remoteDevice?.name || (remoteMode ? '未连接 Codex 设备' : '本机设备') }}</strong><small>{{ connected ? '已连接' : (remoteMode ? '等待远程设备' : '未连接') }}</small></div><span class="online" :class="{ offline: !connected }"></span></div>
       <button class="pair-entry" type="button" @click="showDevices = true"><QrCode :size="16" /><span>连接设备</span><span class="pair-entry-hint">扫码配对</span></button>
       <label class="search"><Search :size="16" /><input v-model="query" placeholder="搜索会话" aria-label="搜索会话" /></label>
+        <div v-if="remoteMode" class="employee-section">
+          <div class="section-label"><span>AI 员工 <span class="count">{{ employees.length }}</span></span><button class="icon-button" type="button" title="新建 AI 员工" aria-label="新建 AI 员工" @click="openEmployeeEditor()"><Plus :size="15" /></button></div>
+          <div v-for="employee in employees" :key="employee.id" class="employee-row" :class="{ selected: activeEmployeeId === employee.id }">
+            <button class="employee-select" type="button" @click="openEmployee(employee)"><span class="employee-icon"><Bot :size="15" /></span><span class="employee-copy"><strong>{{ employee.name }}</strong><small>{{ employee.role || employee.projectPath }}</small></span></button>
+            <button class="employee-action" type="button" title="编辑员工" aria-label="编辑员工" @click.stop="openEmployeeEditor(employee)"><Pencil :size="14" /></button><button class="employee-action" type="button" title="重置上下文" aria-label="重置上下文" :disabled="employeeResetting === employee.id" @click.stop="resetEmployeeThread(employee)"><RotateCcw :size="14" :class="{ spin: employeeResetting === employee.id }" /></button>
+          </div>
+          <p v-if="!employees.length" class="employee-empty">创建一个有固定身份和长期记忆的 Codex 员工。</p>
+        </div>
         <div class="section-label"><span>会话与 Projects <span class="count">{{ filtered.length }}</span></span><div class="section-actions"><button class="archive-toggle" type="button" :class="{ active: showArchivedThreads }" :title="showArchivedThreads ? '隐藏已归档' : '显示已归档'" @click="showArchivedThreads = !showArchivedThreads"><Archive :size="14" /><span v-if="archivedThreads.length">{{ archivedThreads.length }}</span></button><button class="icon-button" title="新建 Project" aria-label="新建 Project" @click="openProjectEditor()"><FolderPlus :size="15" /></button><button class="icon-button" title="刷新会话" aria-label="刷新会话" :disabled="loading" @click="retryConnection"><RefreshCw :size="15" /></button></div></div>
       <div v-if="threadActionError" class="sidebar-error">{{ threadActionError }}</div>
       <div class="thread-list">
@@ -1692,19 +1788,20 @@ onUnmounted(() => { if (poll) clearInterval(poll); clearThreadLongPress(); void 
     <div v-if="previewImageUrl" class="image-preview-backdrop" @click.self="closeImagePreview"><section class="image-preview-dialog" role="dialog" aria-modal="true" aria-label="图片预览"><button class="icon-button image-preview-close" type="button" title="关闭图片预览" aria-label="关闭图片预览" @click="closeImagePreview"><X :size="18" /></button><img :src="previewImageUrl" alt="图片大图预览" /></section></div>
     <div v-if="showFullAccessConfirm" class="modal-backdrop" @click.self="showFullAccessConfirm = false"><section class="create-dialog risk-dialog" role="dialog" aria-modal="true" aria-labelledby="full-access-title" @keydown.esc="showFullAccessConfirm = false"><header><div class="risk-heading"><span class="risk-icon"><ShieldAlert :size="19" /></span><div><h2 id="full-access-title">确认使用完全访问</h2><p>这次消息将跳过 Codex 审批。</p></div></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="showFullAccessConfirm = false"><X :size="18" /></button></header><div class="risk-copy"><p>完全访问模式允许 Codex 直接执行命令、修改工作目录中的文件，并访问电脑上的网络资源。</p><p>只在你明确知道这条消息会做什么时继续。你也可以取消后切换为“请求审批”。</p></div><label class="risk-checkbox"><input v-model="skipFullAccessConfirm" type="checkbox" /> <span>不再提醒</span></label><div class="dialog-actions"><button type="button" class="cancel-button" @click="showFullAccessConfirm = false">取消</button><button type="button" class="danger-confirm-button" @click="confirmFullAccess">继续发送</button></div></section></div>
      <div v-if="showCreate" class="modal-backdrop" @click.self="!creating && (showCreate = false)"><section class="create-dialog" role="dialog" aria-modal="true" aria-labelledby="create-title" @keydown.esc="!creating && (showCreate = false)"><header><h2 id="create-title">新建对话</h2><button class="icon-button" type="button" title="关闭" aria-label="关闭" :disabled="creating" @click="showCreate = false"><X :size="18" /></button></header><form @submit.prevent="createThread"><label for="new-thread-project">Project</label><select id="new-thread-project" v-model="createProject" @change="syncCreateProjectPath"><option value="">独立会话</option><option v-for="project in projects" :key="project.id" :value="project.id" :disabled="desktopMode && !project.nativeProjectId">{{ project.name }}{{ desktopMode && !project.nativeProjectId ? '（请在 Desktop 创建）' : '' }}</option></select><template v-if="!desktopMode && !createProject"><label for="working-directory">工作目录</label><input id="working-directory" v-model="createPath" required autocomplete="off" placeholder="例如 D:\WorkSpace\rmdex" /></template><p v-else-if="createProject" class="project-path-hint">{{ projects.find(project => project.id === createProject)?.path }}</p><p v-if="createError" class="create-error" role="alert">{{ createError }}</p><div class="dialog-actions"><button type="button" class="cancel-button" :disabled="creating" @click="showCreate = false">取消</button><button type="submit" class="create-button" :disabled="creating || (!desktopMode && !createProject && !createPath.trim())">{{ creating ? '创建中…' : '创建对话' }}</button></div></form></section></div>
+     <div v-if="employeeEditor" class="modal-backdrop" @click.self="!employeeSaving && (employeeEditor = false)"><section class="create-dialog employee-dialog" role="dialog" aria-modal="true" aria-labelledby="employee-title" @keydown.esc="!employeeSaving && (employeeEditor = false)"><header><div><h2 id="employee-title">{{ editingEmployeeId ? '编辑 AI 员工' : '新建 AI 员工' }}</h2><p>员工会使用绑定电脑上的 Codex Thread 工作。</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" :disabled="employeeSaving" @click="employeeEditor = false"><X :size="18" /></button></header><form @submit.prevent="saveEmployee"><label for="employee-name">名称</label><input id="employee-name" v-model="employeeName" maxlength="80" required placeholder="例如：回归测试员" /><label for="employee-role">职位</label><input id="employee-role" v-model="employeeRole" maxlength="120" placeholder="例如：负责运行测试并分析失败" /><label for="employee-project-path">Project 路径</label><input id="employee-project-path" v-model="employeeProjectPath" maxlength="1000" required placeholder="例如：D:\WorkSpace\rmdex" /><label for="employee-instructions">员工职责与沟通方式</label><textarea id="employee-instructions" v-model="employeeInstructions" rows="5" maxlength="12000" placeholder="描述它应该如何工作、如何汇报结果。"></textarea><label for="employee-memory">长期记忆</label><textarea id="employee-memory" v-model="employeeMemory" rows="5" maxlength="20000" placeholder="记录稳定的项目事实、偏好和工作约定。"></textarea><p v-if="employeeError" class="create-error" role="alert">{{ employeeError }}</p><div class="dialog-actions"><button type="button" class="cancel-button" :disabled="employeeSaving" @click="employeeEditor = false">取消</button><button type="submit" class="create-button" :disabled="employeeSaving || !employeeName.trim() || !employeeProjectPath.trim()">{{ employeeSaving ? '保存中…' : '保存员工' }}</button></div></form></section></div>
      <div v-if="projectEditor" class="modal-backdrop" @click.self="!projectSaving && (projectEditor = false)"><section class="create-dialog" role="dialog" aria-modal="true" aria-labelledby="project-title" @keydown.esc="!projectSaving && (projectEditor = false)"><header><h2 id="project-title">{{ editingProjectId ? '编辑 Project' : '新建 Project' }}</h2><button class="icon-button" type="button" title="关闭" aria-label="关闭" :disabled="projectSaving" @click="projectEditor = false"><X :size="18" /></button></header><form @submit.prevent="saveProject"><label for="project-name">名称</label><input id="project-name" v-model="projectName" maxlength="80" required autocomplete="off" placeholder="例如 rmdex" /><label for="project-path">文件夹路径</label><input id="project-path" v-model="projectPath" required autocomplete="off" placeholder="例如 D:\WorkSpace\rmdex" /><p class="dialog-hint">路径必须是这台 Codex 电脑上已存在的文件夹。Desktop 已创建的 Projects 会自动出现在列表中。</p><p v-if="projectError" class="create-error" role="alert">{{ projectError }}</p><div class="dialog-actions"><button type="button" class="cancel-button" :disabled="projectSaving" @click="projectEditor = false">取消</button><button type="submit" class="create-button" :disabled="projectSaving || !projectName.trim() || !projectPath.trim()">{{ projectSaving ? '保存中…' : '保存 Project' }}</button></div></form></section></div>
      <div v-if="deleteProjectTarget" class="modal-backdrop" @click.self="deleteProjectTarget = null"><section class="create-dialog delete-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-project-title"><header><div><h2 id="delete-project-title">删除 Project</h2><p>只会移除 rmdex 中的 Project 记录，不会删除文件夹或会话。</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="deleteProjectTarget = null"><X :size="18" /></button></header><p class="delete-copy">确定移除“{{ deleteProjectTarget.name }}”吗？</p><div class="dialog-actions"><button type="button" class="cancel-button" @click="deleteProjectTarget = null">取消</button><button type="button" class="danger-confirm-button" @click="deleteProject">确认移除</button></div></section></div>
     <div v-if="renameThread" class="modal-backdrop" @click.self="!renaming && (renameThread = null)"><section class="create-dialog" role="dialog" aria-modal="true" aria-labelledby="rename-title" @keydown.esc="!renaming && (renameThread = null)"><header><div><h2 id="rename-title">重命名会话</h2><p>名称只影响 rmdex 显示，不会修改消息内容。</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" :disabled="renaming" @click="renameThread = null"><X :size="18" /></button></header><form @submit.prevent="submitRename"><label for="thread-name">会话名称</label><input id="thread-name" v-model="renameValue" maxlength="80" autocomplete="off" /><p v-if="renameError" class="create-error" role="alert">{{ renameError }}</p><div class="dialog-actions"><button type="button" class="cancel-button" :disabled="renaming" @click="renameThread = null">取消</button><button type="submit" class="create-button" :disabled="renaming || !renameValue.trim()">{{ renaming ? '保存中…' : '保存名称' }}</button></div></form></section></div>
     <div v-if="deleteThreadTarget" class="modal-backdrop" @click.self="!threadActionId && (deleteThreadTarget = null)"><section class="create-dialog delete-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-title" @keydown.esc="!threadActionId && (deleteThreadTarget = null)"><header><div><h2 id="delete-title">删除会话</h2><p>删除后无法从 rmdex 恢复这条会话。</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" :disabled="!!threadActionId" @click="deleteThreadTarget = null"><X :size="18" /></button></header><p class="delete-copy">确定删除“{{ deleteThreadTarget.name || deleteThreadTarget.preview || '未命名会话' }}”吗？这会同时从 Codex 中删除会话记录。</p><div class="dialog-actions"><button type="button" class="cancel-button" :disabled="!!threadActionId" @click="deleteThreadTarget = null">取消</button><button type="button" class="danger-confirm-button" :disabled="!!threadActionId" @click="confirmDeleteThread">{{ threadActionId ? '删除中…' : '确认删除' }}</button></div></section></div>
     <div v-if="pairApprovalPage" class="pair-status-backdrop"><section class="pair-status-page" role="dialog" aria-modal="true" aria-labelledby="pair-status-title"><button class="icon-button pair-status-close" type="button" title="返回设备连接" aria-label="返回设备连接" @click="returnToPairingEntry"><X :size="18" /></button><div class="pair-status-icon" :class="`is-${pairApprovalState}`"><LoaderCircle v-if="pairApprovalState === 'waiting'" :size="28" class="working-spinner" /><CircleAlert v-else :size="28" /></div><h2 id="pair-status-title">{{ pairApprovalState === 'waiting' ? '等待电脑端确认' : pairApprovalState === 'denied' ? '配对请求未通过' : pairApprovalState === 'expired' ? '配对请求已过期' : '配对暂时没有完成' }}</h2><p class="pair-status-copy">{{ pairApprovalState === 'waiting' ? '配对申请已经发送到电脑端，请在 Codex Desktop 中允许这台手机连接。' : pairError }}</p><div v-if="pairApprovalState === 'waiting'" class="pair-status-waiting"><span class="online"></span><span>正在等待电脑端审批</span></div><div v-else class="pair-status-actions"><button class="create-button" type="button" :disabled="scanningPair" @click="scanPairCode"><QrCode :size="16" />重新扫描二维码</button><button class="cancel-button" type="button" @click="returnToPairingEntry">手动输入配对码</button></div><form v-if="pairApprovalState !== 'waiting'" class="pair-status-manual" @submit.prevent="claimPair()"><label for="pair-status-code">输入 32 位配对码</label><div><input id="pair-status-code" v-model="pairInput" maxlength="32" inputmode="text" autocomplete="off" placeholder="输入配对码" /><button class="create-button" type="submit" :disabled="pairInput.length !== 32 || mobilePairing">继续</button></div></form></section></div>
     <div v-if="showDevices" class="modal-backdrop" @click.self="showDevices = false"><section class="create-dialog device-dialog" role="dialog" aria-modal="true" aria-labelledby="devices-title" @keydown.esc="showDevices = false"><header><div><h2 id="devices-title">设备连接</h2><p>管理 Codex 电脑与手机配对</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="showDevices = false"><X :size="18" /></button></header>
-      <form v-if="!adminToken && !pairLanding" class="admin-login" @submit.prevent="loginAdmin"><label for="admin-username">管理员账号</label><input id="admin-username" v-model="adminUsername" autocomplete="username" required placeholder="输入管理员账号" /><label for="admin-password">管理员密码</label><p class="dialog-hint">登录后才能管理 Codex 电脑、生成手机配对码和审批手机连接。登录凭证会自动续期。</p><input id="admin-password" v-model="adminPassword" type="password" autocomplete="current-password" required placeholder="输入服务器管理员密码" /><button class="create-button" type="submit">登录管理设备</button></form>
-      <template v-else-if="adminToken"><div class="admin-status"><span class="online"></span><span>{{ isPlatformAdmin ? '平台管理员已验证' : '工作空间管理员已验证' }}</span></div>
-        <section v-if="isPlatformAdmin" class="tenant-admin"><strong>工作空间管理</strong><form class="tenant-create-form" @submit.prevent="createTenant"><input v-model="tenantName" aria-label="工作空间名称" maxlength="80" required placeholder="工作空间名称" /><input v-model="tenantUsername" aria-label="租户管理员账号" minlength="3" maxlength="80" required placeholder="管理员账号" /><input v-model="tenantPassword" aria-label="租户管理员初始密码" minlength="12" type="password" required placeholder="初始密码（至少 12 位）" /><button class="create-button" type="submit"><Plus :size="15" />创建租户</button></form></section>
-        <div v-if="createdTenantCredentials" class="device-secret"><strong>租户已创建，请安全交付管理员凭证</strong><p>{{ createdTenantCredentials.name }}</p><code>{{ createdTenantCredentials.username }} / {{ createdTenantCredentials.password }}</code><button class="copy-button" type="button" @click="copyValue(createdTenantCredentials.username + '\n' + createdTenantCredentials.password, '已复制租户登录凭证')"><Copy :size="15" />复制凭证</button></div>
-        <label class="tenant-select-label" for="device-tenant">设备所属工作空间</label><select id="device-tenant" v-model="selectedTenantId" class="tenant-select" :disabled="!isPlatformAdmin || tenants.length < 2" @change="selectTenant"><option v-for="tenant in tenants" :key="tenant.id" :value="tenant.id">{{ tenant.name }}{{ tenant.deviceCount !== undefined ? `（${tenant.deviceCount} 台电脑）` : '' }}</option></select>
-        <form class="register-device" @submit.prevent="registerDevice"><input v-model="deviceName" aria-label="设备名称" maxlength="80" /><button class="create-button" type="submit" :disabled="!selectedTenantId"><Plus :size="15" />注册此电脑</button></form>
-        <div v-if="newDeviceToken" class="device-secret"><strong>手动注册设备密钥只显示这一次</strong><p>新电脑安装 rmdex-pc 后，可直接在本地面板登录工作空间自动注册；此密钥用于已有电脑的手动配置。不要发送给其他人。</p><code>{{ newDeviceToken }}</code><button class="copy-button" type="button" @click="copyValue(newDeviceToken)"><Copy :size="15" />复制密钥</button><small>手动配置：RMDEX_RELAY_URL=wss://code.kyeai.xyz/agent，RMDEX_DEVICE_TOKEN=上方密钥</small></div>
+      <form v-if="!adminToken && !pairLanding" class="admin-login" @submit.prevent="loginAdmin"><label for="admin-username">账号</label><input id="admin-username" v-model="adminUsername" autocomplete="username" required placeholder="输入账号" /><label for="admin-password">密码</label><p class="dialog-hint">登录后可以管理自己的 Codex 电脑、生成手机配对码和审批手机连接；平台管理员还可以创建用户账号。登录凭证会自动续期。</p><input id="admin-password" v-model="adminPassword" type="password" autocomplete="current-password" required placeholder="输入密码" /><button class="create-button" type="submit">登录设备管理</button></form>
+      <template v-else-if="adminToken"><div class="admin-status"><span class="online"></span><span>{{ isPlatformAdmin ? '平台管理员已验证' : '用户已验证' }}</span></div>
+        <section v-if="isPlatformAdmin" class="user-admin"><strong>用户管理</strong><form class="user-create-form" @submit.prevent="createUser"><input v-model="userUsername" aria-label="用户账号" minlength="3" maxlength="80" required placeholder="用户账号" /><input v-model="userPassword" aria-label="用户初始密码" minlength="12" type="password" required placeholder="初始密码（至少 12 位）" /><button class="create-button" type="submit"><Plus :size="15" />创建用户</button></form></section>
+        <div v-if="createdUserCredentials" class="device-secret"><strong>用户已创建，请安全交付登录凭证</strong><code>{{ createdUserCredentials.username }} / {{ createdUserCredentials.password }}</code><button class="copy-button" type="button" @click="copyValue(createdUserCredentials.username + '\n' + createdUserCredentials.password, '已复制用户登录凭证')"><Copy :size="15" />复制凭证</button></div>
+        <label class="user-select-label" for="device-user">设备所属用户</label><select id="device-user" v-model="selectedUserId" class="user-select" :disabled="!isPlatformAdmin || users.length < 2" @change="selectUser"><option v-for="user in users" :key="user.id" :value="user.id">{{ user.username }}{{ user.deviceCount !== undefined ? `（${user.deviceCount} 台电脑）` : '' }}</option></select>
+        <form class="register-device" @submit.prevent="registerDevice"><input v-model="deviceName" aria-label="设备名称" maxlength="80" /><button class="create-button" type="submit" :disabled="!selectedUserId"><Plus :size="15" />注册此电脑</button></form>
+        <div v-if="newDeviceToken" class="device-secret"><strong>手动注册设备密钥只显示这一次</strong><p>新电脑安装 rmdex-pc 后，可直接在本地面板登录用户账号自动注册；此密钥用于已有电脑的手动配置。不要发送给其他人。</p><code>{{ newDeviceToken }}</code><button class="copy-button" type="button" @click="copyValue(newDeviceToken)"><Copy :size="15" />复制密钥</button><small>手动配置：RMDEX_RELAY_URL=wss://code.kyeai.xyz/agent，RMDEX_DEVICE_TOKEN=上方密钥</small></div>
         <div v-if="pairRequests.length" class="pair-requests"><strong>等待确认的手机</strong><div v-for="request in pairRequests" :key="request.id" class="pair-request"><span>{{ request.name }}</span><button type="button" @click="decidePair(request.id, 'deny')">拒绝</button><button type="button" class="approve-pair" @click="decidePair(request.id, 'approve')">允许</button></div></div>
         <div class="device-list"><div v-for="device in devices" :key="device.id" class="device-row"><span class="device-icon"><Monitor :size="16" /></span><div class="device-copy"><strong>{{ device.name }}</strong><small>{{ device.online ? '在线' : '离线' }}</small></div><span class="online" :class="{ offline: !device.online }"></span><button class="icon-button" :class="{ 'connect-device-button': remoteDevice?.id !== device.id }" title="连接此设备" aria-label="连接此设备" :disabled="!device.online" @click="connectDevice(device.id)"><MessageSquare :size="16" /></button><button class="icon-button" title="生成手机配对码" aria-label="生成手机配对码" @click="createPair(device.id)"><Smartphone :size="16" /></button><button class="icon-button revoke-button" title="撤销设备" aria-label="撤销设备" @click="revokeDevice(device.id)"><Trash2 :size="15" /></button></div><p v-if="!devices.length" class="device-empty">尚未注册 Codex 电脑</p></div>
         <div v-if="pairCode" class="pair-result"><img :src="pairQr" alt="手机扫码配对二维码" /><div><strong>手机扫码配对</strong><p>二维码和配对码 3 分钟内有效，只能使用一次。</p><code>{{ pairCode }}</code><button class="copy-button" type="button" @click="copyValue(pairUrl)"><Copy :size="15" />复制配对链接</button></div></div>

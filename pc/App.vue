@@ -89,8 +89,8 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
     <p v-if="error || status?.error" class="error-banner"><AlertTriangle :size="17" />{{ error || status?.error }}</p>
 
     <section v-if="status && !status.enrolled" class="enroll-panel">
-      <div><p class="eyebrow">加入工作空间</p><h2>连接你的 Rmdex 账号</h2><p class="subtitle">使用租户管理员提供的账号登录。这台电脑会注册到该工作空间，并将设备凭证保存在本机。</p></div>
-      <form class="enroll-form" @submit.prevent="enroll"><label for="tenant-account">工作空间管理员账号</label><input id="tenant-account" v-model="accountName" autocomplete="username" required placeholder="账号" /><label for="tenant-password">密码</label><input id="tenant-password" v-model="accountPassword" type="password" autocomplete="current-password" required placeholder="密码" /><label for="pc-device-name">电脑名称</label><input id="pc-device-name" v-model="deviceName" maxlength="80" required placeholder="例如：办公室电脑" /><button class="primary" type="submit" :disabled="busy"><LoaderCircle v-if="busy" :size="16" class="spin" />{{ busy ? '正在注册并启动…' : '连接工作空间并启动' }}</button></form>
+      <div><p class="eyebrow">连接 Rmdex</p><h2>连接你的 Rmdex 账号</h2><p class="subtitle">使用用户账号登录。这台电脑会注册到该账号，并将设备凭证保存在本机。</p></div>
+      <form class="enroll-form" @submit.prevent="enroll"><label for="user-account">用户账号</label><input id="user-account" v-model="accountName" autocomplete="username" required placeholder="账号" /><label for="user-password">密码</label><input id="user-password" v-model="accountPassword" type="password" autocomplete="current-password" required placeholder="密码" /><label for="pc-device-name">电脑名称</label><input id="pc-device-name" v-model="deviceName" maxlength="80" required placeholder="例如：办公室电脑" /><button class="primary" type="submit" :disabled="busy"><LoaderCircle v-if="busy" :size="16" class="spin" />{{ busy ? '正在注册并启动…' : '连接账号并启动' }}</button></form>
     </section>
 
     <section v-if="status?.enrolled" class="status-grid">

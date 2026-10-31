@@ -166,13 +166,13 @@ Project with the same folder path to group its chats. A hand-added Project can
 create chats through app-server mode; legacy Desktop mode requires the Project
 to be created in Desktop first.
 
-The PC service only listens on loopback. On first launch, enter the tenant
-administrator credentials and a computer name in the local dashboard; rmdex-pc
-registers the computer in that tenant, stores its device credentials locally
-under `work/`, and starts the outbound WSS connection. The account password is not
-stored. Existing `.device-token` and `.web-client-token` files and environment
-variables remain supported. Generated logs and the local permission preference
-are stored under `work/` and are ignored by Git.
+The PC service only listens on loopback. On first launch, enter a user account
+and computer name in the local dashboard; rmdex-pc registers the computer to
+that user, stores its device credentials locally under `work/`, and starts the
+outbound WSS connection. The account password is not stored. Existing
+`.device-token` and `.web-client-token` files and environment variables remain
+supported. Generated logs and the local permission preference are stored under
+`work/` and are ignored by Git.
 
 ## Remote relay
 
@@ -180,7 +180,11 @@ Build the relay image with `docker build -t rmdex-relay:local .`. Production con
 
 Existing state files with `clients` and old SHA-256 admin hashes remain readable. New web/mobile sessions use the account access/refresh pair, while old device tokens and client tokens continue to work during migration. Put the relay behind HTTPS/WSS; never publish port 8787 directly. The computer agent requires `RMDEX_RELAY_URL=wss://code.kyeai.xyz/agent` and its one-time `RMDEX_DEVICE_TOKEN`. Pairing codes expire after three minutes and must be explicitly approved in the desktop device panel before the phone receives a client credential.
 
-The relay now supports tenant workspaces. The existing platform administrator remains the platform administrator after migration; existing computers are assigned to the automatically created `默认工作空间`. A platform administrator can create tenant workspaces and their initial tenant-admin login from the device panel. Tenant admins can only list, register, pair, connect, and revoke computers within their own workspace. New rmdex-pc installs can register directly with the tenant-admin login; existing/manual device-token setup remains supported.
+The relay supports multiple user accounts. The platform administrator creates
+user accounts from the device panel. Each user has an isolated device list,
+phone pairings, and AI employees; a user can register multiple computers with
+the same account. New rmdex-pc installs can register directly with the user
+account; existing/manual device-token setup remains supported.
 
 Android background notifications do not use Firebase. The relay stores task
 completion events and exposes an authenticated long-poll endpoint. The Android

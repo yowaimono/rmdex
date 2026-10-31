@@ -17,6 +17,12 @@ test('attached paths stay out of the visible message while filenames remain in h
   assert.equal(message.text, 'Summarize this file\n\n附件：notes.txt')
 })
 
+test('employee bootstrap context stays hidden from the visible user message', () => {
+  const text = '<rmdex_employee_context>private employee instructions</rmdex_employee_context>\n<rmdex_user_request>Run the focused tests</rmdex_user_request>'
+  const [message] = timeline([{ id: 'employee-turn', status: 'completed', items: [{ type: 'userMessage', content: [{ type: 'text', text }] }] }])
+  assert.equal(message.text, 'Run the focused tests')
+})
+
 test('Desktop delegated input renders as user before replies without hiding real tool results', () => {
   const input = name => ({ type: 'functionCallOutput', id: name, namespace: 'codex_app', name, output: { text: '<codex_delegation>\n  <source_thread_id>caller-id</source_thread_id>\n  <input>看看我电脑配置</input>\n</codex_delegation>', truncated: false } })
   for (const name of ['create_thread', 'send_message_to_thread']) {
