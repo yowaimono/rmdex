@@ -146,6 +146,7 @@ let threadStatusPollBusy = false
 let appStateListener: { remove: () => Promise<void> } | undefined
 let notificationListener: { remove: () => Promise<void> } | undefined
 let appActive = true
+let notificationSetupPromise: Promise<boolean> | undefined
 const trackedTasks = new Map<string, { turnId: string; text: string; name: string }>()
 const cacheHydratedKeys = new Set<string>()
 const threadListCache = new Map<string, { savedAt: number; data: Thread[] }>()
@@ -308,24 +309,33 @@ async function notifyTaskComplete(threadId: string, task: { turnId: string; text
     }] })
   } catch { /* Notification permission or channel may be unavailable on this device. */ }
 }
-async function setupNotifications() {
-  if (!Capacitor.isNativePlatform()) return
-  try {
-    const permission = await LocalNotifications.checkPermissions()
-    if (permission.display !== 'granted') await LocalNotifications.requestPermissions()
-    await LocalNotifications.createChannel({ id: 'rmdex-tasks', name: '任务完成', description: 'Codex 任务完成提醒', importance: 5, visibility: 1 })
-    notificationListener = await LocalNotifications.addListener('localNotificationActionPerformed', async action => {
-      const threadId = typeof action.notification.extra?.threadId === 'string' ? action.notification.extra.threadId : ''
-      if (!threadId) return
-      await refresh()
-      const thread = threads.value.find(item => item.id === threadId)
-      if (thread) await openThread(thread)
-    })
-    appStateListener = await NativeApp.addListener('appStateChange', ({ isActive }) => {
-      appActive = isActive
-      if (isActive) void updateThread()
-    })
-  } catch { /* Notifications are optional on devices that deny permission. */ }
+async function setupNotifications(): Promise<boolean> {
+  if (!Capacitor.isNativePlatform()) return false
+  if (notificationSetupPromise) return notificationSetupPromise
+  const setup = (async () => {
+    try {
+      let permission = await LocalNotifications.checkPermissions()
+      if (permission.display !== 'granted') permission = await LocalNotifications.requestPermissions()
+      if (permission.display !== 'granted') return false
+      await LocalNotifications.createChannel({ id: 'rmdex-tasks', name: '任务完成', description: 'Codex 任务完成提醒', importance: 5, visibility: 1 })
+      notificationListener = await LocalNotifications.addListener('localNotificationActionPerformed', async action => {
+        const threadId = typeof action.notification.extra?.threadId === 'string' ? action.notification.extra.threadId : ''
+        if (!threadId) return
+        await refresh()
+        const thread = threads.value.find(item => item.id === threadId)
+        if (thread) await openThread(thread)
+      })
+      appStateListener = await NativeApp.addListener('appStateChange', ({ isActive }) => {
+        appActive = isActive
+        if (isActive) void updateThread()
+      })
+      return true
+    } catch { /* Notifications are optional on devices that deny permission. */ return false }
+  })()
+  notificationSetupPromise = setup
+  const ready = await setup
+  if (!ready && notificationSetupPromise === setup) notificationSetupPromise = undefined
+  return ready
 }
 function installationId() {
   const key = 'rmdex-installation-id'
@@ -339,6 +349,7 @@ function installationId() {
 async function setupBackgroundNotifications() {
   if (!Capacitor.isNativePlatform() || !clientToken.value) return
   try {
+    if (!await setupNotifications()) return
     let pushToken = localStorage.getItem('rmdex-background-push-token') || ''
     if (!pushToken) {
       const result = await post('/api/push/register', { installationId: installationId(), clientName: 'rmdex Android' }) as { pushToken: string }
@@ -1565,8 +1576,8 @@ async function handleAppUrl(rawUrl: string) {
 onMounted(async () => {
   let handledLaunch = false
   for (const task of notificationTasks()) trackedTasks.set(task.threadId, { turnId: task.turnId, text: task.text, name: task.name })
-  await setupNotifications()
-  if (clientToken.value) void setupBackgroundNotifications()
+  const notificationsReady = await setupNotifications()
+  if (clientToken.value && notificationsReady) void setupBackgroundNotifications()
   if (Capacitor.isNativePlatform()) {
     appUrlListener = await NativeApp.addListener('appUrlOpen', ({ url }) => { void handleAppUrl(url) })
     const launch = await NativeApp.getLaunchUrl()

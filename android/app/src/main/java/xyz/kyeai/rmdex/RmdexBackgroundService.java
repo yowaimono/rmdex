@@ -10,6 +10,9 @@ import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
 import android.os.IBinder;
+import android.os.PowerManager;
+import android.media.AudioAttributes;
+import android.media.RingtoneManager;
 
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
@@ -31,7 +34,7 @@ public class RmdexBackgroundService extends Service {
     public static final String EXTRA_PUSH_TOKEN = "pushToken";
     public static final String ACTION_STOP = "xyz.kyeai.rmdex.action.STOP_BACKGROUND_SERVICE";
     private static final String CONNECTION_CHANNEL = "rmdex-connection";
-    private static final String TASK_CHANNEL = "rmdex-tasks";
+    private static final String TASK_CHANNEL = "rmdex-task-alerts-v2";
     private static final int SERVICE_NOTIFICATION_ID = 18787;
     private static final String PREFERENCES = "rmdex-background-service";
     private static final String PREF_RELAY_URL = "relayUrl";
@@ -45,11 +48,17 @@ public class RmdexBackgroundService extends Service {
     private String pushToken;
     private long cursor;
     private SharedPreferences preferences;
+    private PowerManager.WakeLock wakeLock;
 
     @Override
     public void onCreate() {
         super.onCreate();
         preferences = getSharedPreferences(PREFERENCES, MODE_PRIVATE);
+        PowerManager powerManager = (PowerManager) getSystemService(POWER_SERVICE);
+        if (powerManager != null) {
+            wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "rmdex:notification-poll");
+            wakeLock.setReferenceCounted(false);
+        }
         restoreState();
         createChannels();
         startForeground(SERVICE_NOTIFICATION_ID, serviceNotification());
@@ -87,6 +96,7 @@ public class RmdexBackgroundService extends Service {
             while (!stopped && relayUrl != null && pushToken != null) {
                 HttpURLConnection connection = null;
                 try {
+                    if (wakeLock != null && !wakeLock.isHeld()) wakeLock.acquire(40_000L);
                     String query = "/api/notifications/poll?wait=25000&after=" + cursor;
                     URL url = new URL(relayUrl.replaceAll("/$", "") + query);
                     connection = (HttpURLConnection) url.openConnection();
@@ -111,6 +121,7 @@ public class RmdexBackgroundService extends Service {
                     sleep(3000);
                 } finally {
                     if (connection != null) connection.disconnect();
+                    if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
                 }
             }
         } finally {
@@ -162,7 +173,10 @@ public class RmdexBackgroundService extends Service {
                 .setStyle(new NotificationCompat.BigTextStyle().bigText(body))
                 .setAutoCancel(true)
                 .setContentIntent(pendingIntent)
-                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setPriority(NotificationCompat.PRIORITY_MAX)
+                .setCategory(NotificationCompat.CATEGORY_STATUS)
+                .setDefaults(Notification.DEFAULT_ALL)
+                .setTicker(title)
                 .build();
         NotificationManager manager = getSystemService(NotificationManager.class);
         if (manager != null) manager.notify(Math.abs((threadId + event.optString("turnId", "")).hashCode()), notification);
@@ -186,7 +200,18 @@ public class RmdexBackgroundService extends Service {
         NotificationManager manager = getSystemService(NotificationManager.class);
         if (manager == null) return;
         manager.createNotificationChannel(new NotificationChannel(CONNECTION_CHANNEL, "后台连接", NotificationManager.IMPORTANCE_LOW));
-        manager.createNotificationChannel(new NotificationChannel(TASK_CHANNEL, "任务完成", NotificationManager.IMPORTANCE_HIGH));
+        NotificationChannel taskChannel = new NotificationChannel(TASK_CHANNEL, "任务完成提醒", NotificationManager.IMPORTANCE_HIGH);
+        taskChannel.setDescription("Codex 任务完成时弹出声音和震动提醒");
+        taskChannel.enableVibration(true);
+        taskChannel.setVibrationPattern(new long[]{0, 300, 180, 300});
+        taskChannel.setSound(
+                RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION),
+                new AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build());
+        taskChannel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
+        manager.createNotificationChannel(taskChannel);
     }
 
     private static String read(InputStream input) throws Exception {
@@ -206,6 +231,7 @@ public class RmdexBackgroundService extends Service {
     public void onDestroy() {
         stopped = true;
         executor.shutdownNow();
+        if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
         super.onDestroy();
     }
 
