@@ -6,7 +6,7 @@
 
 $ErrorActionPreference = 'Stop'
 $project = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$version = '0.2.0'
+$version = '0.3.0'
 $work = if ($WorkDirectory) { $WorkDirectory } else { Join-Path $project 'work\pc-msi' }
 $stage = Join-Path $work 'payload'
 $wix = 'D:\WorkSpace\frametell\node_modules\.pnpm\electron-winstaller@5.4.0\node_modules\electron-winstaller\vendor'
@@ -32,6 +32,14 @@ Copy-Item -LiteralPath (Join-Path $project 'scripts\\start-shared-desktop.ts') -
 New-Item -ItemType Directory -Force -Path (Join-Path $stage 'node_modules') | Out-Null
 & robocopy.exe (Join-Path $project 'node_modules') (Join-Path $stage 'node_modules') /E /XD .gradle .vite .cache (Join-Path $project 'node_modules\@capacitor\android\android') (Join-Path $project 'node_modules\@capacitor\android\capacitor\build') (Join-Path $project 'node_modules\@capacitor\app\android\build') (Join-Path $project 'node_modules\@capacitor\barcode-scanner\android\build') (Join-Path $project 'node_modules\@capacitor\local-notifications\android\build') /NFL /NDL /NJH /NJS /NP | Out-Null
 if ($LASTEXITCODE -gt 7) { throw 'Failed to copy node_modules.' }
+# Android and Gradle packages can contain generated build trees that change or
+# disappear while the installer manifest is being generated. They are not
+# needed by the desktop runtime, so remove them from the isolated MSI payload.
+$transientNames = @('build', '.transforms', '.gradle', '.cache')
+Get-ChildItem -LiteralPath (Join-Path $stage 'node_modules') -Directory -Recurse -Force |
+  Where-Object { $transientNames -contains $_.Name } |
+  Sort-Object FullName -Descending |
+  Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 Copy-Item -LiteralPath (Join-Path $project 'package.json') -Destination $stage -Force
 Copy-Item -LiteralPath (Join-Path $project 'package-lock.json') -Destination $stage -Force -ErrorAction SilentlyContinue
 Copy-Item -LiteralPath (Join-Path $windowDir 'rmdex-pc-3x4.exe') -Destination $stage -Force
@@ -41,7 +49,11 @@ $runtime = Join-Path $stage 'runtime'
 New-Item -ItemType Directory -Force -Path $runtime | Out-Null
 Copy-Item -LiteralPath 'D:\bin\nodejs\node.exe' -Destination $runtime -Force
 
-$files = Get-ChildItem -LiteralPath $stage -File -Recurse
+$files = Get-ChildItem -LiteralPath $stage -File -Recurse | Where-Object {
+  $relative = $_.FullName.Substring($stage.Length + 1)
+  $segments = $relative -split '[\\/]'
+  -not (($segments -contains 'build') -or ($segments -contains '.transforms') -or ($segments -contains '.gradle') -or ($segments -contains '.cache'))
+}
 $components = New-Object System.Text.StringBuilder
 $dirMap = @{ '' = 'INSTALLFOLDER' }
 $dirNames = @{ '' = '' }
