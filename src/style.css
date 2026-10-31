@@ -124,7 +124,6 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .heading { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .heading strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 600; }
 .heading span { color: #9aa7b5; font-size: 11px; }
-.readonly { margin-left: auto; padding: 5px 9px; border-radius: 4px; background: #f1f5f9; color: #8593a1; font-size: 11px; white-space: nowrap; }
 .welcome { margin: auto; text-align: center; }
 .welcome-icon { display: grid; place-items: center; width: 50px; height: 50px; margin: auto; border-radius: 8px; color: #0879f9; background: #edf5ff; }
 .welcome h2 { margin: 17px 0 7px; font-size: 17px; font-weight: 600; }
@@ -177,7 +176,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .markdown th { color: #253548; font-weight: 600; }
 .markdown img { max-width: 100%; height: auto; border-radius: 6px; }
 .attachments { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
-.attachment { display: block; width: 80px; height: 80px; border: 1px solid #e2e8ef; border-radius: 6px; overflow: hidden; background: #fff; }
+.attachment { display: block; width: 80px; height: 80px; padding: 0; border: 1px solid #e2e8ef; border-radius: 6px; overflow: hidden; background: #fff; cursor: zoom-in; }
 .attachment img { display: block; width: 100%; height: 100%; object-fit: contain; }
 .attachment-unavailable { color: #8997a5; font-size: 12px; }
 .attachments + .message-text { margin-top: 10px; }

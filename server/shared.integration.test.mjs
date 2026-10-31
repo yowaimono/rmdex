@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdtemp, unlink } from 'node:fs/promises'
+import { mkdtemp, unlink, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -126,9 +126,22 @@ test('shared client observes a turn started by another client', { timeout: 40000
     const finished = await waitFor(async () => { const result = await read(); return result.activeTurnId === null && result.lastTurn?.status === 'completed' ? result : null })
     assert.equal(finished.lastTurn.status, 'completed')
     response = undefined
-    const next = await rpc('turn/start', { threadId: thread.id, input: [{ type: 'text', text: 'test interrupt', text_elements: [] }] })
+    const imagePath = join(home, 'test.png')
+    const imageBytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/aXcAAAAASUVORK5CYII=', 'base64')
+    await writeFile(imagePath, imageBytes)
+    const next = await rpc('turn/start', { threadId: thread.id, input: [{ type: 'text', text: 'test interrupt', text_elements: [] }, { type: 'localImage', path: imagePath }] })
     await waitFor(() => response)
     await waitFor(async () => (await read()).activeTurnId === next.turn.id)
+    await waitFor(async () => {
+      const result = await (await fetch(`http://127.0.0.1:${agentPort}/api/threads/${thread.id}/status`)).json()
+      return result.live?.items?.some(item => item.content?.some(part => part.type === 'localImage'))
+    })
+    const withImage = await read()
+    const image = withImage.thread.turns.find(item => item.id === next.turn.id)?.items.flatMap(item => item.content || []).find(part => part.type === 'localImage')
+    assert.match(image?.assetUrl || '', /^\/api\/images\//)
+    const imageResponse = await fetch(`http://127.0.0.1:${agentPort}${image.assetUrl}`)
+    assert.equal(imageResponse.status, 200)
+    assert.deepEqual(Buffer.from(await imageResponse.arrayBuffer()), imageBytes)
     const stopped = await fetch(`http://127.0.0.1:${agentPort}/api/threads/${thread.id}/stop`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'http://localhost:5173' }, body: '{}',
     })

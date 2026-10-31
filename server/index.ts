@@ -531,7 +531,6 @@ const server = createServer(async (req, res) => {
         activeTurns.set(threadId!, runningTurn.id)
         if (!liveTurns.has(threadId!)) liveTurns.set(threadId!, { id: runningTurn.id, status: runningTurn.status, items: new Map() })
       }
-      registerImages(result)
       const live = liveTurns.get(threadId!)
       const read = result as { thread: { turns?: Array<{ id: string; status: string; items: LiveItem[] }> } }
       if (live && read.thread) {
@@ -547,6 +546,7 @@ const server = createServer(async (req, res) => {
           else turn.items[index] = item
         }
       }
+      registerImages(result)
       result = { ...(result as object), activeTurnId: activeTurns.get(threadId!) || null, lastTurn: live ? { id: live.id, status: live.status, error: live.error } : null, approvals: [...approvals.entries()].filter(([, request]) => request.params.threadId === threadId).map(([id, request]) => ({ id, method: request.method, params: request.params })) }
     } else if (/^\/api\/images\/[a-f0-9-]+$/.test(url.pathname)) {
       const path = images.get(url.pathname.split('/').pop()!)
