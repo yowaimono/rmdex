@@ -23,6 +23,9 @@ public class RmdexBackgroundServicePlugin extends Plugin {
         Intent intent = new Intent(getContext(), RmdexBackgroundService.class)
                 .putExtra(RmdexBackgroundService.EXTRA_RELAY_URL, relayUrl)
                 .putExtra(RmdexBackgroundService.EXTRA_PUSH_TOKEN, pushToken);
+        if (call.getData().has("cursor")) {
+            intent.putExtra(RmdexBackgroundService.EXTRA_CURSOR, call.getData().optLong("cursor", 0L));
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             ContextCompat.startForegroundService(getContext(), intent);
         } else {

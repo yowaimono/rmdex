@@ -11,11 +11,12 @@ type User = { id: string; username: string; passwordHash: string; role: 'admin' 
 type AuthSession = { id: string; familyId: string; userId: string; deviceId?: string; name?: string; accessHash: string; accessExpiresAt: number; refreshHash: string; refreshExpiresAt: number; usedRefreshHashes?: string[]; createdAt: number; lastSeenAt?: number; revoked?: boolean }
 type PushToken = { tokenHash: string; deviceId: string; installationId: string; platform: 'android'; clientName?: string; createdAt: number; lastSeenAt: number }
 type NotificationEvent = { id: string; deviceId: string; threadId: string; turnId: string; status: string; title: string; body: string; createdAt: number }
+type NotificationWatch = { deviceId: string; threadId: string; turnId: string; name: string; createdAt: number }
 type Employee = { id: string; userId: string; name: string; role: string; instructions: string; legacyMemory?: string; deviceId: string; projectPath: string; threadId?: string; initializedThreadId?: string; assetContextVersion?: number; createdAt: number; updatedAt: number; archived?: boolean }
 type Pairing = { codeHash: string; deviceId: string; userId: string; expiresAt: number }
 type PairRequest = { id: string; deviceId: string; userId: string; name: string; createdAt: number; expiresAt: number; status: 'pending' | 'approved' | 'denied'; token?: string }
 type MessageReceipt = { messageId: string; senderId: string; recipientId: string; fingerprint: string; threadId: string; deviceId: string; status: 'dispatching' | 'queued' | 'uncertain'; createdAt: number }
-type State = { devices: Device[]; clients: Client[]; pairings: Pairing[]; pairRequests: PairRequest[]; users: User[]; sessions: AuthSession[]; pushTokens: PushToken[]; notifications: NotificationEvent[]; employees: Employee[]; employeeMessages: MessageReceipt[] }
+type State = { devices: Device[]; clients: Client[]; pairings: Pairing[]; pairRequests: PairRequest[]; users: User[]; sessions: AuthSession[]; pushTokens: PushToken[]; notifications: NotificationEvent[]; notificationWatches: NotificationWatch[]; employees: Employee[]; employeeMessages: MessageReceipt[] }
 type Credentials = { accessToken: string; refreshToken: string; expiresIn: number; user: { id: string; username: string; role?: User['role'] }; token?: string; clientToken?: string; deviceId?: string }
 type Pending = { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
 
@@ -27,7 +28,7 @@ const adminPassword = process.env.RMDEX_ADMIN_PASSWORD || ''
 const statePath = process.env.RMDEX_STATE || '/data/state.json'
 const webRoot = process.env.RMDEX_WEB_ROOT || '/app/web'
 const employeeSkill = await readFile(process.env.RMDEX_EMPLOYEE_SKILL || join(process.cwd(), 'server', 'skills', 'rmdex-employee', 'SKILL.md'), 'utf8')
-const state: State = { devices: [], clients: [], pairings: [], pairRequests: [], users: [], sessions: [], pushTokens: [], notifications: [], employees: [], employeeMessages: [] }
+const state: State = { devices: [], clients: [], pairings: [], pairRequests: [], users: [], sessions: [], pushTokens: [], notifications: [], notificationWatches: [], employees: [], employeeMessages: [] }
 const employeeDeliveries = new Set<string>()
 const messageDeliveries = new Set<string>()
 const ASSET_CONTEXT_VERSION = 2
@@ -145,6 +146,7 @@ async function load() {
       return []
     }) : []
     state.notifications = Array.isArray(saved.notifications) ? saved.notifications.filter(item => item && typeof item.deviceId === 'string' && typeof item.threadId === 'string') : []
+    state.notificationWatches = Array.isArray(saved.notificationWatches) ? saved.notificationWatches.filter(item => item && typeof item.deviceId === 'string' && typeof item.threadId === 'string' && typeof item.turnId === 'string').map(item => ({ deviceId: item.deviceId, threadId: item.threadId, turnId: item.turnId, name: typeof item.name === 'string' ? item.name : 'Codex 会话', createdAt: Number(item.createdAt) || Date.now() })) : []
     state.employeeMessages = Array.isArray(saved.employeeMessages) ? saved.employeeMessages.map(item => ({ ...item, status: item.status === 'dispatching' ? 'uncertain' : item.status })) : []
     state.employees = Array.isArray(saved.employees) ? saved.employees.filter(item => item && typeof item.id === 'string' && typeof item.userId === 'string' && typeof item.name === 'string' && typeof item.deviceId === 'string' && typeof item.projectPath === 'string' && state.users.some(user => user.id === item.userId)).map(item => ({
       id: item.id, userId: item.userId, name: item.name, role: typeof item.role === 'string' ? item.role : '', instructions: typeof item.instructions === 'string' ? item.instructions : '', ...(typeof item.legacyMemory === 'string' && item.legacyMemory.trim() ? { legacyMemory: item.legacyMemory } : typeof item.memory === 'string' && item.memory.trim() ? { legacyMemory: item.memory } : {}), deviceId: item.deviceId, projectPath: item.projectPath, ...(typeof item.threadId === 'string' ? { threadId: item.threadId } : {}), ...(Number.isInteger(item.assetContextVersion) && typeof item.initializedThreadId === 'string' ? { initializedThreadId: item.initializedThreadId, assetContextVersion: item.assetContextVersion } : {}), createdAt: Number(item.createdAt) || Date.now(), updatedAt: Number(item.updatedAt) || Date.now(), ...(item.archived ? { archived: true } : {}),
@@ -303,10 +305,17 @@ function rpc(deviceId: string, path: string, method: string, data?: unknown): Pr
 }
 
 const taskWatchers = new Map<string, NodeJS.Timeout>()
+function notificationWatchKey(watch: Pick<NotificationWatch, 'deviceId' | 'threadId' | 'turnId'>) {
+  return `${watch.deviceId}:${watch.threadId}:${watch.turnId}`
+}
 function notificationEvents(deviceId: string, after: number) {
   return state.notifications.filter(item => item.deviceId === deviceId && item.createdAt > after)
 }
+function notificationCursor(deviceId: string) {
+  return state.notifications.reduce((cursor, item) => item.deviceId === deviceId ? Math.max(cursor, item.createdAt) : cursor, 0)
+}
 async function enqueueNotification(deviceId: string, threadId: string, turnId: string, status: string, title: string, bodyText: string) {
+  if (state.notifications.some(item => item.deviceId === deviceId && item.threadId === threadId && item.turnId === turnId)) return
   const previousCreatedAt = state.notifications.length ? state.notifications[state.notifications.length - 1]!.createdAt : 0
   const event: NotificationEvent = { id: randomToken(12), deviceId, threadId, turnId, status, title, body: bodyText, createdAt: Math.max(Date.now(), previousCreatedAt + 1) }
   state.notifications.push(event)
@@ -318,18 +327,29 @@ async function enqueueNotification(deviceId: string, threadId: string, turnId: s
   }
   notificationWaiters.delete(deviceId)
 }
-function watchTask(deviceId: string, threadId: string, turnId: string, name: string) {
-  const key = `${deviceId}:${threadId}:${turnId}`
+async function removeNotificationWatch(watch: NotificationWatch) {
+  const before = state.notificationWatches.length
+  state.notificationWatches = state.notificationWatches.filter(item => notificationWatchKey(item) !== notificationWatchKey(watch))
+  if (state.notificationWatches.length !== before) await persist()
+}
+async function watchTask(deviceId: string, threadId: string, turnId: string, name: string) {
+  const watch: NotificationWatch = { deviceId, threadId, turnId, name: name || 'Codex 会话', createdAt: Date.now() }
+  const key = notificationWatchKey(watch)
   if (taskWatchers.has(key)) return
+  if (!state.notificationWatches.some(item => notificationWatchKey(item) === key)) {
+    state.notificationWatches.push(watch)
+    await persist().catch(() => {})
+  }
   const startedAt = Date.now()
   const poll = async () => {
     taskWatchers.delete(key)
-    if (Date.now() - startedAt > 24 * 60 * 60_000) return
+    if (Date.now() - startedAt > 24 * 60 * 60_000) { await removeNotificationWatch(watch); return }
     try {
       const result = await rpc(deviceId, `/api/threads/${threadId}/status`, 'GET') as { activeTurnId?: string | null; lastTurn?: { id?: string; status?: string } | null }
       const status = result.lastTurn?.status || ''
       if (result.lastTurn?.id === turnId && !result.activeTurnId && status && !['inProgress', 'running', 'active', 'started'].includes(status)) {
-        await enqueueNotification(deviceId, threadId, turnId, status, `${name || 'Codex 会话'}已完成`, status === 'completed' ? '任务已完成，点击查看结果' : `任务${status === 'interrupted' ? '已暂停' : '已结束'}，点击查看详情`)
+        await enqueueNotification(deviceId, threadId, turnId, status, `${watch.name}已完成`, status === 'completed' ? '任务已完成，点击查看结果' : `任务${status === 'interrupted' ? '已暂停' : '已结束'}，点击查看详情`)
+        await removeNotificationWatch(watch)
         return
       }
     } catch { /* The desktop agent may be reconnecting; keep watching. */ }
@@ -561,7 +581,12 @@ const server = createServer(async (req, res) => {
       state.pushTokens = state.pushTokens.filter(item => !(item.deviceId === device.id && item.installationId === installationId))
       state.pushTokens.push({ tokenHash: hash(pushToken), deviceId: device.id, installationId, platform: 'android', clientName: typeof data.clientName === 'string' ? data.clientName.slice(0, 80) : client.name, createdAt: Date.now(), lastSeenAt: Date.now() })
       await persist()
-      json(res, 200, { pushToken }); return
+      json(res, 200, { pushToken, cursor: notificationCursor(device.id) }); return
+    }
+    if (req.method === 'GET' && url.pathname === '/api/push/status') {
+      const subscription = pushFor(req)
+      if (!subscription) { json(res, 401, { error: '后台连接凭证已失效' }); return }
+      json(res, 200, { ok: true, cursor: notificationCursor(subscription.deviceId) }); return
     }
     if (req.method === 'GET' && url.pathname === '/api/notifications/poll') {
       const subscription = pushFor(req)
@@ -687,7 +712,7 @@ const server = createServer(async (req, res) => {
     if (sendMatch && result && typeof result === 'object') {
       const turn = (result as { turn?: { id?: string } }).turn
       const targetId = typeof (result as { threadId?: unknown }).threadId === 'string' ? (result as { threadId: string }).threadId : sendMatch[1]!
-      if (turn?.id) watchTask(device.id, targetId, turn.id, employee?.name || (typeof requestData?.name === 'string' ? requestData.name : 'Codex 会话'))
+      if (turn?.id) await watchTask(device.id, targetId, turn.id, employee?.name || (typeof requestData?.name === 'string' ? requestData.name : 'Codex 会话')).catch(() => {})
     }
     if (url.pathname.startsWith('/api/images/') && result && typeof result === 'object' && (result as { __rmdexBinary?: boolean }).__rmdexBinary) {
       const image = result as { contentType: string; data: string }
@@ -749,4 +774,5 @@ sockets.on('connection', ws => {
 
 await load()
 await ensureAdminUser()
+for (const watch of state.notificationWatches) void watchTask(watch.deviceId, watch.threadId, watch.turnId, watch.name).catch(() => {})
 server.listen(port, '0.0.0.0', () => console.log(`rmdex relay listening on ${port}`))

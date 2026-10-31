@@ -32,6 +32,7 @@ import java.util.concurrent.Executors;
 public class RmdexBackgroundService extends Service {
     public static final String EXTRA_RELAY_URL = "relayUrl";
     public static final String EXTRA_PUSH_TOKEN = "pushToken";
+    public static final String EXTRA_CURSOR = "cursor";
     public static final String ACTION_STOP = "xyz.kyeai.rmdex.action.STOP_BACKGROUND_SERVICE";
     private static final String CONNECTION_CHANNEL = "rmdex-connection";
     private static final String TASK_CHANNEL = "rmdex-task-alerts-v2";
@@ -77,7 +78,8 @@ public class RmdexBackgroundService extends Service {
             String nextRelayUrl = intent.getStringExtra(EXTRA_RELAY_URL);
             String nextPushToken = intent.getStringExtra(EXTRA_PUSH_TOKEN);
             if (nextRelayUrl != null && !nextRelayUrl.isEmpty() && nextPushToken != null && !nextPushToken.isEmpty()) {
-                if (!nextRelayUrl.equals(relayUrl) || !nextPushToken.equals(pushToken)) cursor = 0;
+                boolean tokenChanged = !nextRelayUrl.equals(relayUrl) || !nextPushToken.equals(pushToken);
+                if (tokenChanged) cursor = intent.hasExtra(EXTRA_CURSOR) ? Math.max(0L, intent.getLongExtra(EXTRA_CURSOR, 0L)) : 0L;
                 relayUrl = nextRelayUrl;
                 pushToken = nextPushToken;
                 persistState();
@@ -233,6 +235,14 @@ public class RmdexBackgroundService extends Service {
         executor.shutdownNow();
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
         super.onDestroy();
+    }
+
+    @Override
+    public void onTimeout(int startId, int foregroundServiceType) {
+        stopped = true;
+        executor.shutdownNow();
+        stopForeground(STOP_FOREGROUND_REMOVE);
+        stopSelf(startId);
     }
 
     @Nullable

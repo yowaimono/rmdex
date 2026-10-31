@@ -25,7 +25,7 @@ type Project = { id: string; name: string; path: string; source: 'local' | 'desk
 type Employee = { id: string; name: string; role: string; instructions: string; deviceId: string; projectPath: string; threadId?: string; initializedThreadId?: string; createdAt: number; updatedAt: number }
 const apiBase = Capacitor.isNativePlatform() ? 'https://code.kyeai.xyz' : ''
 const apiUrl = (path: string) => path.startsWith('http://') || path.startsWith('https://') ? path : `${apiBase}${path}`
-const RmdexBackgroundService = registerPlugin<{ start(options: { relayUrl: string; pushToken: string }): Promise<void>; stop(): Promise<void> }>('RmdexBackgroundService')
+const RmdexBackgroundService = registerPlugin<{ start(options: { relayUrl: string; pushToken: string; cursor?: number }): Promise<void>; stop(): Promise<void> }>('RmdexBackgroundService')
 let appUrlListener: { remove: () => Promise<void> } | undefined
 const threads = ref<Thread[]>([])
 const employees = ref<Employee[]>([])
@@ -194,6 +194,7 @@ let appStateListener: { remove: () => Promise<void> } | undefined
 let notificationListener: { remove: () => Promise<void> } | undefined
 let appActive = true
 let notificationSetupPromise: Promise<boolean> | undefined
+let backgroundNotificationSetupPromise: Promise<void> | undefined
 const trackedTasks = new Map<string, { turnId: string; text: string; name: string }>()
 const cacheHydratedKeys = new Set<string>()
 const threadListCache = new Map<string, { savedAt: number; data: Thread[] }>()
@@ -375,7 +376,10 @@ async function setupNotifications(): Promise<boolean> {
       })
       appStateListener = await NativeApp.addListener('appStateChange', ({ isActive }) => {
         appActive = isActive
-        if (isActive) void updateThread()
+        if (isActive) {
+          void updateThread()
+          void setupBackgroundNotifications()
+        }
       })
       return true
     } catch { /* Notifications are optional on devices that deny permission. */ return false }
@@ -396,16 +400,34 @@ function installationId() {
 }
 async function setupBackgroundNotifications() {
   if (!Capacitor.isNativePlatform() || !clientToken.value) return
+  if (backgroundNotificationSetupPromise) return backgroundNotificationSetupPromise
+  const setup = (async () => {
+    try {
+      if (!await setupNotifications()) return
+      let pushToken = localStorage.getItem('rmdex-background-push-token') || ''
+      let cursor: number | undefined
+      if (pushToken) {
+        const response = await fetch(apiUrl('/api/push/status'), { headers: { Authorization: `Bearer ${pushToken}` } })
+        if (!response.ok) {
+          pushToken = ''
+          localStorage.removeItem('rmdex-background-push-token')
+        }
+      }
+      if (!pushToken) {
+        const result = await post('/api/push/register', { installationId: installationId(), clientName: 'rmdex Android' }) as { pushToken: string; cursor?: number }
+        pushToken = result.pushToken
+        cursor = Number.isFinite(result.cursor) ? result.cursor : undefined
+        localStorage.setItem('rmdex-background-push-token', pushToken)
+      }
+      await RmdexBackgroundService.start({ relayUrl: apiBase, pushToken, ...(cursor === undefined ? {} : { cursor }) })
+    } catch { /* The foreground service is optional on web and older Android installs. */ }
+  })()
+  backgroundNotificationSetupPromise = setup
   try {
-    if (!await setupNotifications()) return
-    let pushToken = localStorage.getItem('rmdex-background-push-token') || ''
-    if (!pushToken) {
-      const result = await post('/api/push/register', { installationId: installationId(), clientName: 'rmdex Android' }) as { pushToken: string }
-      pushToken = result.pushToken
-      localStorage.setItem('rmdex-background-push-token', pushToken)
-    }
-    await RmdexBackgroundService.start({ relayUrl: apiBase, pushToken })
-  } catch { /* The foreground service is optional on web and older Android installs. */ }
+    await setup
+  } finally {
+    if (backgroundNotificationSetupPromise === setup) backgroundNotificationSetupPromise = undefined
+  }
 }
 function stopBackgroundNotifications() {
   if (Capacitor.isNativePlatform()) void RmdexBackgroundService.stop().catch(() => {})

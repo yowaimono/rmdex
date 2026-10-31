@@ -32,6 +32,7 @@ const json = (data: unknown, token?: string): RequestInit => ({ method: 'POST', 
 let ws: WebSocket | undefined
 let agent: ReturnType<typeof spawn> | undefined
 let forwardedBody: Record<string, unknown> | undefined
+let holdNotificationWatcher = false
 const fakeAgent = createServer(async (req, res) => {
   if (req.url?.startsWith('/api/images/')) { res.setHeader('Content-Type', 'image/png'); res.end(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])); return }
   let raw = ''
@@ -40,8 +41,15 @@ const fakeAgent = createServer(async (req, res) => {
   res.setHeader('Content-Type', 'application/json')
   if (req.url === '/api/threads' && req.method === 'POST') { res.end(JSON.stringify({ thread: { id: 'employee-test-thread' } })); return }
   if (req.url === '/api/models') { res.end(JSON.stringify({ data: [{ id: 'dynamic-model', displayName: 'Dynamic Model' }] })); return }
-  if (req.url?.endsWith('/send')) { res.end(JSON.stringify({ turn: { id: 'completed-turn' }, path: req.url })); return }
-  if (req.url?.endsWith('/status')) { res.end(JSON.stringify({ activeTurnId: null, lastTurn: { id: 'completed-turn', status: 'completed' }, path: req.url })); return }
+  if (req.url?.endsWith('/send')) {
+    const turnId = forwardedBody?.text === 'hold notification watcher' ? 'held-turn' : 'completed-turn'
+    res.end(JSON.stringify({ turn: { id: turnId }, path: req.url })); return
+  }
+  if (req.url?.endsWith('/status')) {
+    const heldTurn = forwardedBody?.text === 'hold notification watcher'
+    const held = holdNotificationWatcher && heldTurn
+    res.end(JSON.stringify({ activeTurnId: held ? 'held-turn' : null, lastTurn: { id: heldTurn ? 'held-turn' : 'completed-turn', status: held ? 'inProgress' : 'completed' }, path: req.url })); return
+  }
   res.end(JSON.stringify({ data: [{ id: 'local-agent-test' }], path: req.url }))
 })
 try {
@@ -113,6 +121,8 @@ try {
   const pushRegistration = await request('/api/push/register', { ...json({ installationId: 'test-installation-1234' }), headers: { ...headers, 'Content-Type': 'application/json' } })
   assert.equal(pushRegistration.status, 200)
   assert.ok(pushRegistration.data.pushToken)
+  assert.equal(pushRegistration.data.cursor, 0)
+  assert.equal((await request('/api/push/status', { headers: { Authorization: `Bearer ${pushRegistration.data.pushToken}` } })).status, 200)
   assert.equal((await request(`/api/notifications/poll?wait=0&after=0`, { headers: { Authorization: `Bearer ${pushRegistration.data.pushToken}` } })).status, 200)
   assert.equal((await request('/api/devices', { headers })).status, 401)
   assert.equal((await request('/api/client', { headers })).data.device.online, true)
@@ -183,6 +193,18 @@ try {
   assert.equal((await request(`/api/notifications/poll?wait=0&after=${notifications.data.cursor}`, { headers: { Authorization: `Bearer ${pushRegistration2.data.pushToken}` } })).data.data.length, 0)
   assert.equal(forwardedBody?.model, 'dynamic-model')
   assert.equal(forwardedBody?.effort, 'high')
+  holdNotificationWatcher = true
+  const heldSend = await request('/api/threads/local-agent-test/send', { ...json({ text: 'hold notification watcher' }), headers: { ...headers2, 'Content-Type': 'application/json' } })
+  assert.equal(heldSend.status, 200)
+  const savedState = JSON.parse(await readFile(statePath, 'utf8')) as { notificationWatches?: Array<{ threadId: string; turnId: string }> }
+  assert.ok(savedState.notificationWatches?.some(item => item.threadId === 'local-agent-test' && item.turnId === 'held-turn'))
+  holdNotificationWatcher = false
+  const heldWaiting = request(`/api/notifications/poll?wait=10000&after=${notifications.data.cursor}`, { headers: { Authorization: `Bearer ${pushRegistration2.data.pushToken}` } })
+  const heldNotification = await heldWaiting
+  assert.equal(heldNotification.status, 200)
+  assert.equal(heldNotification.data.data.filter((event: { turnId: string }) => event.turnId === 'held-turn').length, 1)
+  const afterHeld = heldNotification.data.cursor
+  assert.equal((await request(`/api/notifications/poll?wait=0&after=${afterHeld}`, { headers: { Authorization: `Bearer ${pushRegistration2.data.pushToken}` } })).data.data.length, 0)
   const retryRequest = { turnId: 'source-turn', operationId: crypto.randomUUID(), permissionMode: 'ask' }
   const forwardedRetry = await request('/api/threads/local-agent-test/retry', json(retryRequest, client2))
   assert.equal(forwardedRetry.status, 200)
