@@ -1,5 +1,6 @@
 import { setTimeout as delay } from 'node:timers/promises'
 import WebSocket from 'ws'
+import { installEmployeeSkill, prepareEmployeeAssets } from './employee-assets.ts'
 
 const relayUrl = process.env.RMDEX_RELAY_URL
 const deviceToken = process.env.RMDEX_DEVICE_TOKEN
@@ -18,8 +19,21 @@ if (relayUrl && deviceToken) {
           socket!.on('message', async raw => {
             try {
               const message = JSON.parse(raw.toString()) as Record<string, unknown>
-              if (message.type === 'ready') { clearTimeout(timeout); resolve(); return }
+              if (message.type === 'ready') {
+                const skill = typeof message.employeeSkill === 'string' ? message.employeeSkill : undefined
+                await installEmployeeSkill(undefined, skill).catch(error => console.error('[rmdex] Employee skill installation failed:', error.message))
+                clearTimeout(timeout); resolve(); return
+              }
               if (message.type !== 'request' || typeof message.id !== 'string' || typeof message.path !== 'string' || !['GET', 'POST', 'DELETE'].includes(String(message.method))) return
+              if (message.method === 'POST' && message.path === '/api/employee-assets/prepare') {
+                try {
+                  const result = await prepareEmployeeAssets((message.data || {}) as Parameters<typeof prepareEmployeeAssets>[0])
+                  socket?.send(JSON.stringify({ type: 'response', id: message.id, result }))
+                } catch (error) {
+                  socket?.send(JSON.stringify({ type: 'response', id: message.id, error: error instanceof Error ? error.message : 'Employee assets could not be prepared' }))
+                }
+                return
+              }
               const isAttachmentUpload = message.method === 'POST' && message.path === '/api/attachments'
               const isProjectMutation = message.method === 'POST' && /^\/api\/projects(?:\/[a-zA-Z0-9-]+\/(?:update|delete))?$/.test(message.path)
               const allowed = isAttachmentUpload || isProjectMutation || (message.method === 'GET'

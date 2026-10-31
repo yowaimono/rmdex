@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -12,11 +12,14 @@ const port = 21976
 const origin = `http://127.0.0.1:${port}`
 const password = 'test-password-not-for-production'
 const statePath = join(dir, 'state.json')
+const skillPath = join(dir, 'distributed-skill.md')
+const distributedSkill = `${await readFile('server/skills/rmdex-employee/SKILL.md', 'utf8')}\n<!-- relay distribution test -->\n`
+await writeFile(skillPath, distributedSkill)
 const crypto = await import('node:crypto')
 const existingAdminPasswordHash = `sha256:${crypto.createHash('sha256').update(password).digest('hex')}`
 await writeFile(statePath, JSON.stringify({ devices: [{ id: 'unowned-pc', name: 'Unowned PC', tokenHash: 'not-attached-to-a-user', createdAt: 1 }], clients: [], pairings: [], pairRequests: [], users: [{ id: 'existing-admin', username: 'admin', passwordHash: existingAdminPasswordHash, role: 'admin', createdAt: 1 }], sessions: [], pushTokens: [], notifications: [], employees: [] }))
 const child = spawn(process.execPath, ['--import', 'tsx', 'server/relay/index.ts'], {
-  env: { ...process.env, PORT: String(port), PUBLIC_ORIGIN: origin, RMDEX_STATE: statePath, RMDEX_ADMIN_HASH: crypto.createHash('sha256').update(password).digest('hex') },
+  env: { ...process.env, PORT: String(port), PUBLIC_ORIGIN: origin, RMDEX_STATE: statePath, RMDEX_EMPLOYEE_SKILL: skillPath, RMDEX_ADMIN_HASH: crypto.createHash('sha256').update(password).digest('hex') },
   stdio: ['ignore', 'ignore', 'pipe'],
 })
 let errors = ''
@@ -35,6 +38,7 @@ const fakeAgent = createServer(async (req, res) => {
   for await (const chunk of req) raw += String(chunk)
   if (raw) forwardedBody = JSON.parse(raw) as Record<string, unknown>
   res.setHeader('Content-Type', 'application/json')
+  if (req.url === '/api/threads' && req.method === 'POST') { res.end(JSON.stringify({ thread: { id: 'employee-test-thread' } })); return }
   if (req.url === '/api/models') { res.end(JSON.stringify({ data: [{ id: 'dynamic-model', displayName: 'Dynamic Model' }] })); return }
   if (req.url?.endsWith('/send')) { res.end(JSON.stringify({ turn: { id: 'completed-turn' }, path: req.url })); return }
   if (req.url?.endsWith('/status')) { res.end(JSON.stringify({ activeTurnId: null, lastTurn: { id: 'completed-turn', status: 'completed' }, path: req.url })); return }
@@ -122,7 +126,7 @@ try {
   assert.ok(address && typeof address !== 'string')
   const device2 = (await request('/api/devices', json({ name: 'Real outbound agent', userId: 'existing-admin' }, admin))).data
   agent = spawn(process.execPath, ['--import', 'tsx', 'server/remote-agent.ts'], {
-    env: { ...process.env, RMDEX_RELAY_URL: `ws://127.0.0.1:${port}/agent`, RMDEX_DEVICE_TOKEN: device2.token, RMDEX_AGENT_PORT: String(address.port) },
+    env: { ...process.env, CODEX_HOME: dir, RMDEX_RELAY_URL: `ws://127.0.0.1:${port}/agent`, RMDEX_DEVICE_TOKEN: device2.token, RMDEX_AGENT_PORT: String(address.port) },
     stdio: ['ignore', 'ignore', 'pipe'],
   })
   const pair2 = (await request(`/api/devices/${device2.id}/pair`, json({}, admin))).data
@@ -135,13 +139,30 @@ try {
     await delay(100)
     if (i === 49) throw new Error('Outbound agent did not connect')
   }
+  for (let i = 0; i < 50; i++) {
+    const installed = await readFile(join(dir, 'skills', 'rmdex-employee', 'SKILL.md'), 'utf8').catch(() => '')
+    if (installed === distributedSkill) break
+    await delay(100)
+    if (i === 49) throw new Error('Distributed employee skill was not installed')
+  }
+  const employeeCreated = await request('/api/employees', json({ name: 'Test employee', role: 'Tester', instructions: 'Check the project', projectPath: dir }, client2))
+  assert.equal(employeeCreated.status, 201)
+  const employee = employeeCreated.data.employee
+  const employeeThread = await request(`/api/employees/${employee.id}/ensure-thread`, json({}, client2))
+  assert.equal(employeeThread.status, 200)
+  assert.equal((await request(`/api/threads/${employeeThread.data.thread.id}/send`, json({ text: 'Begin', employeeId: employee.id }, client2))).status, 200)
+  assert.match(String(forwardedBody?.text), /rmdex-employee/)
+  const employeeAssets = join(dir, 'rmdex', 'employees', 'existing-admin', employee.id)
+  await writeFile(join(employeeAssets, 'memories', '2026-01-01-test.md'), 'remember this')
+  assert.equal(await readFile(join(employeeAssets, 'memories', '2026-01-01-test.md'), 'utf8'), 'remember this')
+  assert.equal(await readFile(join(dir, 'skills', 'rmdex-employee', 'SKILL.md'), 'utf8'), distributedSkill)
   const forwarded = await request('/api/threads', { headers: headers2 })
   assert.equal(forwarded.status, 200)
   assert.equal(forwarded.data.data[0].id, 'local-agent-test')
   assert.equal(forwarded.data.path, '/api/threads')
   const pushRegistration2 = await request('/api/push/register', { ...json({ installationId: 'test-installation-5678' }), headers: { ...headers2, 'Content-Type': 'application/json' } })
   assert.equal(pushRegistration2.status, 200)
-  const waitingNotifications = request('/api/notifications/poll?wait=10000&after=0', { headers: { Authorization: `Bearer ${pushRegistration2.data.pushToken}` } })
+  const waitingNotifications = request(`/api/notifications/poll?wait=10000&after=${Date.now()}`, { headers: { Authorization: `Bearer ${pushRegistration2.data.pushToken}` } })
   const models = await request('/api/models', { headers: headers2 })
   assert.equal(models.status, 200)
   assert.equal(models.data.data[0].id, 'dynamic-model')
@@ -156,8 +177,8 @@ try {
   assert.equal(sent.status, 200)
   const notifications = await waitingNotifications
   assert.equal(notifications.status, 200)
-  assert.equal(notifications.data.data[0].threadId, 'local-agent-test')
-  assert.equal(notifications.data.data[0].turnId, 'completed-turn')
+  const forwardedNotification = notifications.data.data.find((event: { threadId: string }) => event.threadId === 'local-agent-test')
+  assert.equal(forwardedNotification?.turnId, 'completed-turn')
   assert.ok(notifications.data.cursor > 0)
   assert.equal((await request(`/api/notifications/poll?wait=0&after=${notifications.data.cursor}`, { headers: { Authorization: `Bearer ${pushRegistration2.data.pushToken}` } })).data.data.length, 0)
   assert.equal(forwardedBody?.model, 'dynamic-model')

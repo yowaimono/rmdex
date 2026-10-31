@@ -12,6 +12,7 @@ COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /build/dist ./web
 COPY --from=build /build/dist-relay/index.js ./relay/index.js
+COPY --from=build /build/server/skills/rmdex-employee/SKILL.md ./server/skills/rmdex-employee/SKILL.md
 EXPOSE 8787
 USER node
 CMD ["node", "relay/index.js"]

@@ -49,6 +49,7 @@ internal sealed class Dashboard : Form {
     }
     public Dashboard() {
         Text = "rmdex PC";
+        Icon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath);
         var area = Screen.PrimaryScreen.WorkingArea;
         Width = Math.Min(720, area.Width); Height = Math.Min(960, area.Height);
         MinimumSize = new Size(Math.Min(600, area.Width), Math.Min(480, area.Height));

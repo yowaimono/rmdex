@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { test } from 'node:test'
 import WebSocket from 'ws'
+import { prepareEmployeeAssets } from '../employee-assets.ts'
 
 function sha256(value) { return createHash('sha256').update(value).digest('hex') }
 async function freePort() {
@@ -75,12 +76,14 @@ test('relay isolates users across devices, pairings, and employees', { timeout: 
     await new Promise((resolve, reject) => { employeeWs.once('open', resolve); employeeWs.once('error', reject) })
     const agentRequests = []
     let createdThreadCount = 0
-    employeeWs.on('message', raw => {
+    employeeWs.on('message', async raw => {
       const message = JSON.parse(String(raw))
       if (message.type !== 'request') return
       agentRequests.push(message)
       let result = { ok: true }
-      if (message.path === '/api/threads' && message.method === 'POST') {
+      if (message.path === '/api/employee-assets/prepare') {
+        result = await prepareEmployeeAssets(message.data, join(dir, 'device-b-codex'))
+      } else if (message.path === '/api/threads' && message.method === 'POST') {
         createdThreadCount += 1
         result = { thread: { id: `employee-thread-${createdThreadCount}`, cwd: message.data.cwd, name: 'Regression Worker' } }
       } else if (message.path.endsWith('/send')) result = { turn: { id: `employee-turn-${agentRequests.length}`, status: 'inProgress' } }
@@ -92,7 +95,7 @@ test('relay isolates users across devices, pairings, and employees', { timeout: 
     const userBClient = await request(origin, `/api/devices/${deviceB.data.id}/web-client`, json({}, accountB.accessToken))
     assert.equal(userBClient.status, 201)
     const employeeToken = userBClient.data.accessToken
-    const createdEmployee = await request(origin, '/api/employees', json({ name: 'Regression Worker', role: 'Runs tests', instructions: 'Always run the focused test suite first.', memory: 'The project uses npm run test:all.', projectPath: 'D:/WorkSpace/rmdex' }, employeeToken))
+    const createdEmployee = await request(origin, '/api/employees', json({ name: 'Regression Worker', role: 'Runs tests', instructions: 'Always run the focused test suite first.', projectPath: 'D:/WorkSpace/rmdex' }, employeeToken))
     assert.equal(createdEmployee.status, 201, JSON.stringify(createdEmployee.data))
     const employee = createdEmployee.data.employee
     assert.equal((await request(origin, '/api/employees', { headers: { Authorization: `Bearer ${accountA.accessToken}` } })).status, 401)
@@ -104,13 +107,32 @@ test('relay isolates users across devices, pairings, and employees', { timeout: 
     assert.equal(firstSend.status, 200)
     const firstForward = agentRequests.find(item => item.path.endsWith('/send'))
     assert.match(firstForward.data.text, /<rmdex_employee_context>/)
+    assert.match(firstForward.data.text, /rmdex-employee/)
+    const assetRequest = agentRequests.find(item => item.path === '/api/employee-assets/prepare')
+    assert.deepEqual(assetRequest.data, { userId: accountB.user.id, employeeId: employee.id })
+    const assetPath = join(dir, 'device-b-codex', 'rmdex', 'employees', accountB.user.id, employee.id)
+    assert.match(await readFile(join(dir, 'device-b-codex', 'skills', 'rmdex-employee', 'SKILL.md'), 'utf8'), /name: rmdex-employee/)
+    await writeFile(join(assetPath, 'memories', '2026-01-01-test.md'), 'Employee-owned memory')
     const secondSend = await request(origin, `/api/threads/${ensured.data.thread.id}/send`, json({ text: 'Continue', employeeId: employee.id, name: 'Regression Worker', permissionMode: 'ask' }, employeeToken))
     assert.equal(secondSend.status, 200)
     const sends = agentRequests.filter(item => item.path.endsWith('/send'))
     assert.doesNotMatch(sends[1].data.text, /<rmdex_employee_context>/)
+    const edited = await request(origin, `/api/employees/${employee.id}/update`, json({ name: 'Senior Tester', role: 'Senior reviewer' }, employeeToken))
+    assert.equal(edited.status, 200)
+    assert.equal((await request(origin, `/api/threads/${ensured.data.thread.id}/send`, json({ text: 'Continue as updated', employeeId: employee.id }, employeeToken))).status, 200)
+    assert.match(agentRequests.filter(item => item.path.endsWith('/send')).at(-1).data.text, /Senior reviewer/)
     const reset = await request(origin, `/api/employees/${employee.id}/reset-thread`, json({}, employeeToken))
     assert.equal(reset.status, 200)
     assert.equal(reset.data.thread.id, 'employee-thread-2')
+    assert.equal((await request(origin, `/api/threads/${reset.data.thread.id}/send`, json({ text: 'Resume', employeeId: employee.id }, employeeToken))).status, 200)
+    assert.equal(agentRequests.filter(item => item.path === '/api/employee-assets/prepare').length, 4)
+    assert.equal(await readFile(join(assetPath, 'memories', '2026-01-01-test.md'), 'utf8'), 'Employee-owned memory')
+    assert.equal((await request(origin, '/api/threads/other-thread/send', json({ text: 'Wrong thread', employeeId: employee.id }, employeeToken))).status, 403)
+    const secondEmployee = await request(origin, '/api/employees', json({ name: 'Image reviewer', projectPath: 'D:/WorkSpace/rmdex' }, employeeToken))
+    const secondThread = await request(origin, `/api/employees/${secondEmployee.data.employee.id}/ensure-thread`, json({}, employeeToken))
+    const attachmentOnly = await request(origin, `/api/threads/${secondThread.data.thread.id}/send`, json({ attachments: ['image'], employeeId: secondEmployee.data.employee.id }, employeeToken))
+    assert.equal(attachmentOnly.status, 200)
+    assert.match(agentRequests.filter(item => item.path.endsWith('/send')).at(-1).data.text, /rmdex-employee/)
 
     const pair = await request(origin, `/api/devices/${deviceB.data.id}/pair`, json({}, accountB.accessToken))
     assert.equal(pair.status, 200)

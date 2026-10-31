@@ -1,18 +1,26 @@
-﻿$ErrorActionPreference = 'Stop'
+﻿param(
+  [string]$WorkDirectory = '',
+  [string]$OutputDirectory = '',
+  [string]$WindowDirectory = ''
+)
+
+$ErrorActionPreference = 'Stop'
 $project = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $version = '0.2.0'
-$work = Join-Path $project 'work\pc-msi'
+$work = if ($WorkDirectory) { $WorkDirectory } else { Join-Path $project 'work\pc-msi' }
 $stage = Join-Path $work 'payload'
 $wix = 'D:\WorkSpace\frametell\node_modules\.pnpm\electron-winstaller@5.4.0\node_modules\electron-winstaller\vendor'
 $candle = Join-Path $wix 'candle.exe'
 $light = Join-Path $wix 'light.exe'
-$outDir = Join-Path $project 'artifacts'
+$outDir = if ($OutputDirectory) { $OutputDirectory } else { Join-Path $project 'artifacts' }
+$windowDir = if ($WindowDirectory) { $WindowDirectory } else { Join-Path $project 'work\pc-webview-compact' }
 $msi = Join-Path $outDir "rmdex-pc-$version-win-x64.msi"
 
 if (-not (Test-Path -LiteralPath $candle) -or -not (Test-Path -LiteralPath $light)) { throw 'WiX candle.exe/light.exe not found.' }
 if (-not (Test-Path -LiteralPath (Join-Path $project 'dist-pc\index.html'))) { throw 'dist-pc is missing; run npm run pc:build first.' }
 
-Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+if ($WorkDirectory -and (Test-Path -LiteralPath $work)) { throw 'Custom work directory must not already exist.' }
+if (-not $WorkDirectory) { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
 New-Item -ItemType Directory -Force -Path $stage,$outDir | Out-Null
 
 Copy-Item -LiteralPath (Join-Path $project 'dist-pc') -Destination $stage -Recurse -Force
@@ -22,28 +30,18 @@ Copy-Item -LiteralPath (Join-Path $project 'src') -Destination $stage -Recurse -
 New-Item -ItemType Directory -Force -Path (Join-Path $stage 'scripts') | Out-Null
 Copy-Item -LiteralPath (Join-Path $project 'scripts\\start-shared-desktop.ts') -Destination (Join-Path $stage 'scripts') -Force
 New-Item -ItemType Directory -Force -Path (Join-Path $stage 'node_modules') | Out-Null
-& robocopy.exe (Join-Path $project 'node_modules') (Join-Path $stage 'node_modules') /E /XD (Join-Path $project 'node_modules\.cache') (Join-Path $project 'node_modules\.vite') (Join-Path $project 'node_modules\@capacitor\android\android') /NFL /NDL /NJH /NJS /NP | Out-Null
+& robocopy.exe (Join-Path $project 'node_modules') (Join-Path $stage 'node_modules') /E /XD .gradle .vite .cache (Join-Path $project 'node_modules\@capacitor\android\android') (Join-Path $project 'node_modules\@capacitor\android\capacitor\build') (Join-Path $project 'node_modules\@capacitor\app\android\build') (Join-Path $project 'node_modules\@capacitor\barcode-scanner\android\build') (Join-Path $project 'node_modules\@capacitor\local-notifications\android\build') /NFL /NDL /NJH /NJS /NP | Out-Null
 if ($LASTEXITCODE -gt 7) { throw 'Failed to copy node_modules.' }
 Copy-Item -LiteralPath (Join-Path $project 'package.json') -Destination $stage -Force
 Copy-Item -LiteralPath (Join-Path $project 'package-lock.json') -Destination $stage -Force -ErrorAction SilentlyContinue
-foreach ($secretName in @('.device-token', '.web-client-token')) {
-  $secretPath = Join-Path $project $secretName
-  if (Test-Path -LiteralPath $secretPath) { Copy-Item -LiteralPath $secretPath -Destination $stage -Force }
-}
-Copy-Item -LiteralPath (Join-Path $project 'work\pc-webview-compact\rmdex-pc-3x4.exe') -Destination $stage -Force
-Copy-Item -LiteralPath (Join-Path $project 'work\pc-webview-compact\Microsoft.Web.WebView2.Core.dll'),(Join-Path $project 'work\pc-webview-compact\Microsoft.Web.WebView2.WinForms.dll'),(Join-Path $project 'work\pc-webview-compact\WebView2Loader.dll') -Destination $stage -Force
+Copy-Item -LiteralPath (Join-Path $windowDir 'rmdex-pc-3x4.exe') -Destination $stage -Force
+Copy-Item -LiteralPath (Join-Path $windowDir 'Microsoft.Web.WebView2.Core.dll'),(Join-Path $windowDir 'Microsoft.Web.WebView2.WinForms.dll'),(Join-Path $windowDir 'WebView2Loader.dll') -Destination $stage -Force
 
 $runtime = Join-Path $stage 'runtime'
 New-Item -ItemType Directory -Force -Path $runtime | Out-Null
-Get-ChildItem -LiteralPath (Join-Path $stage 'node_modules') -Directory -Recurse | Where-Object { $_.Name -in @('build','.gradle','.vite','.cache') } | Sort-Object FullName -Descending | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath (Join-Path $stage 'node_modules\@capacitor\android\capacitor\build') -Recurse -Force -ErrorAction SilentlyContinue
 Copy-Item -LiteralPath 'D:\bin\nodejs\node.exe' -Destination $runtime -Force
 
-# Android/Vite build outputs are not needed by the PC service and can contain
-# transient files that disappear while WiX is compiling the manifest.
-$files = Get-ChildItem -LiteralPath $stage -File -Recurse | Where-Object {
-  $_.FullName -notmatch '\\node_modules\\.*\\(?:build|\.gradle|\.vite|\.cache)(?:\\|$)'
-}
+$files = Get-ChildItem -LiteralPath $stage -File -Recurse
 $components = New-Object System.Text.StringBuilder
 $dirMap = @{ '' = 'INSTALLFOLDER' }
 $dirNames = @{ '' = '' }
@@ -94,6 +92,8 @@ $xml = @"
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Product Id="*" Name="rmdex PC" Language="2052" Codepage="65001" Version="$version" Manufacturer="rmdex" UpgradeCode="A0D8E5A2-2CB3-47C7-9A13-2B1D9B4B8A10">
     <Package InstallerVersion="300" Compressed="yes" InstallScope="perUser" Platform="x64" />
+    <Icon Id="RmdexIcon" SourceFile="$(Escape-Xml (Join-Path $project 'pc\windows\rmdex.ico'))" />
+    <Property Id="ARPPRODUCTICON" Value="RmdexIcon" />
     <MajorUpgrade DowngradeErrorMessage="已安装更高版本的 rmdex PC。" />
     <MediaTemplate EmbedCab="yes" />
     <Directory Id="TARGETDIR" Name="SourceDir">
@@ -105,8 +105,8 @@ $directoryXml
       <Directory Id="ProgramMenuFolder"><Directory Id="ApplicationProgramsFolder" Name="rmdex PC" /></Directory>
       <Directory Id="DesktopFolder" />
     </Directory>
-    <DirectoryRef Id="ApplicationProgramsFolder"><Component Id="ShortcutComponent" Guid="*"><Shortcut Id="StartMenuShortcut" Name="rmdex PC" Target="[INSTALLFOLDER]rmdex-pc-3x4.exe" WorkingDirectory="INSTALLFOLDER" /><RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" /><RegistryValue Root="HKCU" Key="Software\rmdex\rmdex-pc" Name="installed" Type="integer" Value="1" KeyPath="yes" /></Component></DirectoryRef>
-    <DirectoryRef Id="DesktopFolder"><Component Id="DesktopShortcutComponent" Guid="*"><Shortcut Id="DesktopShortcut" Name="rmdex PC" Target="[INSTALLFOLDER]rmdex-pc-3x4.exe" WorkingDirectory="INSTALLFOLDER" /><RegistryValue Root="HKCU" Key="Software\rmdex\rmdex-pc" Name="desktop" Type="integer" Value="1" KeyPath="yes" /></Component></DirectoryRef>
+    <DirectoryRef Id="ApplicationProgramsFolder"><Component Id="ShortcutComponent" Guid="*"><Shortcut Id="StartMenuShortcut" Name="rmdex PC" Target="[INSTALLFOLDER]rmdex-pc-3x4.exe" WorkingDirectory="INSTALLFOLDER" Icon="RmdexIcon" /><RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" /><RegistryValue Root="HKCU" Key="Software\rmdex\rmdex-pc" Name="installed" Type="integer" Value="1" KeyPath="yes" /></Component></DirectoryRef>
+    <DirectoryRef Id="DesktopFolder"><Component Id="DesktopShortcutComponent" Guid="*"><Shortcut Id="DesktopShortcut" Name="rmdex PC" Target="[INSTALLFOLDER]rmdex-pc-3x4.exe" WorkingDirectory="INSTALLFOLDER" Icon="RmdexIcon" /><RegistryValue Root="HKCU" Key="Software\rmdex\rmdex-pc" Name="desktop" Type="integer" Value="1" KeyPath="yes" /></Component></DirectoryRef>
     <Feature Id="MainFeature" Title="rmdex PC" Level="1"><ComponentGroupRef Id="Files" /><ComponentRef Id="ShortcutComponent" /><ComponentRef Id="DesktopShortcutComponent" /></Feature>
   </Product>
   <Fragment><ComponentGroup Id="Files">$components</ComponentGroup></Fragment>

@@ -154,6 +154,11 @@ Server HTTP reachability and paired client activity; supports start, stop, resta
 default permission modes `ask`, `auto`, and `full`. Explicit per-turn permissions from Web, Android, MCP, or Desktop are not overridden; the setting is not a global Desktop policy. Client activity is inferred from recent HTTP requests, not a live connection guarantee. The equivalent Windows
 launcher is `scripts/start-rmdex-pc.ps1`.
 
+Android launcher assets and the Windows application icon are generated from
+`src/assets/rmdex-logo.jpg`. To regenerate them after changing the logo, run
+`python scripts/generate-icons.py` with Pillow installed. PC installers do not
+include local device credentials; each installation registers its own device.
+
 ## Projects and chats
 
 The session sidebar groups pinned chats at the top, then collapsible Projects,
@@ -185,6 +190,26 @@ user accounts from the device panel. Each user has an isolated device list,
 phone pairings, and AI employees; a user can register multiple computers with
 the same account. New rmdex-pc installs can register directly with the user
 account; existing/manual device-token setup remains supported.
+
+### AI employee assets
+
+Employee identity, role, instructions, device binding, and the current Codex
+thread are stored by the relay. The employee's memories and SOPs are Markdown
+files on the bound computer, under
+`%CODEX_HOME%/rmdex/employees/<user-id>/<employee-id>/memories` and `sops`
+(`~/.codex` is used when `CODEX_HOME` is unset). These files are not synchronized
+to the relay or to other computers. Resetting a thread leaves them untouched.
+
+The relay distributes the `rmdex-employee` skill to updated computer agents
+on connection. The computer agent installs it under `CODEX_HOME/skills`, and
+the employee's initial thread context tells Codex where to read the skill and
+find its assets. Codex searches and maintains those files itself; permission to
+write outside the project depends on the selected sandbox and approval mode.
+Existing installations need the updated rmdex-pc agent to receive the skill;
+offline devices receive it when they next connect. If a user-managed skill with
+the same name already exists, rmdex leaves it untouched and reports the conflict
+when preparing the employee. The relay needs `server/skills/rmdex-employee/SKILL.md`
+in its working directory, or `RMDEX_EMPLOYEE_SKILL` set to that file's path.
 
 Android background notifications do not use Firebase. The relay stores task
 completion events and exposes an authenticated long-poll endpoint. The Android

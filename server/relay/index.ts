@@ -11,7 +11,7 @@ type User = { id: string; username: string; passwordHash: string; role: 'admin' 
 type AuthSession = { id: string; familyId: string; userId: string; deviceId?: string; name?: string; accessHash: string; accessExpiresAt: number; refreshHash: string; refreshExpiresAt: number; usedRefreshHashes?: string[]; createdAt: number; lastSeenAt?: number; revoked?: boolean }
 type PushToken = { tokenHash: string; deviceId: string; installationId: string; platform: 'android'; clientName?: string; createdAt: number; lastSeenAt: number }
 type NotificationEvent = { id: string; deviceId: string; threadId: string; turnId: string; status: string; title: string; body: string; createdAt: number }
-type Employee = { id: string; userId: string; name: string; role: string; instructions: string; memory: string; deviceId: string; projectPath: string; threadId?: string; initializedThreadId?: string; createdAt: number; updatedAt: number; archived?: boolean }
+type Employee = { id: string; userId: string; name: string; role: string; instructions: string; legacyMemory?: string; deviceId: string; projectPath: string; threadId?: string; initializedThreadId?: string; assetContextVersion?: number; createdAt: number; updatedAt: number; archived?: boolean }
 type Pairing = { codeHash: string; deviceId: string; userId: string; expiresAt: number }
 type PairRequest = { id: string; deviceId: string; userId: string; name: string; createdAt: number; expiresAt: number; status: 'pending' | 'approved' | 'denied'; token?: string }
 type State = { devices: Device[]; clients: Client[]; pairings: Pairing[]; pairRequests: PairRequest[]; users: User[]; sessions: AuthSession[]; pushTokens: PushToken[]; notifications: NotificationEvent[]; employees: Employee[] }
@@ -25,6 +25,7 @@ const adminUsername = (process.env.RMDEX_ADMIN_USERNAME || 'admin').trim().slice
 const adminPassword = process.env.RMDEX_ADMIN_PASSWORD || ''
 const statePath = process.env.RMDEX_STATE || '/data/state.json'
 const webRoot = process.env.RMDEX_WEB_ROOT || '/app/web'
+const employeeSkill = await readFile(process.env.RMDEX_EMPLOYEE_SKILL || join(process.cwd(), 'server', 'skills', 'rmdex-employee', 'SKILL.md'), 'utf8')
 const state: State = { devices: [], clients: [], pairings: [], pairRequests: [], users: [], sessions: [], pushTokens: [], notifications: [], employees: [] }
 const approvedPairTokens = new Map<string, Credentials>()
 const deviceSockets = new Map<string, WebSocket>()
@@ -141,7 +142,7 @@ async function load() {
     }) : []
     state.notifications = Array.isArray(saved.notifications) ? saved.notifications.filter(item => item && typeof item.deviceId === 'string' && typeof item.threadId === 'string') : []
     state.employees = Array.isArray(saved.employees) ? saved.employees.filter(item => item && typeof item.id === 'string' && typeof item.userId === 'string' && typeof item.name === 'string' && typeof item.deviceId === 'string' && typeof item.projectPath === 'string' && state.users.some(user => user.id === item.userId)).map(item => ({
-      id: item.id, userId: item.userId, name: item.name, role: typeof item.role === 'string' ? item.role : '', instructions: typeof item.instructions === 'string' ? item.instructions : '', memory: typeof item.memory === 'string' ? item.memory : '', deviceId: item.deviceId, projectPath: item.projectPath, ...(typeof item.threadId === 'string' ? { threadId: item.threadId } : {}), ...(typeof item.initializedThreadId === 'string' ? { initializedThreadId: item.initializedThreadId } : {}), createdAt: Number(item.createdAt) || Date.now(), updatedAt: Number(item.updatedAt) || Date.now(), ...(item.archived ? { archived: true } : {}),
+      id: item.id, userId: item.userId, name: item.name, role: typeof item.role === 'string' ? item.role : '', instructions: typeof item.instructions === 'string' ? item.instructions : '', ...(typeof item.legacyMemory === 'string' && item.legacyMemory.trim() ? { legacyMemory: item.legacyMemory } : typeof item.memory === 'string' && item.memory.trim() ? { legacyMemory: item.memory } : {}), deviceId: item.deviceId, projectPath: item.projectPath, ...(typeof item.threadId === 'string' ? { threadId: item.threadId } : {}), ...(item.assetContextVersion === 1 && typeof item.initializedThreadId === 'string' ? { initializedThreadId: item.initializedThreadId, assetContextVersion: 1 } : {}), createdAt: Number(item.createdAt) || Date.now(), updatedAt: Number(item.updatedAt) || Date.now(), ...(item.archived ? { archived: true } : {}),
     })) : []
     state.pairings = Array.isArray(saved.pairings) ? saved.pairings.filter(pair => pair && pair.expiresAt > Date.now() && typeof pair.codeHash === 'string' && typeof pair.deviceId === 'string' && typeof pair.userId === 'string' && state.users.some(user => user.id === pair.userId)).map(pair => ({ codeHash: pair.codeHash, deviceId: pair.deviceId, userId: pair.userId, expiresAt: pair.expiresAt })) : []
     state.pairRequests = Array.isArray(saved.pairRequests) ? saved.pairRequests.filter(pair => pair && pair.expiresAt > Date.now() && pair.status === 'pending' && typeof pair.id === 'string' && typeof pair.deviceId === 'string' && typeof pair.userId === 'string' && typeof pair.name === 'string' && state.users.some(user => user.id === pair.userId)).map(pair => ({ id: pair.id, deviceId: pair.deviceId, userId: pair.userId, name: pair.name, createdAt: pair.createdAt, expiresAt: pair.expiresAt, status: pair.status })) : []
@@ -201,17 +202,19 @@ function deviceForUser(deviceId: string, userId: string) {
   return state.devices.find(item => !item.revoked && item.id === deviceId && item.userId === userId)
 }
 function employeeView(employee: Employee) {
-  return { ...employee }
+  const { legacyMemory: _legacyMemory, ...view } = employee
+  return view
 }
-function employeeContext(employee: Employee) {
+function employeeContext(employee: Employee, assets: { assetPath: string; skillPath: string }) {
   return [
     '<rmdex_employee_context>',
     `Employee name: ${employee.name}`,
     `Role: ${employee.role || 'AI work employee'}`,
     'Instructions:',
     employee.instructions || '(Follow the user request carefully and report concrete results.)',
-    'Long-term memory:',
-    employee.memory || '(No durable memory has been recorded yet.)',
+    `Employee asset directory: ${JSON.stringify(assets.assetPath)}`,
+    `Use the rmdex-employee skill. Read and follow its instructions at: ${JSON.stringify(assets.skillPath)}`,
+    'Search and maintain this employee\'s local memories and SOPs as the skill instructs.',
     '</rmdex_employee_context>',
     '<rmdex_user_request>',
   ].join('\n')
@@ -526,13 +529,12 @@ const server = createServer(async (req, res) => {
       const name = typeof data.name === 'string' ? data.name.trim().slice(0, 80) : ''
       const role = typeof data.role === 'string' ? data.role.trim().slice(0, 120) : ''
       const instructions = typeof data.instructions === 'string' ? data.instructions.trim().slice(0, 12_000) : ''
-      const memory = typeof data.memory === 'string' ? data.memory.trim().slice(0, 20_000) : ''
       const projectPath = typeof data.projectPath === 'string' ? data.projectPath.trim().slice(0, 1000) : ''
       const deviceId = typeof data.deviceId === 'string' ? data.deviceId : device.id
       if (!name || !projectPath || !deviceForUser(deviceId, userId)) { json(res, 400, { error: '请填写员工名称、Project 路径，并选择本用户的设备' }); return }
       if (state.employees.some(item => !item.archived && item.userId === userId && item.name.toLowerCase() === name.toLowerCase())) { json(res, 409, { error: '员工名称已存在' }); return }
       const now = Date.now()
-      const employee: Employee = { id: randomToken(12), userId, name, role, instructions, memory, deviceId, projectPath, createdAt: now, updatedAt: now }
+      const employee: Employee = { id: randomToken(12), userId, name, role, instructions, deviceId, projectPath, createdAt: now, updatedAt: now }
       state.employees.push(employee)
       await persist()
       json(res, 201, { employee: employeeView(employee) }); return
@@ -547,14 +549,13 @@ const server = createServer(async (req, res) => {
         const nextName = typeof data.name === 'string' ? data.name.trim().slice(0, 80) : employee.name
         const nextRole = typeof data.role === 'string' ? data.role.trim().slice(0, 120) : employee.role
         const nextInstructions = typeof data.instructions === 'string' ? data.instructions.trim().slice(0, 12_000) : employee.instructions
-        const nextMemory = typeof data.memory === 'string' ? data.memory.trim().slice(0, 20_000) : employee.memory
         const nextPath = typeof data.projectPath === 'string' ? data.projectPath.trim().slice(0, 1000) : employee.projectPath
         const nextDeviceId = typeof data.deviceId === 'string' ? data.deviceId : employee.deviceId
         if (!nextName || !nextPath || !deviceForUser(nextDeviceId, userId)) { json(res, 400, { error: '员工名称、Project 路径或设备无效' }); return }
         if (state.employees.some(item => !item.archived && item.id !== employee.id && item.userId === userId && item.name.toLowerCase() === nextName.toLowerCase())) { json(res, 409, { error: '员工名称已存在' }); return }
-        const contextChanged = nextInstructions !== employee.instructions || nextMemory !== employee.memory
+        const contextChanged = nextName !== employee.name || nextRole !== employee.role || nextInstructions !== employee.instructions
         const bindingChanged = nextPath !== employee.projectPath || nextDeviceId !== employee.deviceId
-        Object.assign(employee, { name: nextName, role: nextRole, instructions: nextInstructions, memory: nextMemory, projectPath: nextPath, deviceId: nextDeviceId, updatedAt: Date.now(), ...(contextChanged || bindingChanged ? { initializedThreadId: undefined } : {}), ...(bindingChanged ? { threadId: undefined } : {}) })
+        Object.assign(employee, { name: nextName, role: nextRole, instructions: nextInstructions, projectPath: nextPath, deviceId: nextDeviceId, updatedAt: Date.now(), ...(contextChanged || bindingChanged ? { initializedThreadId: undefined } : {}), ...(bindingChanged ? { threadId: undefined } : {}) })
         await persist()
         json(res, 200, { employee: employeeView(employee) }); return
       }
@@ -587,8 +588,12 @@ const server = createServer(async (req, res) => {
     const employee = employeeId ? employeeFor(employeeId, userId) : undefined
     const employeeNeedsContext = Boolean(employee && employee.threadId === url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/send$/)?.[1] && employee.initializedThreadId !== employee.threadId)
     if (employeeId && !employee) { json(res, 404, { error: '员工不存在' }); return }
-    if (employee && employeeNeedsContext && typeof requestData?.text === 'string') {
-      requestData = { ...requestData, text: `${employeeContext(employee)}\n${requestData.text}\n</rmdex_user_request>` }
+    if (employee && (employee.deviceId !== device.id || employee.threadId !== url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/(?:send|queue|steer)$/)?.[1])) { json(res, 403, { error: '员工与当前设备或会话不匹配' }); return }
+    if (employee && url.pathname.endsWith('/send')) {
+      const assets = await rpc(device.id, '/api/employee-assets/prepare', 'POST', { userId, employeeId: employee.id, ...(employee.legacyMemory ? { legacyMemory: employee.legacyMemory, legacyMemoryDate: new Date(employee.createdAt).toISOString().slice(0, 10) } : {}) }) as { assetPath?: unknown; skillPath?: unknown }
+      if (typeof assets?.assetPath !== 'string' || typeof assets.skillPath !== 'string') throw new Error('设备未能准备员工资产目录或 Skill')
+      if (employee.legacyMemory) { delete employee.legacyMemory; await persist() }
+      if (employeeNeedsContext) requestData = { ...requestData, text: `${employeeContext(employee, { assetPath: assets.assetPath, skillPath: assets.skillPath })}\n${typeof requestData?.text === 'string' ? requestData.text : ''}\n</rmdex_user_request>` }
     }
     if (requestData && 'employeeId' in requestData) {
       const forwarded = { ...requestData }
@@ -598,6 +603,7 @@ const server = createServer(async (req, res) => {
     const result = await rpc(device.id, url.pathname + url.search, req.method!, requestData)
     if (employee && employeeNeedsContext) {
       employee.initializedThreadId = employee.threadId
+      employee.assetContextVersion = 1
       employee.updatedAt = Date.now()
       await persist()
     }
@@ -641,7 +647,7 @@ sockets.on('connection', ws => {
         deviceSockets.set(device.id, ws)
         devicePending.set(device.id, new Map())
         clearTimeout(timer)
-        ws.send(JSON.stringify({ type: 'ready', deviceId }))
+        ws.send(JSON.stringify({ type: 'ready', deviceId, employeeSkill }))
         return
       }
       if (message.type === 'response' && typeof message.id === 'string') {

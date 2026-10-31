@@ -9,8 +9,10 @@ import { Duplex } from 'node:stream'
 import WebSocket from 'ws'
 import { AttachmentStore, attachmentInput } from './attachments.ts'
 import { ProjectStore } from './project-store.ts'
+import { installEmployeeSkill } from './employee-assets.ts'
 import './remote-agent.ts'
 
+await installEmployeeSkill().catch(error => console.error('[rmdex] Employee skill installation failed:', error.message))
 const requestedMode = (process.env.RMDEX_CODEX_MODE || '').trim().toLowerCase()
 const legacyDesktopMode = ['desktop-legacy', 'desktop-mcp'].includes(requestedMode)
 if (legacyDesktopMode) {
