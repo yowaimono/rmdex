@@ -212,6 +212,21 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .message--agent .message-body { width: 100%; }
 .message--user .message-body { max-width: 78%; display: flex; flex-direction: column; align-items: flex-end; }
 .message--user .message-text { padding: 11px 15px; border-radius: 8px; background: #f0f2f5; }
+.message-action-target { outline-offset: 4px; -webkit-touch-callout: none; }
+.message--failed .message-text { border: 1px solid #edd1cd; background: #fff5f3; }
+.message-send-error { display: flex; align-items: center; gap: 5px; max-width: 100%; margin-top: 7px; color: #b55d52; font-size: 12px; }
+.message-action-backdrop { position: fixed; z-index: 120; inset: 0; display: flex; align-items: center; justify-content: center; padding: 20px; background: rgba(24, 36, 50, .24); }
+.message-action-menu { width: min(300px, 100%); padding: 8px; border: 1px solid #e1e7ed; border-radius: 12px; background: #fff; box-shadow: 0 12px 40px rgba(35, 53, 75, .2); }
+.message-action-menu header { display: flex; align-items: center; justify-content: space-between; padding: 2px 5px 7px 10px; color: #7c8997; font-size: 12px; }
+.message-action-option { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 46px; padding: 10px 12px; border: 0; border-radius: 7px; color: #344252; background: transparent; text-align: left; font: inherit; font-size: 14px; }
+.message-action-option:hover, .message-action-option:focus-visible { color: #0879f9; background: #eef5fd; }
+.message-action-option:disabled { color: #a4adb7; background: transparent; cursor: default; }
+.message-action-menu p { margin: 4px 12px 10px; color: #8997a5; font-size: 12px; }
+@media (pointer: coarse) {
+  .message-action-target { -webkit-user-select: none; user-select: none; }
+  .message-action-backdrop { align-items: flex-end; padding-bottom: max(20px, env(safe-area-inset-bottom)); }
+  .message-action-menu { width: min(420px, 100%); }
+}
 .message-text { color: #344252; line-height: 1.75; white-space: pre-wrap; overflow-wrap: anywhere; }
 .markdown { white-space: normal; }
 .markdown > :first-child { margin-top: 0; }

@@ -9,11 +9,12 @@ import { Archive, ArrowLeft, ArrowUp, Bot, ChevronDown, ChevronRight, CircleAler
 import QRCode from 'qrcode'
 import logoUrl from './assets/rmdex-logo.jpg'
 import ToolEvent from './components/ToolEvent.vue'
+import MessageBubble from './components/MessageBubble.vue'
 import PermissionMenu from './components/PermissionMenu.vue'
 import ModelMenu, { type ModelOption } from './components/ModelMenu.vue'
 import ProjectMenu from './components/ProjectMenu.vue'
 import UserMenu from './components/UserMenu.vue'
-import { timeline, type ContentPart, type Turn } from './conversation'
+import { messageRequest, timeline, userText, type ContentPart, type MessageEntry, type Turn } from './conversation'
 import { loadThreadCache, queueThreadCacheWrite, removeThreadCache } from './thread-cache'
 
 type Thread = { id: string; name?: string | null; preview?: string; cwd?: string; updatedAt?: number; status?: { type: string }; turns?: Turn[]; employeeId?: string; desktopDraft?: { projectId: string | null; deviceKey: string; preparing?: boolean } }
@@ -148,6 +149,11 @@ const activeTurnId = ref<string | null>(null)
 const stopRequested = ref(false)
 const stopping = ref(false)
 const pendingMessages = ref<Record<string, { text: string; previousCount: number; attachmentNames?: string[] }>>({})
+type RetrySubmission = { threadId: string; deviceKey: string; text: string; files: File[]; failedId?: string }
+type FailedMessage = RetrySubmission & { id: string; previousTurnIds: string[]; error: string }
+const failedMessages = ref<Record<string, FailedMessage[]>>({})
+const retrying = ref(false)
+let fullAccessRetry: RetrySubmission | undefined
 type QueuedSubmission = { id: string; input?: Array<{ type?: string; text?: string }>; clientUserMessageId?: string }
 const queuedSubmissions = ref<QueuedSubmission[]>([])
 const queueActionId = ref<string | null>(null)
@@ -1180,7 +1186,9 @@ function confirmFullAccess() {
   if (skipFullAccessConfirm.value) localStorage.setItem('rmdex-skip-full-access-confirm', '1')
   showFullAccessConfirm.value = false
   fullAccessConfirmed.value = true
-  void send()
+  const retry = fullAccessRetry
+  fullAccessRetry = undefined
+  void send(retry)
 }
 async function openThread(thread: Thread) {
   const version = ++selectionVersion
@@ -1394,6 +1402,9 @@ function logout() {
   employees.value = []
   threads.value = []
   localDraftThreads.value = []
+  failedMessages.value = {}
+  pendingMessages.value = {}
+  fullAccessRetry = undefined
   selected.value = null
   pendingApprovals.value = []
   pairRequests.value = []
@@ -1536,9 +1547,10 @@ async function copyValue(value: string, feedback = '已复制会话 ID') {
       input.style.position = 'fixed'
       input.style.opacity = '0'
       document.body.appendChild(input)
-      input.select()
-      if (!document.execCommand('copy')) throw new Error('复制失败')
-      input.remove()
+      try {
+        input.select()
+        if (!document.execCommand('copy')) throw new Error('复制失败')
+      } finally { input.remove() }
     }
     copyFeedback.value = feedback
     if (copyFeedbackTimer) clearTimeout(copyFeedbackTimer)
@@ -1602,7 +1614,7 @@ async function createThread() {
   } catch (e) { createError.value = e instanceof Error ? e.message : String(e) }
   finally { creating.value = false }
 }
-async function sendDesktopDraft(thread: Thread, text: string, attachments: Array<{ id: string; name: string; size: number; lastModified: number }>) {
+async function sendDesktopDraft(thread: Thread, text: string, attachments: Array<{ id: string; name: string; size: number; lastModified: number }>, preserveDraft = false) {
   const draft = thread.desktopDraft!
   const key = `rmdex-create:${draft.deviceKey}:${thread.id}`
   const settings = desktopSettings()
@@ -1614,7 +1626,7 @@ async function sendDesktopDraft(thread: Thread, text: string, attachments: Array
   if (!result.thread) {
     if (result.outcome !== 'preparing') throw new Error('Desktop 未返回会话，请核对桌面后再试')
     draft.preparing = true
-    drafts.value[thread.id] = ''
+    if (!preserveDraft) drafts.value[thread.id] = ''
     if (selected.value?.id === thread.id) error.value = result.message || 'Desktop 正在准备新会话，请稍后刷新会话列表'
     return
   }
@@ -1625,6 +1637,11 @@ async function sendDesktopDraft(thread: Thread, text: string, attachments: Array
   threadIndicators.value[created.id] = 'working'
   if (pendingMessages.value[thread.id]) pendingMessages.value[created.id] = pendingMessages.value[thread.id]!
   delete pendingMessages.value[thread.id]
+  if (preserveDraft) {
+    drafts.value[created.id] = drafts.value[thread.id] || ''
+    if (attachmentsByThread.value[thread.id]) attachmentsByThread.value[created.id] = attachmentsByThread.value[thread.id]!
+    delete attachmentsByThread.value[thread.id]
+  }
   delete drafts.value[thread.id]
   queuedUntil = Date.now() + 60000
   if (selected.value?.id === thread.id) {
@@ -1636,38 +1653,98 @@ async function sendDesktopDraft(thread: Thread, text: string, attachments: Array
     await scrollToLatest()
   }
 }
-async function send() {
+async function retryMessage(message: MessageEntry | FailedMessage) {
+  if (!selected.value || working.value || retrying.value || !capabilities.value.send) return
+  const thread = selected.value
+  const version = selectionVersion
+  const deviceKey = remoteDevice.value?.id || 'local'
+  const isCurrent = () => selected.value?.id === thread.id && version === selectionVersion && (remoteDevice.value?.id || 'local') === deviceKey
+  retrying.value = true
+  error.value = ''
+  try {
+    // A failed HTTP request may already have started a turn. Reconcile with
+    // the host before allowing an explicit resend.
+    if (!thread.desktopDraft) {
+      const result = await readThread(thread.id, true)
+      if (!isCurrent()) return
+      const merged = { ...result, thread: { ...result.thread, turns: [...new Map([...(thread.turns || []), ...(result.thread.turns || [])].map(turn => [turn.id, turn])).values()] } }
+      applyRead(merged)
+      if ('previousTurnIds' in message) {
+        const delivered = timeline(result.thread.turns || []).some(entry => entry.role === 'user' && !message.previousTurnIds.includes(entry.turnId) && pendingTextMatches(entry.text, userText(message.text)))
+        if (delivered) {
+          failedMessages.value[thread.id] = (failedMessages.value[thread.id] || []).filter(item => item.id !== message.id)
+          error.value = '这条消息已送达，已同步最新会话；如需再次执行，可长按历史消息重试。'
+          return
+        }
+      }
+      if (activeTurnId.value) { error.value = '当前会话正在执行，请等待任务结束后重试'; return }
+    }
+    let submission: RetrySubmission
+    if ('previousTurnIds' in message) {
+      if (message.deviceKey !== deviceKey) return
+      submission = { ...message, failedId: message.id }
+    } else {
+      if (message.role !== 'user') return
+      const files: File[] = []
+      for (const image of message.images) {
+        const source = imageSource(image)
+        if (!image.assetUrl && !source) throw new Error('原消息的图片不可用，请重新选择附件后发送')
+        const response = image.assetUrl ? await authenticatedFetch(image.assetUrl, {}, 'client') : await fetch(source!)
+        if (!response.ok) throw new Error('读取原消息图片失败，请稍后重试')
+        const blob = await response.blob()
+        const extension = ({ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' } as Record<string, string>)[blob.type] || 'png'
+        const name = image.path?.split(/[\\/]/).pop() || `image-${files.length + 1}.${extension}`
+        files.push(new File([blob], name, { type: blob.type }))
+      }
+      submission = { threadId: thread.id, deviceKey, text: messageRequest(message.item), files }
+    }
+    if (isCurrent()) await send(submission)
+  } catch (e) { if (isCurrent()) error.value = e instanceof Error ? e.message : String(e) }
+  finally { retrying.value = false }
+}
+async function send(retry?: RetrySubmission) {
+  if (!retry && retrying.value) return
   if (!selected.value || sending.value || activeTurnId.value || selected.value.desktopDraft?.preparing || !capabilities.value.send) return
+  if (retry && (retry.threadId !== selected.value.id || retry.deviceKey !== (remoteDevice.value?.id || 'local'))) return
   const thread = selected.value
   const id = selected.value.id
-  const text = (drafts.value[id] || '').trim()
-  const files = attachmentsByThread.value[id] || []
+  const text = retry ? retry.text : (drafts.value[id] || '').trim()
+  const files = retry ? retry.files : [...(attachmentsByThread.value[id] || [])]
   if (!text && !files.length) return
-  if (capabilities.value.permissions && permissionMode.value === 'full' && !skipFullAccessConfirm.value && !fullAccessConfirmed.value) { showFullAccessConfirm.value = true; return }
+  if (capabilities.value.permissions && permissionMode.value === 'full' && !skipFullAccessConfirm.value && !fullAccessConfirmed.value) { fullAccessRetry = retry; showFullAccessConfirm.value = true; return }
   fullAccessConfirmed.value = false
-  sending.value = true; sendingThreadId.value = id; stopRequested.value = false; stopping.value = false; pendingMessages.value[id] = { text, previousCount: messages.value.filter(entry => entry.role === 'user' && entry.text === text).length, attachmentNames: files.map(file => file.name) }; error.value = ''; lastTurn.value = null
+  const previousTurnIds = (thread.turns || []).map(turn => turn.id)
+  const visibleText = userText(text)
+  const failedId = retry?.failedId || crypto.randomUUID()
+  const deviceKey = remoteDevice.value?.id || 'local'
+  const employeeId = activeEmployeeId.value
+  const settings = desktopSettings()
+  const mode = permissionMode.value
+  let accepted = false
+  if (retry?.failedId) failedMessages.value[id] = (failedMessages.value[id] || []).filter(item => item.id !== retry.failedId)
+  sending.value = true; sendingThreadId.value = id; stopRequested.value = false; stopping.value = false; pendingMessages.value[id] = { text: visibleText, previousCount: messages.value.filter(entry => entry.role === 'user' && pendingTextMatches(entry.text, visibleText)).length, attachmentNames: files.map(file => file.name) }; error.value = ''; lastTurn.value = null
   await scrollToLatest()
   try {
     const uploaded = await uploadAttachments(files)
-    if (thread.desktopDraft) { await sendDesktopDraft(thread, text, uploaded); removeSentAttachments(id); return }
-    const key = `rmdex-send:${remoteDevice.value?.id || 'local'}:${id}`
-    const settings = desktopSettings()
+    if ((remoteDevice.value?.id || 'local') !== deviceKey) throw new Error('设备已切换，请回到原设备重试消息')
+    if (thread.desktopDraft) { await sendDesktopDraft(thread, text, uploaded, !!retry); accepted = true; if (!retry) removeSentAttachments(id); return }
+    const key = `rmdex-send:${deviceKey}:${id}`
     const result = await post(`/api/threads/${id}/send`, desktopMode.value ? {
       text, attachments: uploaded.map(file => file.id), ...settings, operationId: operationId(key, JSON.stringify([text, uploaded.map(file => [file.name, file.size, file.lastModified]), settings])),
     } : {
       text,
       attachments: uploaded.map(file => file.id),
       name: thread.name || thread.preview || 'Codex 会话',
-      ...(activeEmployeeId.value ? { employeeId: activeEmployeeId.value } : {}),
-      permissionMode: permissionMode.value,
-      model: selectedModel.value,
-      effort: selectedEffort.value,
+      ...(employeeId ? { employeeId } : {}),
+      permissionMode: mode,
+      ...settings,
     })
     if (result.outcome === 'uncertain') throw new Error(result.message || '发送结果未确认，请在 Desktop 核对')
+    accepted = true
     sessionStorage.removeItem(key)
-    removeSentAttachments(id)
+    if (!retry) removeSentAttachments(id)
     if (desktopMode.value) queuedUntil = Date.now() + 60000
-    if (drafts.value[id]?.trim() === text) drafts.value[id] = ''
+    if (!retry && drafts.value[id]?.trim() === text) drafts.value[id] = ''
     if (selected.value?.id === id) activeTurnId.value = result.turn?.id || activeTurnId.value
     if (result.turn?.id) {
       threadIndicators.value[id] = 'working'
@@ -1680,7 +1757,15 @@ async function send() {
       finally { stopRequested.value = false; stopping.value = false }
     }
     if (selected.value?.id === id) { await updateThread(); await scrollToLatest() }
-  } catch (e) { delete pendingMessages.value[id]; stopRequested.value = false; stopping.value = false; if (selected.value?.id === id) error.value = e instanceof Error ? e.message : String(e) }
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e)
+    if (!accepted) {
+      delete pendingMessages.value[id]
+      failedMessages.value[id] = [...(failedMessages.value[id] || []).filter(item => item.id !== failedId), { id: failedId, threadId: id, deviceKey, text, files, previousTurnIds, error: detail }]
+    }
+    stopRequested.value = false; stopping.value = false
+    if (selected.value?.id === id) error.value = detail
+  }
   finally { sending.value = false; sendingThreadId.value = null }
 }
 async function sendFollowUp(mode: 'queue' | 'steer') {
@@ -1883,11 +1968,33 @@ onUnmounted(() => { window.removeEventListener('keydown', handlePreviewKey); if 
       <div v-if="!selected" class="welcome"><div class="welcome-icon"><MessageSquare :size="22" /></div><h2>选择一个会话</h2><p>查看你的 Codex 对话</p></div>
       <div v-else-if="threadLoading" class="conversation conversation-skeleton" role="status" aria-live="polite"><div class="conversation-inner"><span class="skeleton-line skeleton-line-heading"></span><span class="skeleton-line skeleton-line-wide"></span><span class="skeleton-line skeleton-line-medium"></span><span class="skeleton-line skeleton-line-wide"></span><span class="skeleton-line skeleton-line-short"></span></div></div>
       <div v-else-if="threadLoadError" class="thread-load-state" role="alert"><CircleAlert :size="20" /><span>加载会话失败：{{ threadLoadError }}</span><button type="button" @click="openThread(selected)">重试</button></div>
-      <div v-else ref="conversation" class="conversation"><div class="conversation-inner"><button v-if="historyCursor" class="history-button" :disabled="historyLoading" @click="loadOlder"><LoaderCircle v-if="historyLoading" :size="14" class="working-spinner" />{{ historyLoading ? '正在加载…' : '加载更早的消息' }}</button><div class="conversation-header"><h2>{{ selected.name || selected.preview || '未命名会话' }}</h2></div><div v-if="!messages.length && !pendingMessageVisible(selected)" class="empty-messages">{{ selected.desktopDraft ? '从下方发送消息，开始新对话。' : '此会话暂无可显示的消息。' }}</div><template v-for="(message, i) in messages" :key="i"><details v-if="message.role === 'tools'" class="tool-group"><summary><Wrench :size="14" /><span>{{ toolSummary(message.items) }}</span><span v-if="message.items.some(item => item.status === 'failed' || item.status === 'declined' || item.success === false || (typeof item.exitCode === 'number' && item.exitCode !== 0))" class="group-failed">含失败</span><ChevronRight :size="14" class="group-chevron" /></summary><div class="tool-group-content"><ToolEvent v-for="(item, index) in message.items" :key="item.id || index" :item="item" :image-url="toolImageSource(item)" @preview="showImagePreview" /></div></details><article v-else class="message" :class="`message--${message.role}`" :aria-label="message.role === 'user' ? '用户消息' : 'Codex 回复'"><div class="message-body"><div v-if="message.images.length" class="attachments"><template v-for="(image, index) in message.images" :key="index"><button v-if="imageSource(image)" type="button" class="attachment" title="放大预览图片" aria-label="放大预览图片" @click="showImagePreview(imageSource(image) || '')"><img :src="imageSource(image)" alt="图片附件" loading="lazy" /></button><span v-else class="attachment-unavailable">图片附件不可用</span></template></div><div v-if="message.text" class="message-text markdown" v-html="markdown.render(message.text)"></div></div></article></template><article v-if="pendingMessageVisible(selected)" class="message message--user" aria-label="待显示的用户消息"><div class="message-body"><div v-if="pendingMessages[selected.id]!.attachmentNames?.length" class="pending-attachment-names">{{ pendingMessages[selected.id]!.attachmentNames!.join(' · ') }}</div><div v-if="pendingMessages[selected.id]!.text" class="message-text markdown" v-html="markdown.render(pendingMessages[selected.id]!.text)"></div></div></article><div v-if="working" class="working" role="status" aria-live="polite"><LoaderCircle :size="16" class="working-spinner" /><span>{{ workLabel }}</span></div><div v-else-if="lastTurn?.status === 'failed'" class="turn-failure" role="alert">执行失败<span v-if="lastTurn.error?.message">：{{ lastTurn.error.message }}</span></div></div></div>
+      <div v-else ref="conversation" class="conversation"><div class="conversation-inner">
+        <button v-if="historyCursor" class="history-button" :disabled="historyLoading" @click="loadOlder"><LoaderCircle v-if="historyLoading" :size="14" class="working-spinner" />{{ historyLoading ? '正在加载…' : '加载更早的消息' }}</button>
+        <div class="conversation-header"><h2>{{ selected.name || selected.preview || '未命名会话' }}</h2></div>
+        <div v-if="!messages.length && !pendingMessageVisible(selected) && !failedMessages[selected.id]?.length" class="empty-messages">{{ selected.desktopDraft ? '从下方发送消息，开始新对话。' : '此会话暂无可显示的消息。' }}</div>
+        <template v-for="(message, i) in messages" :key="message.role === 'tools' ? `tools-${i}` : `${message.turnId}-${message.item.id || i}`">
+          <details v-if="message.role === 'tools'" class="tool-group">
+            <summary><Wrench :size="14" /><span>{{ toolSummary(message.items) }}</span><span v-if="message.items.some(item => item.status === 'failed' || item.status === 'declined' || item.success === false || (typeof item.exitCode === 'number' && item.exitCode !== 0))" class="group-failed">含失败</span><ChevronRight :size="14" class="group-chevron" /></summary>
+            <div class="tool-group-content"><ToolEvent v-for="(item, index) in message.items" :key="item.id || index" :item="item" :image-url="toolImageSource(item)" @preview="showImagePreview" /></div>
+          </details>
+          <MessageBubble v-else :role="message.role" :copy-text="message.copyText" :retryable="message.role === 'user' && capabilities.send" :retry-disabled="working || retrying" @copy="copyValue($event, '已复制消息')" @retry="retryMessage(message)">
+            <div v-if="message.images.length" class="attachments"><template v-for="(image, index) in message.images" :key="index"><button v-if="imageSource(image)" type="button" class="attachment" title="放大预览图片" aria-label="放大预览图片" @click="showImagePreview(imageSource(image) || '')"><img :src="imageSource(image)" alt="图片附件" loading="lazy" /></button><span v-else class="attachment-unavailable">图片附件不可用</span></template></div>
+            <div v-if="message.text" class="message-text markdown" v-html="markdown.render(message.text)"></div>
+          </MessageBubble>
+        </template>
+        <MessageBubble v-for="failed in (failedMessages[selected.id] || [])" :key="failed.id" role="user" :copy-text="userText(failed.text)" :retryable="capabilities.send" :retry-disabled="working || retrying" failed @copy="copyValue($event, '已复制消息')" @retry="retryMessage(failed)">
+          <div v-if="failed.files.length" class="pending-attachment-names">{{ failed.files.map(file => file.name).join(' · ') }}</div>
+          <div v-if="failed.text" class="message-text markdown" v-html="markdown.render(userText(failed.text))"></div>
+          <div class="message-send-error" role="status" :title="failed.error"><CircleAlert :size="13" /><span>发送未成功 · 长按重试</span></div>
+        </MessageBubble>
+        <MessageBubble v-if="pendingMessageVisible(selected)" role="user" :copy-text="pendingMessages[selected.id]!.text" :retryable="capabilities.send" retry-disabled @copy="copyValue($event, '已复制消息')"><div v-if="pendingMessages[selected.id]!.attachmentNames?.length" class="pending-attachment-names">{{ pendingMessages[selected.id]!.attachmentNames!.join(' · ') }}</div><div v-if="pendingMessages[selected.id]!.text" class="message-text markdown" v-html="markdown.render(pendingMessages[selected.id]!.text)"></div></MessageBubble>
+        <div v-if="working || retrying" class="working" role="status" aria-live="polite"><LoaderCircle :size="16" class="working-spinner" /><span>{{ retrying && !working ? '正在准备重试' : workLabel }}</span></div>
+        <div v-else-if="lastTurn?.status === 'failed'" class="turn-failure" role="alert">执行失败<span v-if="lastTurn.error?.message">：{{ lastTurn.error.message }}</span></div>
+      </div></div>
       <div v-if="selected && !threadLoading && !threadLoadError" class="compose-area">
         <section v-if="queuedSubmissions.length" class="queued-followups" aria-label="排队任务"><div class="queued-followups-heading"><span>排队中</span><span class="queued-count">{{ queuedSubmissions.length }}</span></div><div v-for="item in queuedSubmissions" :key="item.id" class="queued-followup"><CornerDownRight :size="15" class="queued-followup-icon" /><span class="queued-followup-text">{{ queuedText(item) }}</span><div class="queued-followup-actions"><button type="button" class="queue-steer-button" :disabled="!!queueActionId || !activeTurnId" @click="steerQueued(item)"><CornerDownRight :size="14" />Steer</button><button type="button" class="queue-icon-button" title="删除排队任务" aria-label="删除排队任务" :disabled="!!queueActionId" @click="deleteQueued(item)"><Trash2 :size="15" /></button><button type="button" class="queue-icon-button" title="更多操作" aria-label="更多操作" :disabled="!!queueActionId" @click="queueMenuId = queueMenuId === item.id ? null : item.id"><Ellipsis :size="16" /></button></div><div v-if="queueMenuId === item.id" class="queued-followup-menu"><button type="button" :disabled="!!queueActionId" @click="editQueued(item)"><Pencil :size="14" />编辑消息</button></div></div></section>
         <p v-if="desktopMode" class="desktop-hint">{{ capabilities.models ? '模型与推理强度可在右侧选择；权限、审批和暂停请在 Desktop 处理。' : '当前设备未提供可识别的模型目录；模型、权限、审批和暂停请在 Desktop 处理。' }}</p><div v-for="approval in (capabilities.approvals ? pendingApprovals : [])" :key="approval.id" class="approval"><strong>{{ approval.method.includes('commandExecution') ? '命令执行需要确认' : '文件修改需要确认' }}</strong><p v-if="approval.params.reason">{{ approval.params.reason }}</p><pre v-if="approval.params.command">{{ approval.params.command }}</pre><p v-if="approval.params.cwd">工作目录：{{ approval.params.cwd }}</p><p v-if="approval.params.grantRoot">授权目录：{{ approval.params.grantRoot }}</p><details><summary>完整请求信息</summary><pre>{{ JSON.stringify(approval.params, null, 2) }}</pre></details><p v-if="approval.method.includes('fileChange')">请先在上方工具调用中查看文件变更，再决定是否允许。</p><div class="approval-actions"><button @click="decide(approval, 'decline')">拒绝</button><button @click="decide(approval, 'accept')">允许本次</button></div></div>
-        <form class="composer" @submit.prevent="send">
+        <form class="composer" @submit.prevent="send()">
           <div v-if="selectedAttachments.length" class="composer-attachments" aria-label="待发送附件">
             <div v-for="(file, index) in selectedAttachments" :key="`${file.name}-${file.lastModified}-${index}`" class="composer-attachment">
               <img v-if="attachmentPreview(file)" :src="attachmentPreview(file)" alt="" />
