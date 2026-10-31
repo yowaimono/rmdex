@@ -198,7 +198,7 @@ export class PcManager {
     this.agentLog = createWriteStream(stdout, { flags: 'a' })
     const errorLog = createWriteStream(stderr, { flags: 'a' })
     const rootTokenPath = join(this.root, '.device-token')
-    const deviceToken = process.env.RMDEX_DEVICE_TOKEN || (await readFile(rootTokenPath, 'utf8').catch(() => '')).trim() || (await readFile(this.deviceTokenPath, 'utf8').catch(() => '')).trim()
+    const deviceToken = process.env.RMDEX_DEVICE_TOKEN || (await readFile(this.deviceTokenPath, 'utf8').catch(() => '')).trim() || (await readFile(rootTokenPath, 'utf8').catch(() => '')).trim()
     // Keep the entrypoint relative to cwd. Node 24 + tsx can reject a Windows
     // drive-letter path passed as an ESM entrypoint (ERR_UNSUPPORTED_ESM_URL_SCHEME).
     const child = spawn(node, ['--import', 'tsx', 'server/index.ts'], {
@@ -307,6 +307,7 @@ export class PcManager {
       await writeFile(this.clientRefreshTokenPath, registration.refreshToken, { mode: 0o600 })
     }
     this.relayCache.at = 0
+    await this.stop()
     return this.start()
   }
 
@@ -326,7 +327,7 @@ export class PcManager {
 
   private async refreshRelay() {
     if (Date.now() - this.relayCache.at < 5000) return
-    const token = process.env.RMDEX_WEB_CLIENT_TOKEN || (await readFile(join(this.root, '.web-client-token'), 'utf8').catch(() => '')).trim() || (await readFile(this.clientTokenPath, 'utf8').catch(() => '')).trim()
+    const token = process.env.RMDEX_WEB_CLIENT_TOKEN || (await readFile(this.clientTokenPath, 'utf8').catch(() => '')).trim() || (await readFile(join(this.root, '.web-client-token'), 'utf8').catch(() => '')).trim()
     if (!token) {
       this.relayCache = { at: Date.now(), state: { state: 'unknown', error: '未配置 .web-client-token' }, phones: [] }
       return
