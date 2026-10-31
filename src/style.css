@@ -221,11 +221,12 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .message-action-target { outline-offset: 4px; -webkit-touch-callout: none; }
 .message--failed .message-text { border: 1px solid #edd1cd; background: #fff5f3; }
 .message-send-error { display: flex; align-items: center; gap: 5px; max-width: 100%; margin-top: 7px; color: #b55d52; font-size: 12px; }
-.message-action-menu { position: fixed; z-index: 120; width: 248px; overflow-y: auto; overscroll-behavior: contain; padding: 5px; border: 1px solid #dce4ed; border-radius: 8px; background: #fff; box-shadow: 0 8px 24px rgba(35, 53, 75, .16); outline: none; }
-.message-action-option { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 46px; padding: 10px 12px; border: 0; border-radius: 7px; color: #344252; background: transparent; text-align: left; font: inherit; font-size: 14px; }
+.message-action-menu { position: fixed; z-index: 120; width: 196px; overflow-y: auto; overscroll-behavior: contain; padding: 4px; border: 1px solid #dce4ed; border-radius: 7px; background: #fff; box-shadow: 0 7px 20px rgba(35, 53, 75, .15); outline: none; }
+.message-action-option { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 38px; padding: 7px 9px; border: 0; border-radius: 5px; color: #344252; background: transparent; text-align: left; font: inherit; font-size: 13px; }
+.message-action-option svg { width: 15px; height: 15px; flex: 0 0 auto; }
 .message-action-option:hover, .message-action-option:focus-visible { color: #0879f9; background: #eef5fd; }
 .message-action-option:disabled { color: #a4adb7; background: transparent; cursor: default; }
-.message-action-menu p { margin: 4px 12px 10px; color: #8997a5; font-size: 12px; }
+.message-action-menu p { margin: 3px 9px 7px; color: #8997a5; font-size: 11px; }
 @media (pointer: coarse) {
   .message-action-target { -webkit-user-select: none; user-select: none; }
 }
@@ -369,6 +370,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .image-preview-close:hover { color: #fff; background: rgba(255, 255, 255, .22); }
 .create-dialog { width: min(100%, 440px); padding: 20px; border: 1px solid #e5eaf0; border-radius: 8px; background: #fff; box-shadow: 0 16px 48px rgba(35, 53, 75, .15); }
 .employee-dialog { width: min(100%, 520px); max-height: min(760px, calc(100vh - 40px)); overflow: auto; }
+.employee-reset-dialog { width: min(100%, 460px); }
 .employee-dialog textarea { width: 100%; min-height: 80px; resize: vertical; padding: 9px 10px; border: 1px solid #dfe6ed; border-radius: 5px; outline: 0; color: #263545; background: #fff; font: inherit; font-size: 13px; line-height: 1.5; }
 .employee-dialog textarea:focus { border-color: #8dbcf0; box-shadow: 0 0 0 2px rgba(8, 121, 249, .1); }
 .create-dialog header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }

@@ -129,6 +129,8 @@ const employeeProjectPath = ref('')
 const employeeError = ref('')
 const employeeSaving = ref(false)
 const employeeResetting = ref<string | null>(null)
+const employeeResetTarget = ref<Employee | null>(null)
+const employeeResetError = ref('')
 const createPath = ref('')
 const createError = ref('')
 const createProject = ref('')
@@ -690,6 +692,14 @@ function openEmployeeEditor(employee?: Employee) {
   employeeError.value = ''
   employeeEditor.value = true
 }
+function requestEmployeeThreadReset(employee: Employee) {
+  if (employeeResetting.value) return
+  employeeResetError.value = ''
+  employeeResetTarget.value = employee
+}
+function closeEmployeeThreadResetConfirm() {
+  if (!employeeResetting.value) employeeResetTarget.value = null
+}
 async function saveEmployee() {
   if (employeeSaving.value) return
   employeeSaving.value = true
@@ -717,9 +727,10 @@ async function openEmployee(employee: Employee) {
     await openThread(thread)
   } catch (e) { error.value = e instanceof Error ? e.message : String(e) }
 }
-async function resetEmployeeThread(employee: Employee) {
-  if (employeeResetting.value) return
+async function resetEmployeeThread(employee: Employee): Promise<boolean> {
+  if (employeeResetting.value) return false
   employeeResetting.value = employee.id
+  employeeResetError.value = ''
   error.value = ''
   try {
     if (employee.deviceId !== remoteDevice.value?.id) throw new Error('请先连接员工绑定的 Codex 电脑')
@@ -733,8 +744,17 @@ async function resetEmployeeThread(employee: Employee) {
     threads.value = [thread, ...threads.value.filter(item => item.id !== thread.id)]
     activeEmployeeId.value = employee.id
     await openThread(thread)
-  } catch (e) { error.value = e instanceof Error ? e.message : String(e) }
-  finally { employeeResetting.value = null }
+    return true
+  } catch (e) {
+    employeeResetError.value = e instanceof Error ? e.message : String(e)
+    error.value = employeeResetError.value
+    return false
+  } finally { employeeResetting.value = null }
+}
+async function confirmEmployeeThreadReset() {
+  const employee = employeeResetTarget.value
+  if (!employee) return
+  if (await resetEmployeeThread(employee)) employeeResetTarget.value = null
 }
 function archiveScope() {
   return `${remoteDevice.value?.id || 'local'}:${desktopMode.value ? 'desktop' : 'app-server'}`
@@ -1983,7 +2003,7 @@ onUnmounted(() => { removeInAppLinks?.(); window.removeEventListener('keydown', 
           <div class="section-label"><span>AI 员工 <span class="count">{{ employees.length }}</span></span><button class="icon-button" type="button" title="新建 AI 员工" aria-label="新建 AI 员工" @click="openEmployeeEditor()"><Plus :size="15" /></button></div>
           <div v-for="employee in employees" :key="employee.id" class="employee-row" :class="{ selected: activeEmployeeId === employee.id }">
             <button class="employee-select" type="button" @click="openEmployee(employee)"><span class="employee-icon"><Bot :size="15" /></span><span class="employee-copy"><strong>{{ employee.name }}</strong><small>{{ employee.role || employee.projectPath }}</small></span></button>
-            <button class="employee-action" type="button" title="编辑员工" aria-label="编辑员工" @click.stop="openEmployeeEditor(employee)"><Pencil :size="14" /></button><button class="employee-action" type="button" title="重置上下文" aria-label="重置上下文" :disabled="employeeResetting === employee.id" @click.stop="resetEmployeeThread(employee)"><RotateCcw :size="14" :class="{ spin: employeeResetting === employee.id }" /></button>
+            <button class="employee-action" type="button" title="编辑员工" aria-label="编辑员工" @click.stop="openEmployeeEditor(employee)"><Pencil :size="14" /></button><button class="employee-action" type="button" title="换绑 Thread" aria-label="换绑 Thread" :disabled="employeeResetting === employee.id" @click.stop="requestEmployeeThreadReset(employee)"><RotateCcw :size="14" :class="{ spin: employeeResetting === employee.id }" /></button>
           </div>
           <p v-if="!employees.length" class="employee-empty">创建一个有固定身份和长期记忆的 Codex 员工。</p>
         </div>
@@ -2092,6 +2112,7 @@ onUnmounted(() => { removeInAppLinks?.(); window.removeEventListener('keydown', 
         </form>
       </div>
     </main>
+    <div v-if="employeeResetTarget" class="modal-backdrop" @click.self="closeEmployeeThreadResetConfirm"><section class="create-dialog delete-dialog employee-reset-dialog" role="dialog" aria-modal="true" aria-labelledby="employee-reset-title" @keydown.esc="closeEmployeeThreadResetConfirm"><header><div><h2 id="employee-reset-title">换绑员工 Thread</h2><p>为“{{ employeeResetTarget.name }}”创建新的执行会话。</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" :disabled="!!employeeResetting" @click="closeEmployeeThreadResetConfirm"><X :size="18" /></button></header><p class="delete-copy">当前 Thread 将被归档并创建新的 Thread。员工的长期记忆、SOP 和本地资产会保留，正在执行或排队的任务需要先结束。</p><p v-if="employeeResetError" class="create-error" role="alert">{{ employeeResetError }}</p><div class="dialog-actions"><button type="button" class="cancel-button" :disabled="!!employeeResetting" @click="closeEmployeeThreadResetConfirm">取消</button><button type="button" class="danger-confirm-button" :disabled="!!employeeResetting" @click="confirmEmployeeThreadReset">{{ employeeResetting ? '换绑中…' : '确认换绑' }}</button></div></section></div>
     <div v-if="copyFeedback" class="copy-toast" role="status" aria-live="polite">{{ copyFeedback }}</div>
     <div v-if="previewImageUrl" class="image-preview-backdrop" @click.self="closeImagePreview"><section class="image-preview-dialog" role="dialog" aria-modal="true" aria-label="图片预览"><button class="icon-button image-preview-close" type="button" title="关闭图片预览" aria-label="关闭图片预览" @click="closeImagePreview"><X :size="18" /></button><img :src="previewImageUrl" alt="图片大图预览" /></section></div>
     <div v-if="showFullAccessConfirm" class="modal-backdrop" @click.self="showFullAccessConfirm = false"><section class="create-dialog risk-dialog" role="dialog" aria-modal="true" aria-labelledby="full-access-title" @keydown.esc="showFullAccessConfirm = false"><header><div class="risk-heading"><span class="risk-icon"><ShieldAlert :size="19" /></span><div><h2 id="full-access-title">确认使用完全访问</h2><p>这次消息将跳过 Codex 审批。</p></div></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="showFullAccessConfirm = false"><X :size="18" /></button></header><div class="risk-copy"><p>完全访问模式允许 Codex 直接执行命令、修改工作目录中的文件，并访问电脑上的网络资源。</p><p>只在你明确知道这条消息会做什么时继续。你也可以取消后切换为“请求审批”。</p></div><label class="risk-checkbox"><input v-model="skipFullAccessConfirm" type="checkbox" /> <span>不再提醒</span></label><div class="dialog-actions"><button type="button" class="cancel-button" @click="showFullAccessConfirm = false">取消</button><button type="button" class="danger-confirm-button" @click="confirmFullAccess">继续发送</button></div></section></div>
