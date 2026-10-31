@@ -47,7 +47,7 @@ async function ensureDirectory(path: string) {
   await mkdir(path, { recursive: true })
 }
 
-export async function prepareEmployeeAssets(value: { userId?: unknown; employeeId?: unknown; legacyMemory?: unknown; legacyMemoryDate?: unknown }, home = codexHome()) {
+export async function prepareEmployeeAssets(value: { userId?: unknown; employeeId?: unknown; legacyMemory?: unknown; legacyMemoryDate?: unknown; communication?: { origin: string; token: string } }, home = codexHome()) {
   const userId = identifier(value.userId)
   const employeeId = identifier(value.employeeId)
   if (value.legacyMemory !== undefined && (typeof value.legacyMemory !== 'string' || value.legacyMemory.length > 20_000)) throw new Error('Invalid previous employee memory')
@@ -55,6 +55,25 @@ export async function prepareEmployeeAssets(value: { userId?: unknown; employeeI
   const assetPath = join(home, 'rmdex', 'employees', userId, employeeId)
   const memories = join(assetPath, 'memories')
   for (const path of [join(home, 'rmdex'), join(home, 'rmdex', 'employees'), join(home, 'rmdex', 'employees', userId), assetPath, memories, join(assetPath, 'sops')]) await ensureDirectory(path)
+  if (value.communication) {
+    const origin = new URL(value.communication.origin)
+    if (origin.protocol !== 'https:' && !(origin.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(origin.hostname))) throw new Error('Invalid communication origin')
+    if (typeof value.communication.token !== 'string' || !/^[A-Za-z0-9_-]{32,128}$/.test(value.communication.token)) throw new Error('Invalid communication token')
+    const files = [
+      ['colleagues.mjs', await readFile(new URL('./skills/rmdex-employee/colleagues.mjs', import.meta.url), 'utf8')],
+      ['communication.json', JSON.stringify({ managedBy: 'rmdex', origin: origin.origin, token: value.communication.token })],
+    ]
+    for (const [name, content] of files) {
+      const path = join(assetPath, name!)
+      const existing = await lstat(path).catch(error => { if (error.code === 'ENOENT') return undefined; throw error })
+      if (existing && (!existing.isFile() || existing.isSymbolicLink())) throw new Error('Communication asset is not a regular file')
+      if (existing) {
+        const old = await readFile(path, 'utf8')
+        if (name === 'communication.json' ? JSON.parse(old).managedBy !== 'rmdex' : !old.startsWith('// Managed by rmdex: employee communication helper')) throw new Error('User-managed communication asset already exists')
+      }
+      await writeFile(path, content!, { mode: 0o600, ...(existing ? {} : { flag: 'wx' }) })
+    }
+  }
   if (typeof value.legacyMemory === 'string' && value.legacyMemory.trim()) {
     if (typeof value.legacyMemoryDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value.legacyMemoryDate)) throw new Error('Invalid previous employee memory date')
     const path = join(memories, `${value.legacyMemoryDate}-previous-employee-memory.md`)

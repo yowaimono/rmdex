@@ -1,7 +1,7 @@
 export type ContentPart = { type: string; text?: string; url?: string; path?: string; assetUrl?: string }
 export type Item = { id?: string; type: string; text?: string; content?: ContentPart[]; [key: string]: unknown }
 export type Turn = { id: string; status: string; items: Item[] }
-export type MessageEntry = { role: 'user' | 'agent'; text: string; copyText: string; images: ContentPart[]; item: Item; turnId: string; forkable: boolean }
+export type MessageEntry = { role: 'user' | 'agent'; text: string; copyText: string; images: ContentPart[]; item: Item; turnId: string; forkable: boolean; colleagueName?: string }
 export type Entry = MessageEntry | { role: 'tools'; items: Item[] }
 
 // A retry must keep file references, but must not replay employee bootstrap
@@ -11,6 +11,16 @@ export function messageRequest(item: Item): string {
   return text.replace(/<in-app-browser-context source="ambient-ui-state">[\s\S]*?<\/in-app-browser-context>/g, '')
     .replace(/<rmdex_employee_context>[\s\S]*?<\/rmdex_employee_context>\s*/g, '')
     .replace(/<\/?rmdex_user_request>\s*/g, '').trim()
+}
+
+export function colleagueMessage(text: string): { senderName: string; text: string } | undefined {
+  const clean = text.replace(/<rmdex_employee_context>[\s\S]*?<\/rmdex_employee_context>\s*/g, '').replace(/<\/?rmdex_user_request>\s*/g, '').trim()
+  const match = clean.match(/^<rmdex_colleague_message>\s*([\s\S]*?)\s*<\/rmdex_colleague_message>$/)
+  if (!match) return undefined
+  try {
+    const data = JSON.parse(match[1]!)
+    if (typeof data.senderName === 'string' && typeof data.text === 'string' && typeof data.messageId === 'string') return data
+  } catch { /* Display malformed envelopes as ordinary text. */ }
 }
 
 function finalAnswerItems(turn: Turn): Item[] {
@@ -77,9 +87,10 @@ export function timeline(turns: Turn[]): Entry[] {
       if (item.type === 'userMessage') {
         flush()
         const rawText = (item.content || []).filter(part => part.type === 'text').map(part => part.text || '').filter(Boolean).join('\n')
-        const text = userText(rawText)
+        const colleague = colleagueMessage(rawText)
+        const text = colleague?.text ?? userText(rawText)
         const images = (item.content || []).filter(part => part.type === 'localImage' || part.type === 'image')
-        if (text || images.length) entries.push({ role: 'user', text, copyText: text, images, item, turnId: turn.id, forkable: false })
+        if (text || images.length) entries.push({ role: 'user', text, copyText: text, images, item, turnId: turn.id, forkable: false, ...(colleague ? { colleagueName: colleague.senderName } : {}) })
       } else if (item.type === 'agentMessage') {
         flush()
         if (item.text) entries.push({ role: 'agent', text: item.text, copyText: answer, images: [], item, turnId: turn.id, forkable: turn.status === 'completed' && answerItems.includes(original) })

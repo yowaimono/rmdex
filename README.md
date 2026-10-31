@@ -211,6 +211,16 @@ the same name already exists, rmdex leaves it untouched and reports the conflict
 when preparing the employee. The relay needs `server/skills/rmdex-employee/SKILL.md`
 in its working directory, or `RMDEX_EMPLOYEE_SKILL` set to that file's path.
 
+Employees can discover same-user colleagues and send a message through the
+managed `colleagues.mjs` helper. The relay derives the sender from a scoped
+credential, resolves the recipient's current bound thread and device, and
+submits through that thread's queue. A busy recipient finishes its current
+turn before processing the colleague message. Delivery receipts distinguish
+queued from uncertain delivery; an uncertain result must be checked before
+retrying with the same message ID. Colleague messages are rendered with their
+sender and body, and the web UI does not offer user retry or steering actions
+for them.
+
 Android background notifications do not use Firebase. The relay stores task
 completion events and exposes an authenticated long-poll endpoint. The Android
 app starts a small foreground service that keeps this connection alive and
@@ -221,7 +231,7 @@ the service uses some battery while enabled.
 
 ## Android app
 
-The Android app uses Capacitor and packages the same Vue interface; the web build remains supported. Native builds send API requests to `https://code.kyeai.xyz` using Capacitor's native HTTP bridge, and pairing links can be opened by the installed app.
+The Android app uses Capacitor and packages the same Vue interface; the web build remains supported. Native builds send API requests to `https://code.kyeai.xyz` using Capacitor's native HTTP bridge. Ordinary HTTP(S) links open in an isolated in-app WebView with a rmdex header, navigation controls, retry state, and an external-browser action; the page does not receive the Capacitor bridge or a JavaScript interface.
 
 Requirements: Node.js 22+, Android Studio 2025.2.1+, and Android SDK Platform 36. Install/accept the Android SDK licenses in Android Studio before building.
 

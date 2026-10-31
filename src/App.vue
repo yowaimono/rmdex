@@ -14,7 +14,9 @@ import PermissionMenu from './components/PermissionMenu.vue'
 import ModelMenu, { type ModelOption } from './components/ModelMenu.vue'
 import ProjectMenu from './components/ProjectMenu.vue'
 import UserMenu from './components/UserMenu.vue'
-import { messageRequest, timeline, userText, type ContentPart, type MessageEntry, type Turn } from './conversation'
+import SidebarResize from './components/SidebarResize.vue'
+import { installInAppLinks } from './in-app-browser'
+import { colleagueMessage, messageRequest, timeline, userText, type ContentPart, type MessageEntry, type Turn } from './conversation'
 import { loadThreadCache, queueThreadCacheWrite, removeThreadCache } from './thread-cache'
 
 type Thread = { id: string; name?: string | null; preview?: string; cwd?: string; updatedAt?: number; status?: { type: string }; turns?: Turn[]; employeeId?: string; desktopDraft?: { projectId: string | null; deviceKey: string; preparing?: boolean } }
@@ -106,6 +108,15 @@ const renaming = ref(false)
 let selectionVersion = 0
 const mobileDetail = ref(false)
 const sidebarOpen = ref(true)
+const sidebarWidth = ref((() => {
+  try { const width = Number(localStorage.getItem('rmdex-sidebar-width')); return width >= 220 && width <= 560 ? width : 290 }
+  catch { return 290 }
+})())
+const resizingSidebar = ref(false)
+function saveSidebarWidth(width: number) {
+  try { localStorage.setItem('rmdex-sidebar-width', String(width)) } catch { /* Keep resizing available when storage is restricted. */ }
+}
+let removeInAppLinks: (() => void) | undefined
 const creating = ref(false)
 const showCreate = ref(false)
 const employeeEditor = ref(false)
@@ -1134,7 +1145,13 @@ async function refresh(force = true) {
 }
 
 function queuedText(item: QueuedSubmission) {
-  return (item.input || []).filter(part => part.type === 'text').map(part => part.text || '').join('\n').trim() || '排队任务'
+  const raw = (item.input || []).filter(part => part.type === 'text').map(part => part.text || '').join('\n').trim()
+  const colleague = colleagueMessage(raw)
+  return colleague ? `来自员工 ${colleague.senderName}：${colleague.text}` : userText(raw) || '排队任务'
+}
+function isColleagueQueued(item: QueuedSubmission) {
+  const raw = (item.input || []).filter(part => part.type === 'text').map(part => part.text || '').join('\n').trim()
+  return Boolean(colleagueMessage(raw))
 }
 async function loadQueuedSubmissions(threadId: string): Promise<QueuedSubmission[] | null> {
   if (desktopMode.value) { queuedSubmissions.value = []; return [] }
@@ -1839,6 +1856,7 @@ async function handleAppUrl(rawUrl: string) {
   if (thread) await openThread(thread)
 }
 onMounted(async () => {
+  removeInAppLinks = installInAppLinks(message => { error.value = message })
   window.addEventListener('keydown', handlePreviewKey)
   let handledLaunch = false
   for (const task of notificationTasks()) trackedTasks.set(task.threadId, { turnId: task.turnId, text: task.text, name: task.name })
@@ -1867,7 +1885,7 @@ onMounted(async () => {
   authReady.value = true
   poll = setInterval(() => { void updateThread(); void refreshThreadIndicators(); if (adminToken.value && showDevices.value) void loadDevices() }, 2000)
 })
-onUnmounted(() => { window.removeEventListener('keydown', handlePreviewKey); if (poll) clearInterval(poll); clearThreadLongPress(); void appUrlListener?.remove(); void appStateListener?.remove(); void notificationListener?.remove() })
+onUnmounted(() => { removeInAppLinks?.(); window.removeEventListener('keydown', handlePreviewKey); if (poll) clearInterval(poll); clearThreadLongPress(); void appUrlListener?.remove(); void appStateListener?.remove(); void notificationListener?.remove() })
 </script>
 
 <template>
@@ -1900,7 +1918,7 @@ onUnmounted(() => { window.removeEventListener('keydown', handlePreviewKey); if 
         <form v-else class="user-create-form user-create-form-dialog" @submit.prevent="createUser"><label for="new-user-name">用户名</label><input id="new-user-name" v-model="userUsername" pattern="[A-Za-z0-9_.@-]{3,80}" minlength="3" maxlength="80" required autocomplete="off" placeholder="3–80 位字母、数字或 . _ @ -" /><label for="new-user-password">初始密码</label><div class="password-field"><input id="new-user-password" v-model="userPassword" :type="showUserPassword ? 'text' : 'password'" minlength="12" required autocomplete="new-password" placeholder="至少 12 位" /><button type="button" class="password-generate" :title="showUserPassword ? '隐藏密码' : '显示密码'" :aria-label="showUserPassword ? '隐藏密码' : '显示密码'" @click="showUserPassword = !showUserPassword"><EyeOff v-if="showUserPassword" :size="16" /><Eye v-else :size="16" /></button></div><button type="button" class="generate-password-link" @click="generateUserPassword">生成安全密码</button><label for="new-user-password-confirm">确认密码</label><input id="new-user-password-confirm" v-model="userPasswordConfirm" type="password" minlength="12" required autocomplete="new-password" placeholder="再次输入初始密码" /><p v-if="userFormError" class="auth-error" role="alert">{{ userFormError }}</p><div class="dialog-actions"><button type="button" class="cancel-button" :disabled="creatingUser" @click="showCreateUser = false">取消</button><button class="create-button" type="submit" :disabled="creatingUser">{{ creatingUser ? '正在创建…' : '创建用户' }}</button></div></form>
       </section></div>
   </main>
-  <div v-else class="shell" :class="{ 'native-app': Capacitor.isNativePlatform() }">
+  <div v-else class="shell" :class="{ 'native-app': Capacitor.isNativePlatform(), 'is-resizing-sidebar': resizingSidebar }" :style="{ '--sidebar-width': `${sidebarWidth}px` }">
     <aside id="thread-panel" class="thread-panel" :class="{ collapsed: !sidebarOpen, hiddenMobile: mobileDetail }">
       <div class="thread-panel-scroll">
       <div class="brand-row">
@@ -1965,8 +1983,9 @@ onUnmounted(() => { window.removeEventListener('keydown', handlePreviewKey); if 
       </div>
       <footer class="side-footer"><span class="online" :class="{ offline: !connected }"></span> {{ remoteMode ? '远程设备' : '本机模式' }} <span class="footer-label">{{ connected ? '已连接' : '未连接' }}</span><span class="side-account-actions"><button v-if="isPlatformAdmin" type="button" @click="activePage = 'users'" title="用户管理"><Users :size="15" /><span>用户</span></button><button v-if="adminToken" type="button" @click="logout" title="退出登录"><LogOut :size="15" /><span>退出</span></button></span></footer>
     </aside>
+    <SidebarResize v-if="sidebarOpen" v-model="sidebarWidth" @change="saveSidebarWidth" @resizing="resizingSidebar = $event" />
     <main class="main" :class="{ hiddenMobile: !mobileDetail }">
-       <header class="main-head"><button class="icon-button back" title="返回会话" aria-label="返回会话" @click="mobileDetail = false"><ArrowLeft :size="19" /></button><button v-if="!sidebarOpen" class="icon-button expand-button" title="展开侧栏" aria-label="展开侧栏" aria-controls="thread-panel" :aria-expanded="sidebarOpen" @click="sidebarOpen = true"><Menu :size="19" /></button><div class="heading"><strong>{{ selected?.name || selected?.preview || '会话' }}</strong><span v-if="selected">本机设备</span></div><button v-if="!sidebarOpen && capabilities.create" class="icon-button expand-button" title="新建对话" aria-label="新建对话" @click="openCreate()"><Plus :size="19" /></button></header>
+       <header class="main-head"><button class="icon-button back" title="返回会话" aria-label="返回会话" @click="mobileDetail = false"><ArrowLeft :size="19" /></button><button v-if="!sidebarOpen" class="icon-button expand-button" title="展开侧栏" aria-label="展开侧栏" aria-controls="thread-panel" :aria-expanded="sidebarOpen" @click="sidebarOpen = true"><Menu :size="19" /></button><div class="heading"><strong>{{ selected?.name || selected?.preview || '会话' }}</strong><span v-if="selected">本机设备</span></div></header>
       <div v-if="connectionState === 'connected'" class="connection-indicator" role="status" title="已连接"><span class="online"></span></div><div v-else class="connection-banner" :class="connectionState" role="status" aria-live="polite"><span class="online offline"></span><strong>{{ connectionState === 'reconnecting' ? '正在重连' : '已断开' }}</strong><span v-if="connectionState === 'reconnecting'">将自动重试</span><span v-else>部分操作暂不可用</span><button type="button" @click="retryConnection"><RotateCcw :size="14" />立即重试</button><details v-if="connectionErrorDetail"><summary>错误详情</summary><p>{{ connectionErrorDetail }}</p></details></div>
       <div v-if="error" class="error"><CircleAlert :size="18" /><span>{{ error }}</span><button @click="retryConnection">重试</button></div>
       <div v-if="!selected" class="welcome"><div class="welcome-icon"><MessageSquare :size="22" /></div><h2>选择一个会话</h2><p>查看你的 Codex 对话</p></div>
@@ -1981,7 +2000,8 @@ onUnmounted(() => { window.removeEventListener('keydown', handlePreviewKey); if 
             <summary><Wrench :size="14" /><span>{{ toolSummary(message.items) }}</span><span v-if="message.items.some(item => item.status === 'failed' || item.status === 'declined' || item.success === false || (typeof item.exitCode === 'number' && item.exitCode !== 0))" class="group-failed">含失败</span><ChevronRight :size="14" class="group-chevron" /></summary>
             <div class="tool-group-content"><ToolEvent v-for="(item, index) in message.items" :key="item.id || index" :item="item" :image-url="toolImageSource(item)" @preview="showImagePreview" /></div>
           </details>
-          <MessageBubble v-else :role="message.role" :copy-text="message.copyText" :retryable="message.role === 'user' && capabilities.send" :retry-disabled="working || retrying" :forkable="message.role === 'agent' && message.forkable && capabilities.fork" @copy="copyValue($event, '已复制消息')" @retry="retryMessage(message)" @fork="forkMessage(message)">
+          <MessageBubble v-else :role="message.role" :copy-text="message.copyText" :retryable="message.role === 'user' && !message.colleagueName && capabilities.send" :retry-disabled="working || retrying" :forkable="message.role === 'agent' && message.forkable && capabilities.fork" @copy="copyValue($event, '已复制消息')" @retry="retryMessage(message)" @fork="forkMessage(message)">
+            <div v-if="message.colleagueName" class="colleague-message-source">来自员工 · {{ message.colleagueName }}</div>
             <div v-if="message.images.length" class="attachments"><template v-for="(image, index) in message.images" :key="index"><button v-if="imageSource(image)" type="button" class="attachment" title="放大预览图片" aria-label="放大预览图片" @click="showImagePreview(imageSource(image) || '')"><img :src="imageSource(image)" alt="图片附件" loading="lazy" /></button><span v-else class="attachment-unavailable">图片附件不可用</span></template></div>
             <div v-if="message.text" class="message-text markdown" v-html="markdown.render(message.text)"></div>
           </MessageBubble>
@@ -1996,7 +2016,7 @@ onUnmounted(() => { window.removeEventListener('keydown', handlePreviewKey); if 
         <div v-else-if="lastTurn?.status === 'failed'" class="turn-failure" role="alert">执行失败<span v-if="lastTurn.error?.message">：{{ lastTurn.error.message }}</span></div>
       </div></div>
       <div v-if="selected && !threadLoading && !threadLoadError" class="compose-area">
-        <section v-if="queuedSubmissions.length" class="queued-followups" aria-label="排队任务"><div class="queued-followups-heading"><span>排队中</span><span class="queued-count">{{ queuedSubmissions.length }}</span></div><div v-for="item in queuedSubmissions" :key="item.id" class="queued-followup"><CornerDownRight :size="15" class="queued-followup-icon" /><span class="queued-followup-text">{{ queuedText(item) }}</span><div class="queued-followup-actions"><button type="button" class="queue-steer-button" :disabled="!!queueActionId || !activeTurnId" @click="steerQueued(item)"><CornerDownRight :size="14" />Steer</button><button type="button" class="queue-icon-button" title="删除排队任务" aria-label="删除排队任务" :disabled="!!queueActionId" @click="deleteQueued(item)"><Trash2 :size="15" /></button><button type="button" class="queue-icon-button" title="更多操作" aria-label="更多操作" :disabled="!!queueActionId" @click="queueMenuId = queueMenuId === item.id ? null : item.id"><Ellipsis :size="16" /></button></div><div v-if="queueMenuId === item.id" class="queued-followup-menu"><button type="button" :disabled="!!queueActionId" @click="editQueued(item)"><Pencil :size="14" />编辑消息</button></div></div></section>
+        <section v-if="queuedSubmissions.length" class="queued-followups" aria-label="排队任务"><div class="queued-followups-heading"><span>排队中</span><span class="queued-count">{{ queuedSubmissions.length }}</span></div><div v-for="item in queuedSubmissions" :key="item.id" class="queued-followup"><CornerDownRight :size="15" class="queued-followup-icon" /><span class="queued-followup-text">{{ queuedText(item) }}</span><div class="queued-followup-actions"><button v-if="!isColleagueQueued(item)" type="button" class="queue-steer-button" :disabled="!!queueActionId || !activeTurnId" @click="steerQueued(item)"><CornerDownRight :size="14" />Steer</button><button type="button" class="queue-icon-button" title="删除排队任务" aria-label="删除排队任务" :disabled="!!queueActionId" @click="deleteQueued(item)"><Trash2 :size="15" /></button><button v-if="!isColleagueQueued(item)" type="button" class="queue-icon-button" title="更多操作" aria-label="更多操作" :disabled="!!queueActionId" @click="queueMenuId = queueMenuId === item.id ? null : item.id"><Ellipsis :size="16" /></button></div><div v-if="queueMenuId === item.id && !isColleagueQueued(item)" class="queued-followup-menu"><button type="button" :disabled="!!queueActionId" @click="editQueued(item)"><Pencil :size="14" />编辑消息</button></div></div></section>
         <p v-if="desktopMode" class="desktop-hint">{{ capabilities.models ? '模型与推理强度可在右侧选择；权限、审批和暂停请在 Desktop 处理。' : '当前设备未提供可识别的模型目录；模型、权限、审批和暂停请在 Desktop 处理。' }}</p><div v-for="approval in (capabilities.approvals ? pendingApprovals : [])" :key="approval.id" class="approval"><strong>{{ approval.method.includes('commandExecution') ? '命令执行需要确认' : '文件修改需要确认' }}</strong><p v-if="approval.params.reason">{{ approval.params.reason }}</p><pre v-if="approval.params.command">{{ approval.params.command }}</pre><p v-if="approval.params.cwd">工作目录：{{ approval.params.cwd }}</p><p v-if="approval.params.grantRoot">授权目录：{{ approval.params.grantRoot }}</p><details><summary>完整请求信息</summary><pre>{{ JSON.stringify(approval.params, null, 2) }}</pre></details><p v-if="approval.method.includes('fileChange')">请先在上方工具调用中查看文件变更，再决定是否允许。</p><div class="approval-actions"><button @click="decide(approval, 'decline')">拒绝</button><button @click="decide(approval, 'accept')">允许本次</button></div></div>
         <form class="composer" @submit.prevent="send()">
           <div v-if="selectedAttachments.length" class="composer-attachments" aria-label="待发送附件">

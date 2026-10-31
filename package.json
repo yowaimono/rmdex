@@ -20,7 +20,7 @@
     "build:relay": "esbuild server/relay/index.ts --bundle --platform=node --format=esm --packages=external --outfile=dist-relay/index.js",
     "test:relay": "tsx server/relay/relay.test.ts",
     "test:shared": "node --import tsx --test server/shared.integration.test.mjs",
-    "test:relay:integration": "node --import tsx --test server/relay/user.integration.test.mjs server/relay/employee-migration.integration.test.mjs",
+    "test:relay:integration": "node --import tsx --test server/relay/user.integration.test.mjs server/relay/employee-migration.integration.test.mjs server/relay/employee-communication.integration.test.mjs",
     "test:integration": "npm run test:relay && npm run test:relay:integration && npm run test:shared && npm run test:mcp",
     "test:all": "npm run test:unit && npm run test:integration",
     "build": "vue-tsc -b && vite build",

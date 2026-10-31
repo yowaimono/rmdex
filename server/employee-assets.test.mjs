@@ -42,3 +42,20 @@ test('existing user skill is not overwritten and prior memory is migrated idempo
     assert.match(await readFile(join(result.assetPath, 'memories', '2026-01-01-previous-employee-memory.md'), 'utf8'), /A prior note/)
   } finally { await rm(migratedHome, { recursive: true, force: true }) }
 })
+
+test('communication helper is managed, scoped and protects user-owned files', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'rmdex-employee-communication-assets-'))
+  try {
+    const input = { userId: 'user', employeeId: 'employee', communication: { origin: 'https://relay.example', token: 'a'.repeat(43) } }
+    const result = await prepareEmployeeAssets(input, home)
+    const config = JSON.parse(await readFile(join(result.assetPath, 'communication.json'), 'utf8'))
+    assert.deepEqual(config, { managedBy: 'rmdex', ...input.communication })
+    assert.match(await readFile(join(result.assetPath, 'colleagues.mjs'), 'utf8'), /redirect: 'error'/)
+    await prepareEmployeeAssets({ ...input, communication: { ...input.communication, token: 'b'.repeat(43) } }, home)
+    assert.equal(JSON.parse(await readFile(join(result.assetPath, 'communication.json'), 'utf8')).token, 'b'.repeat(43))
+    await writeFile(join(result.assetPath, 'colleagues.mjs'), 'user owned helper')
+    await assert.rejects(prepareEmployeeAssets(input, home), /User-managed/)
+    assert.equal(await readFile(join(result.assetPath, 'colleagues.mjs'), 'utf8'), 'user owned helper')
+    await assert.rejects(prepareEmployeeAssets({ ...input, communication: { ...input.communication, origin: 'http://insecure.example' } }, home), /origin/)
+  } finally { await rm(home, { recursive: true, force: true }) }
+})

@@ -376,7 +376,12 @@ const server = createServer(async (req, res) => {
         const input = [{ type: 'text', text: data.text, text_elements: [] }]
         if (queueMatch[2] === 'queue') {
           const queued = await rpc('thread/queue/add', { threadId, input, clientUserMessageId: typeof data.clientUserMessageId === 'string' ? data.clientUserMessageId : randomUUID() })
-          result = { outcome: 'queued', threadId, queuedSubmission: (queued as { queuedSubmission?: unknown }).queuedSubmission || null }
+          // add alone persists an idle submission but does not start it. Read
+          // native state as shared Desktop turns may predate our subscription.
+          const metadata = await rpc('thread/read', { threadId, includeTurns: false }) as { thread?: { status?: { type?: string } } }
+          const running = metadata.thread?.status?.type === 'active' || activeTurns.has(threadId)
+          const started = running ? undefined : await rpc('thread/queue/start', { threadId })
+          result = { outcome: 'queued', threadId, queuedSubmission: (queued as { queuedSubmission?: unknown }).queuedSubmission || null, ...(started && typeof started === 'object' ? started : {}) }
         } else {
           const expectedTurnId = typeof data.expectedTurnId === 'string' && data.expectedTurnId ? data.expectedTurnId : activeTurns.get(threadId)
           if (!expectedTurnId) throw new Error('当前没有可引导的运行中任务')

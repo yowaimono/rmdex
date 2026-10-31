@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url'
 import { DesktopMcp } from './desktop-mcp.ts'
 import { DesktopAdapter, OperationJournal, adaptRead } from './desktop-adapter.ts'
 import { desktopModels } from './desktop-models.ts'
-import { finalAnswer, messageRequest, normalizeItem, timeline } from '../src/conversation.ts'
+import { colleagueMessage, finalAnswer, messageRequest, normalizeItem, timeline } from '../src/conversation.ts'
+import { webLink } from '../src/in-app-browser.ts'
 
 const fixture = fileURLToPath(new URL('./desktop-test-fixture.mjs', import.meta.url))
 const context = { server: fixture, pipe: 'mock', threadId: 'registered-caller', turnId: 'registered-turn', registeredAt: Date.now() }
@@ -62,6 +63,22 @@ test('employee bootstrap context stays hidden from the visible user message', ()
   const text = '<rmdex_employee_context>private employee instructions</rmdex_employee_context>\n<rmdex_user_request>Run the focused tests</rmdex_user_request>'
   const [message] = timeline([{ id: 'employee-turn', status: 'completed', items: [{ type: 'userMessage', content: [{ type: 'text', text }] }] }])
   assert.equal(message.text, 'Run the focused tests')
+})
+test('employee messages show only their body and remain copyable without user retry', () => {
+  const envelope = '<rmdex_colleague_message>\n{"messageId":"123e4567-e89b-12d3-a456-426614174000","senderName":"文案员工","senderRole":"文案","text":"请核对首页文案"}\n</rmdex_colleague_message>'
+  assert.deepEqual(colleagueMessage(envelope), { messageId: '123e4567-e89b-12d3-a456-426614174000', senderName: '文案员工', senderRole: '文案', text: '请核对首页文案' })
+  const [entry] = timeline([{ id: 'employee-turn', status: 'inProgress', items: [{ type: 'userMessage', content: [{ type: 'text', text: envelope }] }] }])
+  assert.equal(entry.role, 'user')
+  assert.equal(entry.text, '请核对首页文案')
+  assert.equal(entry.copyText, '请核对首页文案')
+  assert.equal(entry.colleagueName, '文案员工')
+})
+test('in-app browser accepts only credential-free HTTP(S) links', () => {
+  assert.equal(webLink('https://example.com/path?q=1'), 'https://example.com/path?q=1')
+  assert.equal(webLink('http://example.com'), 'http://example.com/')
+  assert.equal(webLink('javascript:alert(1)'), undefined)
+  assert.equal(webLink('https://user:pass@example.com'), undefined)
+  assert.equal(webLink('/relative/path'), undefined)
 })
 
 test('Desktop delegated input renders as user before replies without hiding real tool results', () => {

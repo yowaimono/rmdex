@@ -1,4 +1,4 @@
-import { createHash, randomBytes, scrypt, timingSafeEqual } from 'node:crypto'
+import { createHash, createHmac, randomBytes, scrypt, timingSafeEqual } from 'node:crypto'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { dirname, extname, join, normalize } from 'node:path'
@@ -14,7 +14,8 @@ type NotificationEvent = { id: string; deviceId: string; threadId: string; turnI
 type Employee = { id: string; userId: string; name: string; role: string; instructions: string; legacyMemory?: string; deviceId: string; projectPath: string; threadId?: string; initializedThreadId?: string; assetContextVersion?: number; createdAt: number; updatedAt: number; archived?: boolean }
 type Pairing = { codeHash: string; deviceId: string; userId: string; expiresAt: number }
 type PairRequest = { id: string; deviceId: string; userId: string; name: string; createdAt: number; expiresAt: number; status: 'pending' | 'approved' | 'denied'; token?: string }
-type State = { devices: Device[]; clients: Client[]; pairings: Pairing[]; pairRequests: PairRequest[]; users: User[]; sessions: AuthSession[]; pushTokens: PushToken[]; notifications: NotificationEvent[]; employees: Employee[] }
+type MessageReceipt = { messageId: string; senderId: string; recipientId: string; fingerprint: string; threadId: string; deviceId: string; status: 'dispatching' | 'queued' | 'uncertain'; createdAt: number }
+type State = { devices: Device[]; clients: Client[]; pairings: Pairing[]; pairRequests: PairRequest[]; users: User[]; sessions: AuthSession[]; pushTokens: PushToken[]; notifications: NotificationEvent[]; employees: Employee[]; employeeMessages: MessageReceipt[] }
 type Credentials = { accessToken: string; refreshToken: string; expiresIn: number; user: { id: string; username: string; role?: User['role'] }; token?: string; clientToken?: string; deviceId?: string }
 type Pending = { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
 
@@ -26,7 +27,10 @@ const adminPassword = process.env.RMDEX_ADMIN_PASSWORD || ''
 const statePath = process.env.RMDEX_STATE || '/data/state.json'
 const webRoot = process.env.RMDEX_WEB_ROOT || '/app/web'
 const employeeSkill = await readFile(process.env.RMDEX_EMPLOYEE_SKILL || join(process.cwd(), 'server', 'skills', 'rmdex-employee', 'SKILL.md'), 'utf8')
-const state: State = { devices: [], clients: [], pairings: [], pairRequests: [], users: [], sessions: [], pushTokens: [], notifications: [], employees: [] }
+const state: State = { devices: [], clients: [], pairings: [], pairRequests: [], users: [], sessions: [], pushTokens: [], notifications: [], employees: [], employeeMessages: [] }
+const employeeDeliveries = new Set<string>()
+const messageDeliveries = new Set<string>()
+const ASSET_CONTEXT_VERSION = 2
 const approvedPairTokens = new Map<string, Credentials>()
 const deviceSockets = new Map<string, WebSocket>()
 const devicePending = new Map<string, Map<string, Pending>>()
@@ -141,8 +145,9 @@ async function load() {
       return []
     }) : []
     state.notifications = Array.isArray(saved.notifications) ? saved.notifications.filter(item => item && typeof item.deviceId === 'string' && typeof item.threadId === 'string') : []
+    state.employeeMessages = Array.isArray(saved.employeeMessages) ? saved.employeeMessages.map(item => ({ ...item, status: item.status === 'dispatching' ? 'uncertain' : item.status })) : []
     state.employees = Array.isArray(saved.employees) ? saved.employees.filter(item => item && typeof item.id === 'string' && typeof item.userId === 'string' && typeof item.name === 'string' && typeof item.deviceId === 'string' && typeof item.projectPath === 'string' && state.users.some(user => user.id === item.userId)).map(item => ({
-      id: item.id, userId: item.userId, name: item.name, role: typeof item.role === 'string' ? item.role : '', instructions: typeof item.instructions === 'string' ? item.instructions : '', ...(typeof item.legacyMemory === 'string' && item.legacyMemory.trim() ? { legacyMemory: item.legacyMemory } : typeof item.memory === 'string' && item.memory.trim() ? { legacyMemory: item.memory } : {}), deviceId: item.deviceId, projectPath: item.projectPath, ...(typeof item.threadId === 'string' ? { threadId: item.threadId } : {}), ...(item.assetContextVersion === 1 && typeof item.initializedThreadId === 'string' ? { initializedThreadId: item.initializedThreadId, assetContextVersion: 1 } : {}), createdAt: Number(item.createdAt) || Date.now(), updatedAt: Number(item.updatedAt) || Date.now(), ...(item.archived ? { archived: true } : {}),
+      id: item.id, userId: item.userId, name: item.name, role: typeof item.role === 'string' ? item.role : '', instructions: typeof item.instructions === 'string' ? item.instructions : '', ...(typeof item.legacyMemory === 'string' && item.legacyMemory.trim() ? { legacyMemory: item.legacyMemory } : typeof item.memory === 'string' && item.memory.trim() ? { legacyMemory: item.memory } : {}), deviceId: item.deviceId, projectPath: item.projectPath, ...(typeof item.threadId === 'string' ? { threadId: item.threadId } : {}), ...(Number.isInteger(item.assetContextVersion) && typeof item.initializedThreadId === 'string' ? { initializedThreadId: item.initializedThreadId, assetContextVersion: item.assetContextVersion } : {}), createdAt: Number(item.createdAt) || Date.now(), updatedAt: Number(item.updatedAt) || Date.now(), ...(item.archived ? { archived: true } : {}),
     })) : []
     state.pairings = Array.isArray(saved.pairings) ? saved.pairings.filter(pair => pair && pair.expiresAt > Date.now() && typeof pair.codeHash === 'string' && typeof pair.deviceId === 'string' && typeof pair.userId === 'string' && state.users.some(user => user.id === pair.userId)).map(pair => ({ codeHash: pair.codeHash, deviceId: pair.deviceId, userId: pair.userId, expiresAt: pair.expiresAt })) : []
     state.pairRequests = Array.isArray(saved.pairRequests) ? saved.pairRequests.filter(pair => pair && pair.expiresAt > Date.now() && pair.status === 'pending' && typeof pair.id === 'string' && typeof pair.deviceId === 'string' && typeof pair.userId === 'string' && typeof pair.name === 'string' && state.users.some(user => user.id === pair.userId)).map(pair => ({ id: pair.id, deviceId: pair.deviceId, userId: pair.userId, name: pair.name, createdAt: pair.createdAt, expiresAt: pair.expiresAt, status: pair.status })) : []
@@ -204,6 +209,71 @@ function deviceForUser(deviceId: string, userId: string) {
 function employeeView(employee: Employee) {
   const { legacyMemory: _legacyMemory, ...view } = employee
   return view
+}
+function communicationToken(employee: Employee) {
+  const device = deviceForUser(employee.deviceId, employee.userId)
+  if (!device || !employee.threadId) return ''
+  return createHmac('sha256', device.tokenHash).update(JSON.stringify(['employee-communication-v1', employee.userId, employee.id, employee.threadId])).digest('base64url')
+}
+async function employeeAssets(employee: Employee) {
+  const assets = await rpc(employee.deviceId, '/api/employee-assets/prepare', 'POST', {
+    userId: employee.userId, employeeId: employee.id,
+    communication: { origin: publicOrigin, token: communicationToken(employee) },
+    ...(employee.legacyMemory ? { legacyMemory: employee.legacyMemory, legacyMemoryDate: new Date(employee.createdAt).toISOString().slice(0, 10) } : {}),
+  }) as { assetPath?: unknown; skillPath?: unknown }
+  if (typeof assets?.assetPath !== 'string' || typeof assets.skillPath !== 'string') throw new Error('设备未能准备员工资产目录或 Skill')
+  if (employee.legacyMemory) { delete employee.legacyMemory; await persist() }
+  return { assetPath: assets.assetPath, skillPath: assets.skillPath }
+}
+function needsEmployeeContext(employee: Employee) { return employee.initializedThreadId !== employee.threadId || employee.assetContextVersion !== ASSET_CONTEXT_VERSION }
+
+async function communicate(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse, pathname: string) {
+  const token = bearer(req)
+  const sender = token && state.employees.find(item => !item.archived && userForId(item.userId) && communicationToken(item) && equalHash(token, hash(communicationToken(item))))
+  if (!sender) { json(res, 401, { error: '员工通信凭证已失效，请在员工当前会话中发送一条消息以刷新' }); return }
+  if (req.method === 'GET' && pathname === '/api/employee-communication/colleagues') {
+    json(res, 200, { data: state.employees.filter(item => !item.archived && item.userId === sender.userId && item.id !== sender.id).map(item => ({ id: item.id, name: item.name, role: item.role, hasCurrentThread: Boolean(item.threadId), online: deviceSockets.get(item.deviceId)?.readyState === WebSocket.OPEN })) }); return
+  }
+  if (req.method !== 'POST' || pathname !== '/api/employee-communication/messages') { json(res, 404, { error: 'Not found' }); return }
+  const data = await body(req)
+  if (Object.keys(data).some(key => !['recipientId', 'text', 'messageId'].includes(key)) || typeof data.recipientId !== 'string' || typeof data.text !== 'string' || !data.text.trim() || data.text.length > 16000 || typeof data.messageId !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(data.messageId)) {
+    json(res, 400, { error: '需要收件员工 ID、非空消息（最多 16000 字符）和消息 UUID' }); return
+  }
+  const fingerprint = hash(JSON.stringify([data.recipientId, data.text]))
+  const operationKey = `${sender.id}:${data.messageId}`
+  const previous = state.employeeMessages.find(item => item.senderId === sender.id && item.messageId === data.messageId)
+  const receiptView = (item: MessageReceipt) => ({ messageId: item.messageId, recipientId: item.recipientId, threadId: item.threadId, status: item.status })
+  if (previous) {
+    if (previous.fingerprint !== fingerprint) { json(res, 409, { error: '同一消息 ID 不能用于不同内容' }); return }
+    json(res, previous.status === 'queued' ? 200 : 409, { receipt: receiptView(previous), ...(previous.status !== 'queued' ? { error: '投递中或结果不确定，请核对收件会话，勿换新 ID 重发' } : {}) }); return
+  }
+  if (messageDeliveries.has(operationKey)) { json(res, 409, { error: '同一消息正在投递，请使用同一 ID 稍后重试' }); return }
+  const recipient = employeeFor(data.recipientId, sender.userId)
+  if (!recipient || recipient.id === sender.id) { json(res, 404, { error: '收件员工不存在或不能向自己发送' }); return }
+  if (!recipient.threadId) { json(res, 409, { error: '收件员工尚无当前会话，请先打开该员工' }); return }
+  if (!deviceForUser(recipient.deviceId, sender.userId) || deviceSockets.get(recipient.deviceId)?.readyState !== WebSocket.OPEN) { json(res, 409, { error: '收件员工的设备离线，请上线后使用同一消息 ID 重试' }); return }
+  if (employeeDeliveries.has(recipient.id)) { json(res, 409, { error: '收件会话正在更新或投递，请使用同一消息 ID 稍后重试' }); return }
+  employeeDeliveries.add(recipient.id)
+  messageDeliveries.add(operationKey)
+  let receipt: MessageReceipt | undefined
+  try {
+    const threadId = recipient.threadId
+    const assets = await employeeAssets(recipient)
+    const envelope = `<rmdex_colleague_message>\n${JSON.stringify({ messageId: data.messageId, senderId: sender.id, senderName: sender.name, senderRole: sender.role, text: data.text })}\n</rmdex_colleague_message>`
+    const text = needsEmployeeContext(recipient) ? `${employeeContext(recipient, assets)}\n${envelope}\n</rmdex_user_request>` : envelope
+    receipt = { messageId: data.messageId, senderId: sender.id, recipientId: recipient.id, fingerprint, threadId, deviceId: recipient.deviceId, status: 'dispatching', createdAt: Date.now() }
+    state.employeeMessages.push(receipt)
+    await persist()
+    await rpc(recipient.deviceId, `/api/threads/${threadId}/queue`, 'POST', { text, clientUserMessageId: data.messageId })
+    receipt.status = 'queued'
+    recipient.initializedThreadId = threadId
+    recipient.assetContextVersion = ASSET_CONTEXT_VERSION
+    await persist()
+    json(res, 200, { receipt: receiptView(receipt) })
+  } catch (error) {
+    if (receipt) { receipt.status = 'uncertain'; await persist() }
+    json(res, 502, { error: receipt ? '投递结果不确定，请核对收件会话，勿换新 ID 重发' : error instanceof Error ? error.message : '员工消息投递失败', ...(receipt ? { receipt: receiptView(receipt) } : {}) })
+  } finally { employeeDeliveries.delete(recipient.id); messageDeliveries.delete(operationKey) }
 }
 function employeeContext(employee: Employee, assets: { assetPath: string; skillPath: string }) {
   return [
@@ -273,6 +343,7 @@ const server = createServer(async (req, res) => {
   const url = new URL(req.url || '/', publicOrigin)
   const origin = req.headers.origin
   if (origin && origin !== publicOrigin) { json(res, 403, { error: 'Origin not allowed' }); return }
+  let lockedEmployee: string | undefined
   try {
     if (req.method === 'GET' && (url.pathname === '/' || !url.pathname.startsWith('/api/'))) {
       const relative = normalize(decodeURIComponent(url.pathname)).replace(/^([/\\])+/, '')
@@ -516,6 +587,7 @@ const server = createServer(async (req, res) => {
       const cursor = events.reduce((value, item) => Math.max(value, item.createdAt), after)
       json(res, 200, { data: events, cursor }); return
     }
+    if (url.pathname.startsWith('/api/employee-communication/')) { await communicate(req, res, url.pathname); return }
     const client = clientFor(req)
     if (!client) { json(res, 401, { error: '需要登录或扫码配对' }); return }
     const device = state.devices.find(item => item.id === client.deviceId && !item.revoked)
@@ -544,6 +616,9 @@ const server = createServer(async (req, res) => {
       const employee = employeeFor(employeeMatch[1]!, userId)
       if (!employee) { json(res, 404, { error: '员工不存在' }); return }
       const action = employeeMatch[2]
+      if (employeeDeliveries.has(employee.id)) { json(res, 409, { error: '员工会话正在接收消息，请稍后再修改或重置' }); return }
+      employeeDeliveries.add(employee.id)
+      lockedEmployee = employee.id
       if (req.method === 'POST' && action === 'update') {
         const data = await body(req)
         const nextName = typeof data.name === 'string' ? data.name.trim().slice(0, 80) : employee.name
@@ -586,13 +661,14 @@ const server = createServer(async (req, res) => {
     let requestData = req.method === 'POST' ? await body(req) : undefined
     const employeeId = typeof requestData?.employeeId === 'string' ? requestData.employeeId : ''
     const employee = employeeId ? employeeFor(employeeId, userId) : undefined
-    const employeeNeedsContext = Boolean(employee && employee.threadId === url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/send$/)?.[1] && employee.initializedThreadId !== employee.threadId)
+    const employeeNeedsContext = Boolean(employee && employee.threadId === url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/(?:send|queue)$/)?.[1] && needsEmployeeContext(employee))
     if (employeeId && !employee) { json(res, 404, { error: '员工不存在' }); return }
     if (employee && (employee.deviceId !== device.id || employee.threadId !== url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/(?:send|queue|steer)$/)?.[1])) { json(res, 403, { error: '员工与当前设备或会话不匹配' }); return }
-    if (employee && url.pathname.endsWith('/send')) {
-      const assets = await rpc(device.id, '/api/employee-assets/prepare', 'POST', { userId, employeeId: employee.id, ...(employee.legacyMemory ? { legacyMemory: employee.legacyMemory, legacyMemoryDate: new Date(employee.createdAt).toISOString().slice(0, 10) } : {}) }) as { assetPath?: unknown; skillPath?: unknown }
-      if (typeof assets?.assetPath !== 'string' || typeof assets.skillPath !== 'string') throw new Error('设备未能准备员工资产目录或 Skill')
-      if (employee.legacyMemory) { delete employee.legacyMemory; await persist() }
+    if (employee && /\/(?:send|queue)$/.test(url.pathname)) {
+      if (employeeDeliveries.has(employee.id)) { json(res, 409, { error: '员工会话正在更新或接收消息，请稍后重试' }); return }
+      employeeDeliveries.add(employee.id)
+      lockedEmployee = employee.id
+      const assets = await employeeAssets(employee)
       if (employeeNeedsContext) requestData = { ...requestData, text: `${employeeContext(employee, { assetPath: assets.assetPath, skillPath: assets.skillPath })}\n${typeof requestData?.text === 'string' ? requestData.text : ''}\n</rmdex_user_request>` }
     }
     if (requestData && 'employeeId' in requestData) {
@@ -603,7 +679,7 @@ const server = createServer(async (req, res) => {
     const result = await rpc(device.id, url.pathname + url.search, req.method!, requestData)
     if (employee && employeeNeedsContext) {
       employee.initializedThreadId = employee.threadId
-      employee.assetContextVersion = 1
+      employee.assetContextVersion = ASSET_CONTEXT_VERSION
       employee.updatedAt = Date.now()
       await persist()
     }
@@ -620,7 +696,7 @@ const server = createServer(async (req, res) => {
     json(res, 200, result)
   } catch (error) {
     json(res, 502, { error: error instanceof Error ? error.message : 'Relay error' })
-  }
+  } finally { if (lockedEmployee) employeeDeliveries.delete(lockedEmployee) }
 })
 
 const sockets = new WebSocketServer({ noServer: true, maxPayload: 32 * 1024 * 1024 })

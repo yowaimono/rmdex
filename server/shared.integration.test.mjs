@@ -41,7 +41,7 @@ function spawnCodex(args, options) {
   return spawn('codex', args, options)
 }
 
-test('shared client observes a turn started by another client', { timeout: 40000 }, async () => {
+test('shared client observes turns, forks history, and defers queued messages', { timeout: 90000 }, async t => {
   const home = await mkdtemp(join(tmpdir(), 'rmdex-shared-test-'))
   const socket = join(homedir(), '.codex', 'app-server-control', `rmdex-test-${process.pid}.sock`)
   let response
@@ -165,12 +165,44 @@ test('shared client observes a turn started by another client', { timeout: 40000
     const forkRead = await forkReadResponse.json()
     assert.deepEqual(forkRead.thread.turns.map(item => item.id), [turn.id])
     assert.deepEqual((await read()).thread.turns.map(item => item.id), [turn.id, next.turn.id])
+    // Native queue must start idle threads and defer busy-thread submissions.
+    t.diagnostic('checking idle queue dispatch')
+    response = undefined
+    const blankResponse = await fetch(`http://127.0.0.1:${agentPort}/api/threads`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'http://localhost:5173' }, body: JSON.stringify({ cwd: home }),
+    })
+    const blank = await blankResponse.json()
+    assert.equal(blankResponse.status, 200, JSON.stringify(blank))
+    const queueThreadId = blank.thread.id
+    const enqueue = text => fetch(`http://127.0.0.1:${agentPort}/api/threads/${queueThreadId}/queue`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'http://localhost:5173' }, body: JSON.stringify({ text }),
+    })
+    const idleQueued = await enqueue('idle colleague message')
+    assert.equal(idleQueued.status, 200, JSON.stringify(await idleQueued.json()))
+    t.diagnostic('idle submission accepted')
+    await waitFor(() => response)
+    const firstResponse = response
+    t.diagnostic('idle submission started')
+    const busyQueued = await enqueue('busy colleague message')
+    assert.equal(busyQueued.status, 200, JSON.stringify(await busyQueued.json()))
+    const queue = await (await fetch(`http://127.0.0.1:${agentPort}/api/threads/${queueThreadId}/queue`)).json()
+    assert.equal(queue.data.length, 1)
+    assert.equal(response, firstResponse)
+    firstResponse.end(`event: response.completed\ndata: ${JSON.stringify({ type: 'response.completed', response: { id: 'queue-response', status: 'completed', output: [], usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } })}\n\n`)
+    await waitFor(() => response && response !== firstResponse)
+    assert.equal((await (await fetch(`http://127.0.0.1:${agentPort}/api/threads/${queueThreadId}/queue`)).json()).data.length, 0)
+    const queueRead = await (await fetch(`http://127.0.0.1:${agentPort}/api/threads/${queueThreadId}`)).json()
+    assert.deepEqual(queueRead.thread.turns.flatMap(turn => turn.items.filter(item => item.type === 'userMessage').flatMap(item => item.content.filter(part => part.type === 'text').map(part => part.text))), ['idle colleague message', 'busy colleague message'])
+    await fetch(`http://127.0.0.1:${agentPort}/api/threads/${queueThreadId}/stop`, {
+      method: 'POST', headers: { Origin: 'http://localhost:5173', 'Content-Type': 'application/json' }, body: '{}',
+    })
   } finally {
     ws?.terminate()
     bridge?.close()
     await stopChild(agent)
     await stopChild(codex)
     response?.destroy()
+    model.closeAllConnections()
     await new Promise(resolve => model.close(resolve))
     await unlink(socket).catch(() => {})
   }

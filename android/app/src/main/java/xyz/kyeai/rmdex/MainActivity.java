@@ -8,6 +8,7 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(RmdexBackgroundServicePlugin.class);
+        registerPlugin(RmdexBrowserPlugin.class);
         super.onCreate(savedInstanceState);
     }
 }
