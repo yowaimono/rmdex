@@ -1,7 +1,7 @@
 export type ContentPart = { type: string; text?: string; url?: string; path?: string; assetUrl?: string }
 export type Item = { id?: string; type: string; text?: string; content?: ContentPart[]; [key: string]: unknown }
 export type Turn = { id: string; status: string; items: Item[] }
-export type MessageEntry = { role: 'user' | 'agent'; text: string; copyText: string; images: ContentPart[]; item: Item; turnId: string }
+export type MessageEntry = { role: 'user' | 'agent'; text: string; copyText: string; images: ContentPart[]; item: Item; turnId: string; forkable: boolean }
 export type Entry = MessageEntry | { role: 'tools'; items: Item[] }
 
 // A retry must keep file references, but must not replay employee bootstrap
@@ -13,14 +13,18 @@ export function messageRequest(item: Item): string {
     .replace(/<\/?rmdex_user_request>\s*/g, '').trim()
 }
 
-export function finalAnswer(turn: Turn): string {
+function finalAnswerItems(turn: Turn): Item[] {
   const replies = (turn.items || []).filter(item => item.type === 'agentMessage' && item.text?.trim())
   const explicit = replies.filter(item => item.phase === 'final_answer')
-  if (explicit.length) return explicit.map(item => item.text!).join('\n\n')
+  if (explicit.length) return explicit
   // Older hosts omit phase. Only use the last reply after a completed turn,
   // and never fall back to an explicitly labelled commentary message.
   const last = replies[replies.length - 1]
-  return turn.status === 'completed' && last && !last.phase ? last.text! : ''
+  return turn.status === 'completed' && last && !last.phase ? [last] : []
+}
+
+export function finalAnswer(turn: Turn): string {
+  return finalAnswerItems(turn).map(item => item.text!).join('\n\n')
 }
 
 // Desktop routes native create/send input through a delegation tool result.
@@ -63,7 +67,8 @@ function userFiles(text: string) {
 export function timeline(turns: Turn[]): Entry[] {
   const entries: Entry[] = []
   for (const turn of turns) {
-    const answer = finalAnswer(turn)
+    const answerItems = finalAnswerItems(turn)
+    const answer = answerItems.map(item => item.text!).join('\n\n')
     let group: Item[] = []
     const flush = () => { if (group.length) entries.push({ role: 'tools', items: group }); group = [] }
     for (const original of turn.items || []) {
@@ -74,10 +79,10 @@ export function timeline(turns: Turn[]): Entry[] {
         const rawText = (item.content || []).filter(part => part.type === 'text').map(part => part.text || '').filter(Boolean).join('\n')
         const text = userText(rawText)
         const images = (item.content || []).filter(part => part.type === 'localImage' || part.type === 'image')
-        if (text || images.length) entries.push({ role: 'user', text, copyText: text, images, item, turnId: turn.id })
+        if (text || images.length) entries.push({ role: 'user', text, copyText: text, images, item, turnId: turn.id, forkable: false })
       } else if (item.type === 'agentMessage') {
         flush()
-        if (item.text) entries.push({ role: 'agent', text: item.text, copyText: answer, images: [], item, turnId: turn.id })
+        if (item.text) entries.push({ role: 'agent', text: item.text, copyText: answer, images: [], item, turnId: turn.id, forkable: turn.status === 'completed' && answerItems.includes(original) })
       } else group.push(item)
     }
     flush()

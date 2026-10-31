@@ -132,6 +132,12 @@ test('shared client observes a turn started by another client', { timeout: 40000
     const next = await rpc('turn/start', { threadId: thread.id, input: [{ type: 'text', text: 'test interrupt', text_elements: [] }, { type: 'localImage', path: imagePath }] })
     await waitFor(() => response)
     await waitFor(async () => (await read()).activeTurnId === next.turn.id)
+    const activeFork = await fetch(`http://127.0.0.1:${agentPort}/api/threads/${thread.id}/fork`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'http://localhost:5173' }, body: JSON.stringify({ lastTurnId: next.turn.id }),
+    })
+    const activeForkResult = await activeFork.json()
+    assert.equal(activeFork.status, 502, JSON.stringify(activeForkResult))
+    assert.match(activeForkResult.error, /仍在执行/)
     await waitFor(async () => {
       const result = await (await fetch(`http://127.0.0.1:${agentPort}/api/threads/${thread.id}/status`)).json()
       return result.live?.items?.some(item => item.content?.some(part => part.type === 'localImage'))
@@ -147,6 +153,18 @@ test('shared client observes a turn started by another client', { timeout: 40000
     })
     assert.equal(stopped.status, 200, JSON.stringify(await stopped.json()))
     await waitFor(async () => { const result = await read(); return result.activeTurnId === null && result.lastTurn?.status === 'interrupted' })
+    const forkResponse = await fetch(`http://127.0.0.1:${agentPort}/api/threads/${thread.id}/fork`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'http://localhost:5173' }, body: JSON.stringify({ lastTurnId: turn.id }),
+    })
+    const forkResult = await forkResponse.json()
+    assert.equal(forkResponse.status, 200, JSON.stringify(forkResult))
+    const forked = forkResult.thread
+    assert.ok(forked?.id)
+    const forkReadResponse = await fetch(`http://127.0.0.1:${agentPort}/api/threads/${forked.id}`)
+    assert.equal(forkReadResponse.status, 200)
+    const forkRead = await forkReadResponse.json()
+    assert.deepEqual(forkRead.thread.turns.map(item => item.id), [turn.id])
+    assert.deepEqual((await read()).thread.turns.map(item => item.id), [turn.id, next.turn.id])
   } finally {
     ws?.terminate()
     bridge?.close()

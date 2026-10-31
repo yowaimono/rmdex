@@ -327,11 +327,14 @@ const server = createServer(async (req, res) => {
         result = { thread: started.thread }
       } else if (forkMatch) {
         const threadId = forkMatch[1]!
+        if (data.lastTurnId !== undefined && (typeof data.lastTurnId !== 'string' || !data.lastTurnId.trim() || data.lastTurnId.length > 256)) throw new Error('缺少有效的 Fork 回合 ID')
+        const lastTurnId = typeof data.lastTurnId === 'string' ? data.lastTurnId.trim() : undefined
+        if (lastTurnId && activeTurns.get(threadId) === lastTurnId) throw new Error('当前回合仍在执行，结束后再从这里分叉')
         const source = newThreads.get(threadId) || { id: threadId, name: threadNames[threadId] || null }
         const requestedName = typeof data.name === 'string' ? data.name.trim() : ''
         const sourceName = typeof source.name === 'string' && source.name.trim() ? source.name.trim() : '未命名会话'
         const name = (requestedName || `${sourceName} 副本`).slice(0, 80)
-        const forked = await rpc('thread/fork', { threadId, excludeTurns: true }) as { thread?: Record<string, unknown> }
+        const forked = await rpc('thread/fork', { threadId, ...(lastTurnId ? { lastTurnId } : {}), excludeTurns: true }) as { thread?: Record<string, unknown> }
         if (typeof forked.thread?.id !== 'string') throw new Error('Codex 未返回 Fork 后的新会话 ID')
         const forkedId = forked.thread.id
         newThreads.set(forkedId, { ...forked.thread, name })

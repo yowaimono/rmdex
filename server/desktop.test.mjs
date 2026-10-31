@@ -21,6 +21,7 @@ test('copying an AI reply selects only final answers from its own turn', () => {
   assert.equal(finalAnswer(turn), '**All tests passed.**')
   const entries = timeline([turn, { id: 'next-turn', status: 'inProgress', items: [{ type: 'agentMessage', phase: 'commentary', text: 'Working' }] }])
   assert.deepEqual(entries.filter(entry => entry.role === 'agent').map(entry => entry.copyText), ['**All tests passed.**', '**All tests passed.**', ''])
+  assert.deepEqual(entries.filter(entry => entry.role === 'agent').map(entry => entry.forkable), [false, true, false])
   assert.equal(entries[0].turnId, 'answer-turn')
 })
 
@@ -34,6 +35,8 @@ test('legacy replies copy only the last completed answer and never commentary or
   assert.equal(finalAnswer({ ...turn, status: 'inProgress' }), '')
   assert.equal(finalAnswer({ ...turn, status: 'failed' }), '')
   assert.equal(finalAnswer({ ...turn, items: [{ type: 'agentMessage', phase: 'commentary', text: 'Still inspecting' }] }), '')
+  assert.equal(timeline([turn]).find(entry => entry.role === 'agent' && entry.text === 'Let me inspect').forkable, false)
+  assert.equal(timeline([turn]).find(entry => entry.role === 'agent' && entry.text === 'Final result').forkable, true)
 })
 
 test('retry input preserves file context and images without replaying employee bootstrap', () => {

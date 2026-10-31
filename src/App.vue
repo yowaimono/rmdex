@@ -931,13 +931,13 @@ async function refreshThread(thread: Thread) {
   } catch (e) { threadActionError.value = e instanceof Error ? e.message : String(e); error.value = threadActionError.value }
   finally { threadActionId.value = null }
 }
-async function forkThread(thread: Thread) {
+async function forkThread(thread: Thread, lastTurnId?: string) {
   if (!capabilities.value.fork || threadActionId.value) return
   closeThreadMenus()
   threadActionError.value = ''
   threadActionId.value = thread.id
   try {
-    const result = await post(`/api/threads/${thread.id}/fork`, {}) as { thread?: Thread; message?: string }
+    const result = await post(`/api/threads/${thread.id}/fork`, lastTurnId ? { lastTurnId } : {}) as { thread?: Thread; message?: string }
     if (!result.thread?.id) throw new Error(result.message || 'Fork 未返回新会话')
     const forked = result.thread
     threads.value = [forked, ...threads.value.filter(item => item.id !== forked.id)]
@@ -945,6 +945,10 @@ async function forkThread(thread: Thread) {
     await openThread(forked)
   } catch (e) { threadActionError.value = e instanceof Error ? e.message : String(e); error.value = threadActionError.value }
   finally { threadActionId.value = null }
+}
+function forkMessage(message: MessageEntry) {
+  if (!message.forkable || !selected.value) return
+  void forkThread(selected.value, message.turnId)
 }
 async function archiveThread(thread: Thread) {
   if (!capabilities.value.archive || threadActionId.value) return
@@ -1977,7 +1981,7 @@ onUnmounted(() => { window.removeEventListener('keydown', handlePreviewKey); if 
             <summary><Wrench :size="14" /><span>{{ toolSummary(message.items) }}</span><span v-if="message.items.some(item => item.status === 'failed' || item.status === 'declined' || item.success === false || (typeof item.exitCode === 'number' && item.exitCode !== 0))" class="group-failed">含失败</span><ChevronRight :size="14" class="group-chevron" /></summary>
             <div class="tool-group-content"><ToolEvent v-for="(item, index) in message.items" :key="item.id || index" :item="item" :image-url="toolImageSource(item)" @preview="showImagePreview" /></div>
           </details>
-          <MessageBubble v-else :role="message.role" :copy-text="message.copyText" :retryable="message.role === 'user' && capabilities.send" :retry-disabled="working || retrying" @copy="copyValue($event, '已复制消息')" @retry="retryMessage(message)">
+          <MessageBubble v-else :role="message.role" :copy-text="message.copyText" :retryable="message.role === 'user' && capabilities.send" :retry-disabled="working || retrying" :forkable="message.role === 'agent' && message.forkable && capabilities.fork" @copy="copyValue($event, '已复制消息')" @retry="retryMessage(message)" @fork="forkMessage(message)">
             <div v-if="message.images.length" class="attachments"><template v-for="(image, index) in message.images" :key="index"><button v-if="imageSource(image)" type="button" class="attachment" title="放大预览图片" aria-label="放大预览图片" @click="showImagePreview(imageSource(image) || '')"><img :src="imageSource(image)" alt="图片附件" loading="lazy" /></button><span v-else class="attachment-unavailable">图片附件不可用</span></template></div>
             <div v-if="message.text" class="message-text markdown" v-html="markdown.render(message.text)"></div>
           </MessageBubble>

@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { nextTick, onUnmounted, ref, watch } from 'vue'
-import { Copy, RotateCcw, X } from 'lucide-vue-next'
+import { Copy, GitFork, RotateCcw, X } from 'lucide-vue-next'
 
-const props = defineProps<{ role: 'user' | 'agent'; copyText: string; retryable?: boolean; retryDisabled?: boolean; failed?: boolean }>()
-const emit = defineEmits<{ copy: [text: string]; retry: [] }>()
+const props = defineProps<{ role: 'user' | 'agent'; copyText: string; retryable?: boolean; retryDisabled?: boolean; forkable?: boolean; failed?: boolean }>()
+const emit = defineEmits<{ copy: [text: string]; retry: []; fork: [] }>()
 const open = ref(false)
 const target = ref<HTMLElement | null>(null)
 const menu = ref<HTMLElement | null>(null)
@@ -41,10 +41,11 @@ function onClick(event: MouseEvent) {
   event.stopPropagation()
   suppressClick = false
 }
-function choose(action: 'copy' | 'retry') {
+function choose(action: 'copy' | 'retry' | 'fork') {
   close()
   if (action === 'copy') emit('copy', props.copyText)
-  else emit('retry')
+  else if (action === 'retry') emit('retry')
+  else emit('fork')
 }
 function actionClick(event: MouseEvent) {
   // Touch browsers can target the newly opened overlay with the synthetic
@@ -93,6 +94,7 @@ onUnmounted(() => { cancelPress(); window.removeEventListener('keydown', menuKey
         <section ref="menu" class="message-action-menu" role="dialog" aria-modal="true" :aria-label="role === 'user' ? '用户消息操作' : 'AI 回复操作'">
           <header><span>{{ role === 'user' ? '消息操作' : '最终回答' }}</span><button type="button" class="icon-button" aria-label="关闭消息操作" @click="close"><X :size="17" /></button></header>
           <button v-if="retryable" type="button" class="message-action-option" :disabled="retryDisabled" @click="choose('retry')"><RotateCcw :size="17" /><span>重试</span></button>
+          <button v-if="forkable" type="button" class="message-action-option" @click="choose('fork')"><GitFork :size="17" /><span>从这里分叉</span></button>
           <button type="button" class="message-action-option" :disabled="!copyText" @click="choose('copy')"><Copy :size="17" /><span>{{ role === 'user' ? '复制消息' : '复制最终回答' }}</span></button>
           <p v-if="retryable && retryDisabled">当前任务结束后可重试</p>
           <p v-if="role === 'agent' && !copyText">最终回答生成后可复制</p>
