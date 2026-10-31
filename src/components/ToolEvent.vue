@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { ChevronRight, FileCode2, Globe, Image, TerminalSquare, Wrench } from 'lucide-vue-next'
+import { commandSummary } from '../command-summary'
 
 type ToolItem = { type: string; [key: string]: unknown }
 const props = defineProps<{ item: ToolItem; imageUrl?: string }>()
@@ -44,7 +45,7 @@ function commandActionText(value: unknown): string {
 const summary = computed(() => {
   const item = props.item
   if (item.type === 'mcpToolCall' || item.type === 'dynamicToolCall') return [item.server || item.namespace, item.tool || item.name].filter(Boolean).join(' · ')
-  if (item.type === 'commandExecution') return textValue(item.command) || commandActionText(item.commandActions)
+  if (item.type === 'commandExecution') return commandSummary(item.command) || commandSummary(commandActionText(item.commandActions))
   if (item.type === 'webSearch') return textValue(item.query) || textValue(item.action)
   if (item.type === 'imageView') return textValue(item.path)
   if (item.type === 'functionCallOutput') return [item.namespace, item.name].filter(Boolean).join(' · ')

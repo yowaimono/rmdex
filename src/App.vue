@@ -18,6 +18,7 @@ import SidebarResize from './components/SidebarResize.vue'
 import { installInAppLinks } from './in-app-browser'
 import { colleagueMessage, messageRequest, timeline, userText, type ContentPart, type MessageEntry, type Turn } from './conversation'
 import { loadThreadCache, queueThreadCacheWrite, removeThreadCache } from './thread-cache'
+import { commandSummary } from './command-summary'
 
 type Thread = { id: string; name?: string | null; preview?: string; cwd?: string; updatedAt?: number; status?: { type: string }; turns?: Turn[]; employeeId?: string; desktopDraft?: { projectId: string | null; deviceKey: string; preparing?: boolean } }
 type Project = { id: string; name: string; path: string; source: 'local' | 'desktop'; nativeProjectId?: string }
@@ -141,7 +142,7 @@ const projectError = ref('')
 const projectSaving = ref(false)
 const deleteProjectTarget = ref<Project | null>(null)
 const desktopProjects = ref<Array<{ id: string; name: string; path: string }>>([])
-const defaultCapabilities = { mode: 'app-server', models: true, permissions: true, stop: true, approvals: true, create: true, send: true, queue: true, steer: true, rename: true, fork: true, archive: true, delete: true, history: false, createRequiresPrompt: false }
+const defaultCapabilities = { mode: 'app-server', models: true, permissions: true, stop: true, approvals: true, create: true, send: true, retry: false, queue: true, steer: true, rename: true, fork: true, archive: true, delete: true, history: false, createRequiresPrompt: false }
 const capabilities = ref({ ...defaultCapabilities })
 const desktopMode = computed(() => capabilities.value.mode === 'desktop')
 const historyCursor = ref<string | null>(null)
@@ -160,10 +161,11 @@ const activeTurnId = ref<string | null>(null)
 const stopRequested = ref(false)
 const stopping = ref(false)
 const pendingMessages = ref<Record<string, { text: string; previousCount: number; attachmentNames?: string[] }>>({})
-type RetrySubmission = { threadId: string; deviceKey: string; text: string; files: File[]; failedId?: string }
+type RetrySubmission = { threadId: string; deviceKey: string; text: string; files: File[]; failedId?: string; retryTurnId?: string }
 type FailedMessage = RetrySubmission & { id: string; previousTurnIds: string[]; error: string }
 const failedMessages = ref<Record<string, FailedMessage[]>>({})
 const retrying = ref(false)
+const regenerating = ref(false)
 let fullAccessRetry: RetrySubmission | undefined
 type QueuedSubmission = { id: string; input?: Array<{ type?: string; text?: string }>; clientUserMessageId?: string }
 const queuedSubmissions = ref<QueuedSubmission[]>([])
@@ -497,7 +499,7 @@ function toolSummary(items: { type: string; command?: unknown; commandActions?: 
   if (first?.type === 'commandExecution') {
     const actions = Array.isArray(first.commandActions) ? first.commandActions : [first.commandActions]
     const action = actions.find(value => value && typeof value === 'object') as Record<string, unknown> | undefined
-    preview = String(first.command || action?.command || action?.name || '')
+    preview = commandSummary(first.command) || commandSummary(action?.command || action?.name)
   } else if (first?.type === 'mcpToolCall' || first?.type === 'dynamicToolCall') {
     preview = [first.server || first.namespace, first.tool || first.name].filter(Boolean).join(' · ')
   } else if (first?.type === 'webSearch') preview = String(first.query || '')
@@ -1262,7 +1264,7 @@ async function loadOlder() {
   finally { if (version === selectionVersion) historyLoading.value = false }
 }
 async function updateThread() {
-  if (!selected.value || selected.value.desktopDraft || pollBusy || threadLoading.value || threadLoadError.value) return
+  if (!selected.value || selected.value.desktopDraft || pollBusy || threadLoading.value || threadLoadError.value || regenerating.value) return
   const id = selected.value.id
   const version = selectionVersion
   const element = conversation.value
@@ -1706,22 +1708,66 @@ async function retryMessage(message: MessageEntry | FailedMessage) {
       submission = { ...message, failedId: message.id }
     } else {
       if (message.role !== 'user') return
-      const files: File[] = []
-      for (const image of message.images) {
-        const source = imageSource(image)
-        if (!image.assetUrl && !source) throw new Error('原消息的图片不可用，请重新选择附件后发送')
-        const response = image.assetUrl ? await authenticatedFetch(image.assetUrl, {}, 'client') : await fetch(source!)
-        if (!response.ok) throw new Error('读取原消息图片失败，请稍后重试')
-        const blob = await response.blob()
-        const extension = ({ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' } as Record<string, string>)[blob.type] || 'png'
-        const name = image.path?.split(/[\\/]/).pop() || `image-${files.length + 1}.${extension}`
-        files.push(new File([blob], name, { type: blob.type }))
-      }
-      submission = { threadId: thread.id, deviceKey, text: messageRequest(message.item), files }
+      if (!capabilities.value.retry) throw new Error('当前设备暂不支持重新生成，请更新 rmdex-pc')
+      submission = { threadId: thread.id, deviceKey, text: messageRequest(message.item), files: [], retryTurnId: message.turnId }
     }
     if (isCurrent()) await send(submission)
   } catch (e) { if (isCurrent()) error.value = e instanceof Error ? e.message : String(e) }
   finally { retrying.value = false }
+}
+async function regenerateMessage(thread: Thread, retry: RetrySubmission, settings: Record<string, unknown>, mode: string) {
+  const id = thread.id
+  const key = `rmdex-retry:${retry.deviceKey}:${id}:${retry.retryTurnId}`
+  const payload = { turnId: retry.retryTurnId, ...settings, permissionMode: mode, ...(activeEmployeeId.value ? { employeeId: activeEmployeeId.value } : {}) }
+  const requestId = operationId(key, JSON.stringify(payload))
+  const version = ++selectionVersion // Ignore polls started before history is replaced.
+  const isCurrent = () => selectionVersion === version && selected.value?.id === id && (remoteDevice.value?.id || 'local') === retry.deviceKey
+  sending.value = true
+  sendingThreadId.value = id
+  regenerating.value = true
+  error.value = ''
+  try {
+    const result = await post(`/api/threads/${id}/retry`, { ...payload, operationId: requestId }) as { outcome?: string; message?: string; thread?: Thread; threadId?: string; turn?: { id: string; status?: string }; forked?: boolean }
+    if (result.outcome === 'rejected') {
+      sessionStorage.removeItem(key)
+      throw new Error(result.message || '暂时无法重试这条消息')
+    }
+    if (result.outcome === 'started') sessionStorage.removeItem(key)
+    const target = result.thread
+    if (target?.id && (remoteDevice.value?.id || 'local') === retry.deviceKey) {
+      const refreshed: Thread = result.forked ? { ...target, name: `${thread.name || thread.preview || '会话'} · 重试` } : { ...thread, ...target, turns: undefined }
+      threadCache.delete(threadCacheKey(target.id))
+      void removeThreadCache(threadCacheKey(target.id))
+      threads.value = [refreshed, ...threads.value.filter(item => item.id !== target.id)]
+      if (result.forked) {
+        drafts.value[target.id] = drafts.value[id] || ''
+        if (attachmentsByThread.value[id]) attachmentsByThread.value[target.id] = [...attachmentsByThread.value[id]!]
+      }
+      if (result.turn?.id && result.turn.status === 'inProgress') trackTask(target.id, result.turn.id, retry.text, refreshed.name || 'Codex 会话')
+      if (isCurrent()) {
+        await openThread(refreshed)
+        if (result.forked && result.outcome === 'started') {
+          copyFeedback.value = '已在新会话中重试，原会话已保留'
+          if (copyFeedbackTimer) clearTimeout(copyFeedbackTimer)
+          copyFeedbackTimer = setTimeout(() => { copyFeedback.value = '' }, 2600)
+        }
+      }
+    } else if (isCurrent()) {
+      threadCache.delete(threadCacheKey(id))
+      await openThread({ ...thread, turns: undefined })
+    }
+    if (result.outcome !== 'started' && (selected.value?.id === (target?.id || id))) error.value = result.message || '重试结果未确认，请刷新会话核对，未重复提交'
+  } catch (e) {
+    if ((remoteDevice.value?.id || 'local') === retry.deviceKey && selected.value?.id === id) {
+      const detail = e instanceof Error ? e.message : String(e)
+      // Keep the same operation ID after transport failure. Never turn an
+      // uncertain regeneration into a normal send of the original message.
+      if (selectionVersion === version) {
+        try { const read = await readThread(id, true); if (isCurrent()) applyRead(read) } catch { /* Preserve the original error. */ }
+      }
+      error.value = detail
+    }
+  } finally { regenerating.value = false; sending.value = false; sendingThreadId.value = null }
 }
 async function send(retry?: RetrySubmission) {
   if (!retry && retrying.value) return
@@ -1731,9 +1777,13 @@ async function send(retry?: RetrySubmission) {
   const id = selected.value.id
   const text = retry ? retry.text : (drafts.value[id] || '').trim()
   const files = retry ? retry.files : [...(attachmentsByThread.value[id] || [])]
-  if (!text && !files.length) return
+  if (!text && !files.length && !retry?.retryTurnId) return
   if (capabilities.value.permissions && permissionMode.value === 'full' && !skipFullAccessConfirm.value && !fullAccessConfirmed.value) { fullAccessRetry = retry; showFullAccessConfirm.value = true; return }
   fullAccessConfirmed.value = false
+  if (retry?.retryTurnId) {
+    await regenerateMessage(thread, retry, desktopSettings(), permissionMode.value)
+    return
+  }
   const previousTurnIds = (thread.turns || []).map(turn => turn.id)
   const visibleText = userText(text)
   const failedId = retry?.failedId || crypto.randomUUID()
@@ -2000,7 +2050,7 @@ onUnmounted(() => { removeInAppLinks?.(); window.removeEventListener('keydown', 
             <summary><Wrench :size="14" /><span>{{ toolSummary(message.items) }}</span><span v-if="message.items.some(item => item.status === 'failed' || item.status === 'declined' || item.success === false || (typeof item.exitCode === 'number' && item.exitCode !== 0))" class="group-failed">含失败</span><ChevronRight :size="14" class="group-chevron" /></summary>
             <div class="tool-group-content"><ToolEvent v-for="(item, index) in message.items" :key="item.id || index" :item="item" :image-url="toolImageSource(item)" @preview="showImagePreview" /></div>
           </details>
-          <MessageBubble v-else :role="message.role" :copy-text="message.copyText" :retryable="message.role === 'user' && !message.colleagueName && capabilities.send" :retry-disabled="working || retrying" :forkable="message.role === 'agent' && message.forkable && capabilities.fork" @copy="copyValue($event, '已复制消息')" @retry="retryMessage(message)" @fork="forkMessage(message)">
+          <MessageBubble v-else :role="message.role" :copy-text="message.copyText" :retryable="message.role === 'user' && !message.colleagueName && capabilities.retry" :retry-disabled="working || retrying" :retry-label="message.turnId === selected.turns?.at(-1)?.id ? '重试' : '从这里重试（新会话）'" :forkable="message.role === 'agent' && message.forkable && capabilities.fork" @copy="copyValue($event, '已复制消息')" @retry="retryMessage(message)" @fork="forkMessage(message)">
             <div v-if="message.colleagueName" class="colleague-message-source">来自员工 · {{ message.colleagueName }}</div>
             <div v-if="message.images.length" class="attachments"><template v-for="(image, index) in message.images" :key="index"><button v-if="imageSource(image)" type="button" class="attachment" title="放大预览图片" aria-label="放大预览图片" @click="showImagePreview(imageSource(image) || '')"><img :src="imageSource(image)" alt="图片附件" loading="lazy" /></button><span v-else class="attachment-unavailable">图片附件不可用</span></template></div>
             <div v-if="message.text" class="message-text markdown" v-html="markdown.render(message.text)"></div>

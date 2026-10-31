@@ -183,6 +183,12 @@ try {
   assert.equal((await request(`/api/notifications/poll?wait=0&after=${notifications.data.cursor}`, { headers: { Authorization: `Bearer ${pushRegistration2.data.pushToken}` } })).data.data.length, 0)
   assert.equal(forwardedBody?.model, 'dynamic-model')
   assert.equal(forwardedBody?.effort, 'high')
+  const retryRequest = { turnId: 'source-turn', operationId: crypto.randomUUID(), permissionMode: 'ask' }
+  const forwardedRetry = await request('/api/threads/local-agent-test/retry', json(retryRequest, client2))
+  assert.equal(forwardedRetry.status, 200)
+  assert.equal(forwardedRetry.data.path, '/api/threads/local-agent-test/retry')
+  assert.deepEqual(forwardedBody, retryRequest)
+  assert.equal((await request('/api/threads/local-agent-test/revert', json({}, client2))).status, 404)
   const history = await request('/api/threads/local-agent-test/history', { ...json({ cursor: 'older-history' }), headers: { ...headers2, 'Content-Type': 'application/json' } })
   assert.equal(history.status, 200)
   assert.equal(history.data.path, '/api/threads/local-agent-test/history')

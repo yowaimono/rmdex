@@ -63,6 +63,9 @@ export function queueThreadCacheWrite(key: string, result: unknown) {
 }
 
 export async function removeThreadCache(key: string) {
+  const timer = pending.get(key)
+  if (timer) clearTimeout(timer)
+  pending.delete(key)
   const db = await openDatabase()
   if (!db) return
   db.transaction(storeName, 'readwrite').objectStore(storeName).delete(key)

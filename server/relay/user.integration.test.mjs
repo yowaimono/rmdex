@@ -131,6 +131,13 @@ test('relay isolates users across devices, pairings, and employees', { timeout: 
     assert.equal(agentRequests.filter(item => item.path === '/api/employee-assets/prepare').length, 4)
     assert.equal(await readFile(join(assetPath, 'memories', '2026-01-01-test.md'), 'utf8'), 'Employee-owned memory')
     assert.equal((await request(origin, '/api/threads/other-thread/send', json({ text: 'Wrong thread', employeeId: employee.id }, employeeToken))).status, 403)
+    const retryRequest = { turnId: 'original-turn', operationId: '123e4567-e89b-12d3-a456-426614174000', employeeId: employee.id }
+    const retried = await request(origin, `/api/threads/${reset.data.thread.id}/retry`, json(retryRequest, employeeToken))
+    assert.equal(retried.status, 200)
+    const forwardedRetry = agentRequests.find(item => item.path.endsWith('/retry'))
+    assert.deepEqual(forwardedRetry.data, { turnId: retryRequest.turnId, operationId: retryRequest.operationId })
+    assert.equal((await request(origin, '/api/threads/other-thread/retry', json(retryRequest, employeeToken))).status, 403)
+    assert.equal((await request(origin, `/api/threads/${reset.data.thread.id}/retry`, json(retryRequest, accountA.accessToken))).status, 401)
     const secondEmployee = await request(origin, '/api/employees', json({ name: 'Image reviewer', projectPath: 'D:/WorkSpace/rmdex' }, employeeToken))
     const secondThread = await request(origin, `/api/employees/${secondEmployee.data.employee.id}/ensure-thread`, json({}, employeeToken))
     const attachmentOnly = await request(origin, `/api/threads/${secondThread.data.thread.id}/send`, json({ attachments: ['image'], employeeId: secondEmployee.data.employee.id }, employeeToken))

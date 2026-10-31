@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { mkdtemp, rm, unlink, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { homedir, tmpdir } from 'node:os'
@@ -158,6 +159,10 @@ test('shared client observes turns, forks history, and defers queued messages', 
     const activeForkResult = await activeFork.json()
     assert.equal(activeFork.status, 502, JSON.stringify(activeForkResult))
     assert.match(activeForkResult.error, /仍在执行/)
+    const activeRetry = await fetch(`http://127.0.0.1:${agentPort}/api/threads/${thread.id}/retry`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'http://localhost:5173' }, body: JSON.stringify({ turnId: next.turn.id, operationId: randomUUID() }),
+    })
+    assert.equal((await activeRetry.json()).outcome, 'rejected')
     await waitFor(async () => {
       const result = await (await fetch(`http://127.0.0.1:${agentPort}/api/threads/${thread.id}/status`)).json()
       return result.live?.items?.some(item => item.content?.some(part => part.type === 'localImage'))
@@ -185,6 +190,39 @@ test('shared client observes turns, forks history, and defers queued messages', 
     const forkRead = await forkReadResponse.json()
     assert.deepEqual(forkRead.thread.turns.map(item => item.id), [turn.id])
     assert.deepEqual((await read()).thread.turns.map(item => item.id), [turn.id, next.turn.id])
+    // Regeneration replaces the latest input; historical retry forks before
+    // the chosen input, including the very first turn, without touching source.
+    const retry = (turnId, operationId = randomUUID()) => fetch(`http://127.0.0.1:${agentPort}/api/threads/${thread.id}/retry`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'http://localhost:5173' }, body: JSON.stringify({ turnId, operationId }),
+    }).then(async response => { const body = await response.json(); assert.equal(response.status, 200, JSON.stringify(body)); return body })
+    const finishResponse = () => response.end(`event: response.completed\ndata: ${JSON.stringify({ type: 'response.completed', response: { id: randomUUID(), status: 'completed', output: [], usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } })}\n\n`)
+    response = undefined
+    const retriedLatest = await retry(next.turn.id)
+    assert.equal(retriedLatest.outcome, 'started', JSON.stringify(retriedLatest))
+    assert.equal(retriedLatest.threadId, thread.id)
+    assert.equal(retriedLatest.forked, false)
+    await waitFor(() => response)
+    const retryRead = await read()
+    assert.deepEqual(retryRead.thread.turns.map(item => item.id), [turn.id, retriedLatest.turn.id])
+    assert.deepEqual(retryRead.thread.turns.flatMap(turn => turn.items.filter(item => item.type === 'userMessage').flatMap(item => item.content.filter(part => part.type === 'text').map(part => part.text))), ['test', 'test interrupt'])
+    assert.ok(retryRead.thread.turns[1].items.some(item => item.content?.some(part => part.type === 'localImage' && part.path === imagePath)))
+    finishResponse()
+    await waitFor(async () => !(await read()).activeTurnId)
+    response = undefined
+    const historicalOperation = randomUUID()
+    const retriedHistory = await retry(turn.id, historicalOperation)
+    assert.equal(retriedHistory.outcome, 'started', JSON.stringify(retriedHistory))
+    assert.equal(retriedHistory.forked, true)
+    assert.notEqual(retriedHistory.threadId, thread.id)
+    await waitFor(() => response)
+    const historicalRead = await (await fetch(`http://127.0.0.1:${agentPort}/api/threads/${retriedHistory.threadId}`)).json()
+    assert.deepEqual(historicalRead.thread.turns.map(item => item.id), [retriedHistory.turn.id])
+    assert.deepEqual((await read()).thread.turns.map(item => item.id), [turn.id, retriedLatest.turn.id])
+    finishResponse()
+    await waitFor(async () => !(await (await fetch(`http://127.0.0.1:${agentPort}/api/threads/${retriedHistory.threadId}`)).json()).activeTurnId)
+    const replayedRetry = await retry(turn.id, historicalOperation)
+    assert.equal(replayedRetry.threadId, retriedHistory.threadId)
+    assert.equal(replayedRetry.turn.id, retriedHistory.turn.id)
     // Native queue must start idle threads and defer busy-thread submissions.
     t.diagnostic('checking idle queue dispatch')
     response = undefined

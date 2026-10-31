@@ -2,7 +2,7 @@
 import { nextTick, onUnmounted, ref, watch } from 'vue'
 import { Copy, GitFork, RotateCcw, X } from 'lucide-vue-next'
 
-const props = defineProps<{ role: 'user' | 'agent'; copyText: string; retryable?: boolean; retryDisabled?: boolean; forkable?: boolean; failed?: boolean }>()
+const props = defineProps<{ role: 'user' | 'agent'; copyText: string; retryable?: boolean; retryDisabled?: boolean; retryLabel?: string; forkable?: boolean; failed?: boolean }>()
 const emit = defineEmits<{ copy: [text: string]; retry: []; fork: [] }>()
 const open = ref(false)
 const target = ref<HTMLElement | null>(null)
@@ -93,7 +93,7 @@ onUnmounted(() => { cancelPress(); window.removeEventListener('keydown', menuKey
       <div v-if="open" class="message-action-backdrop" @pointerdown.capture="actionPointerStarted = true" @click.capture="actionClick" @click.self="close" @contextmenu.prevent @keydown.esc.stop.prevent="close">
         <section ref="menu" class="message-action-menu" role="dialog" aria-modal="true" :aria-label="role === 'user' ? '用户消息操作' : 'AI 回复操作'">
           <header><span>{{ role === 'user' ? '消息操作' : '最终回答' }}</span><button type="button" class="icon-button" aria-label="关闭消息操作" @click="close"><X :size="17" /></button></header>
-          <button v-if="retryable" type="button" class="message-action-option" :disabled="retryDisabled" @click="choose('retry')"><RotateCcw :size="17" /><span>重试</span></button>
+          <button v-if="retryable" type="button" class="message-action-option" :disabled="retryDisabled" @click="choose('retry')"><RotateCcw :size="17" /><span>{{ retryLabel || '重试' }}</span></button>
           <button v-if="forkable" type="button" class="message-action-option" @click="choose('fork')"><GitFork :size="17" /><span>从这里分叉</span></button>
           <button type="button" class="message-action-option" :disabled="!copyText" @click="choose('copy')"><Copy :size="17" /><span>{{ role === 'user' ? '复制消息' : '复制最终回答' }}</span></button>
           <p v-if="retryable && retryDisabled">当前任务结束后可重试</p>

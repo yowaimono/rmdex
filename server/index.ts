@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { readFile, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { homedir } from 'node:os'
 import { extname, isAbsolute, join } from 'node:path'
@@ -10,6 +10,8 @@ import WebSocket from 'ws'
 import { AttachmentStore, attachmentInput } from './attachments.ts'
 import { ProjectStore } from './project-store.ts'
 import { installEmployeeSkill } from './employee-assets.ts'
+import { OperationJournal } from './desktop-adapter.ts'
+import { MessageRetryService } from './message-retry.ts'
 import './remote-agent.ts'
 
 await installEmployeeSkill().catch(error => console.error('[rmdex] Employee skill installation failed:', error.message))
@@ -65,6 +67,12 @@ const approvals = new Map<string, { id: string | number; method: string; params:
 const sending = new Set<string>()
 const newThreads = new Map<string, Record<string, unknown>>()
 const subscriptions = new Map<string, Promise<void>>()
+function clearThreadRuntime(threadId: string) {
+  activeTurns.delete(threadId)
+  liveTurns.delete(threadId)
+  for (const [key, request] of approvals) if (request.params.threadId === threadId) approvals.delete(key)
+  threadListCache = undefined
+}
 type PermissionMode = 'ask' | 'auto' | 'full'
 let defaultPermissionMode: PermissionMode = ['ask', 'auto', 'full'].includes(process.env.RMDEX_DEFAULT_PERMISSION_MODE || '')
   ? process.env.RMDEX_DEFAULT_PERMISSION_MODE as PermissionMode
@@ -185,6 +193,7 @@ function handleMessage(line: string) {
       for (const [key, request] of approvals) if (request.params.threadId === message.params.threadId) approvals.delete(key)
     }
     if (message.method === 'serverRequest/resolved') approvals.delete(String(message.params?.requestId))
+    if (message.method === 'thread/reverted' && message.params?.threadId) clearThreadRuntime(message.params.threadId)
     if (typeof message.id !== 'number' || !pending.has(message.id)) return
     const request = pending.get(message.id)!
     pending.delete(message.id)
@@ -342,6 +351,25 @@ async function ensureReady() {
 let standaloneReady: Promise<void> | undefined
 void (sharedMode ? ensureSharedConnected() : ensureReady()).catch(error => console.error(`[${timestamp()}] Codex initialization failed: ${error.message}`))
 
+const messageRetries = new MessageRetryService(rpc, new OperationJournal(join(codexHome, 'rmdex-message-retries.json')), clearThreadRuntime, async (id, original) => {
+  const directory = join(codexHome, 'rmdex-retry-backups')
+  await mkdir(directory, { recursive: true, mode: 0o700 })
+  await writeFile(join(directory, `${id}.json`), JSON.stringify(original), { mode: 0o600, flag: 'wx' })
+})
+
+async function turnOptions(data: Record<string, any>) {
+  const permissionMode = data.permissionMode === undefined ? defaultPermissionMode : data.permissionMode
+  if (!['ask', 'auto', 'full'].includes(permissionMode)) throw new Error('请选择有效的权限模式')
+  const models = (data.model !== undefined || data.effort !== undefined) ? await listModels() : []
+  const selectedModel = typeof data.model === 'string' && data.model.trim() ? models.find(model => model.id === data.model) : undefined
+  if (data.model !== undefined && !selectedModel) throw new Error('所选模型不在当前 Codex 主机的模型列表中')
+  if (data.effort !== undefined && (typeof data.effort !== 'string' || !selectedModel?.supportedReasoningEfforts?.some(option => option.reasoningEffort === data.effort))) throw new Error('所选推理强度不受当前模型支持')
+  const permissions = permissionMode === 'full'
+    ? { approvalPolicy: 'never', approvalsReviewer: 'user', sandboxPolicy: { type: 'dangerFullAccess' } }
+    : { approvalPolicy: 'on-request', approvalsReviewer: permissionMode === 'auto' ? 'auto_review' : 'user', sandboxPolicy: { type: 'workspaceWrite' } }
+  return { ...permissions, ...(selectedModel ? { model: selectedModel.id, effort: data.effort } : {}) }
+}
+
 const server = createServer(async (req, res) => {
   res.setHeader('Content-Type', 'application/json; charset=utf-8')
   res.setHeader('Cache-Control', 'no-store')
@@ -372,6 +400,7 @@ const server = createServer(async (req, res) => {
       }
       const data = body ? JSON.parse(body) : {}
       const sendMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/send$/)
+      const retryMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/retry$/)
       const stopMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/stop$/)
       const historyMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/history$/)
       const renameMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/name$/)
@@ -456,6 +485,7 @@ const server = createServer(async (req, res) => {
         result = { threadId, deleted: true }
       } else if (queueMatch) {
         const threadId = queueMatch[1]!
+        if (sending.has(threadId)) throw new Error('此会话正在提交或重试消息，请稍后再试')
         if (typeof data.text !== 'string' || !data.text.trim() || data.text.length > 32000) throw new Error('消息不能为空或超出长度限制')
         if (sharedMode && !newThreads.has(threadId)) await subscribeToThread(threadId)
         const input = [{ type: 'text', text: data.text, text_elements: [] }]
@@ -512,17 +542,42 @@ const server = createServer(async (req, res) => {
         registerImages(result)
         const live = liveTurns.get(threadId)
         result = { ...(result as object), activeTurnId: activeTurns.get(threadId) || null, lastTurn: live ? { id: live.id, status: live.status, error: live.error } : null, approvals: [...approvals.entries()].filter(([, request]) => request.params.threadId === threadId).map(([id, request]) => ({ id, method: request.method, params: request.params })) }
+      } else if (retryMatch) {
+        const threadId = retryMatch[1]!
+        const options = await turnOptions(data)
+        if (sending.has(threadId)) throw new Error('此会话的发送请求正在处理中')
+        sending.add(threadId)
+        try {
+          if (sharedMode) await subscribeToThread(threadId)
+          else await rpc('thread/resume', { threadId, excludeTurns: true })
+          const retried = await messageRetries.retry(threadId, data, options)
+          if (retried.thread?.id) {
+            threadListCache = undefined
+            if (retried.forked && !threadNames[retried.thread.id]) {
+              const sourceName = threadNames[threadId] || retried.thread.name || retried.thread.preview || '会话'
+              threadNames[retried.thread.id] = `${sourceName} · 重试`.slice(0, 80)
+              await persistThreadNames()
+            }
+            retried.thread = applyThreadName(retried.thread)
+          }
+          if (retried.outcome === 'started' && retried.turn?.id) {
+            const targetId = retried.threadId
+            const page = await listThreadTurns(targetId)
+            const current = page.turns.find(turn => turn.id === retried.turn.id)
+            if (current) retried.turn = { ...retried.turn, status: current.status }
+            if (retried.turn.status === 'inProgress') {
+              activeTurns.set(targetId, retried.turn.id)
+              if (liveTurns.get(targetId)?.id !== retried.turn.id) liveTurns.set(targetId, { id: retried.turn.id, status: 'inProgress', items: new Map() })
+            }
+          }
+          result = retried
+        } finally { sending.delete(threadId) }
       } else if (sendMatch) {
         const threadId = sendMatch[1]!
         const attachments = attachmentStore.resolve(data.attachments)
         const text = typeof data.text === 'string' ? data.text.trim() : ''
         if ((!text && !attachments.length) || text.length > 32000) throw new Error('消息不能为空或超过长度限制')
-        const permissionMode = data.permissionMode === undefined ? defaultPermissionMode : data.permissionMode
-        if (!['ask', 'auto', 'full'].includes(permissionMode)) throw new Error('请选择有效的权限模式')
-        const models = (data.model !== undefined || data.effort !== undefined) ? await listModels() : []
-        const selectedModel = typeof data.model === 'string' && data.model.trim() ? models.find(model => model.id === data.model) : undefined
-        if (data.model !== undefined && !selectedModel) throw new Error('所选模型不在当前 Codex 主机的模型列表中')
-        if (data.effort !== undefined && (typeof data.effort !== 'string' || !selectedModel?.supportedReasoningEfforts?.some(option => option.reasoningEffort === data.effort))) throw new Error('所选推理强度不受当前模型支持')
+        const options = await turnOptions(data)
         if (sending.has(threadId) || activeTurns.has(threadId)) throw new Error('此会话正在执行，请等待结束')
         sending.add(threadId)
         try {
@@ -530,12 +585,8 @@ const server = createServer(async (req, res) => {
             if (sharedMode) await subscribeToThread(threadId)
             else await rpc('thread/resume', { threadId, excludeTurns: true })
           }
-          const options = permissionMode === 'full'
-            ? { approvalPolicy: 'never', approvalsReviewer: 'user', sandboxPolicy: { type: 'dangerFullAccess' } }
-            : { approvalPolicy: 'on-request', approvalsReviewer: permissionMode === 'auto' ? 'auto_review' : 'user', sandboxPolicy: { type: 'workspaceWrite' } }
-          const modelOptions = selectedModel ? { model: selectedModel.id, effort: data.effort } : {}
           const input = attachmentInput(text, attachments)
-          const started = await rpc('turn/start', { threadId, input, ...modelOptions, ...options }) as { turn?: { id: string; status?: string } }
+          const started = await rpc('turn/start', { threadId, input, ...options }) as { turn?: { id: string; status?: string } }
           newThreads.delete(threadId)
           if (started.turn?.id) {
             let live = liveTurns.get(threadId)
@@ -576,6 +627,7 @@ const server = createServer(async (req, res) => {
           approvals: true,
           create: true,
           send: true,
+          retry: true,
           queue: true,
           steer: true,
           rename: true,

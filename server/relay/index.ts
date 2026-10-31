@@ -655,7 +655,7 @@ const server = createServer(async (req, res) => {
     if (!['GET', 'POST', 'DELETE'].includes(req.method || '')) { json(res, 405, { error: 'Method not allowed' }); return }
     const allowed = req.method === 'GET'
       ? /^\/api\/(?:models|projects|settings|threads(?:\/[a-zA-Z0-9-]+(?:\/(?:status|incremental|queue))?)?|images\/[a-f0-9-]+)$/.test(url.pathname)
-      : /^\/api\/(?:settings|threads|threads\/[a-zA-Z0-9-]+\/(?:send|stop|history|name|fork|archive|unarchive|delete|queue|steer)|threads\/[a-zA-Z0-9-]+\/queue\/[^/]+(?:\/(?:steer|delete))?|approvals\/[a-zA-Z0-9-]+)$/.test(url.pathname)
+      : /^\/api\/(?:settings|threads|threads\/[a-zA-Z0-9-]+\/(?:send|retry|stop|history|name|fork|archive|unarchive|delete|queue|steer)|threads\/[a-zA-Z0-9-]+\/queue\/[^/]+(?:\/(?:steer|delete))?|approvals\/[a-zA-Z0-9-]+)$/.test(url.pathname)
     const projectMutation = req.method === 'POST' && /^\/api\/projects(?:\/[a-zA-Z0-9-]+\/(?:update|delete))?$/.test(url.pathname)
     if ((!allowed && !(req.method === 'POST' && url.pathname === '/api/attachments') && !projectMutation) || url.search) { json(res, 404, { error: 'Not found' }); return }
     let requestData = req.method === 'POST' ? await body(req) : undefined
@@ -663,8 +663,8 @@ const server = createServer(async (req, res) => {
     const employee = employeeId ? employeeFor(employeeId, userId) : undefined
     const employeeNeedsContext = Boolean(employee && employee.threadId === url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/(?:send|queue)$/)?.[1] && needsEmployeeContext(employee))
     if (employeeId && !employee) { json(res, 404, { error: '员工不存在' }); return }
-    if (employee && (employee.deviceId !== device.id || employee.threadId !== url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/(?:send|queue|steer)$/)?.[1])) { json(res, 403, { error: '员工与当前设备或会话不匹配' }); return }
-    if (employee && /\/(?:send|queue)$/.test(url.pathname)) {
+    if (employee && (employee.deviceId !== device.id || employee.threadId !== url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/(?:send|retry|queue|steer)$/)?.[1])) { json(res, 403, { error: '员工与当前设备或会话不匹配' }); return }
+    if (employee && /\/(?:send|retry|queue)$/.test(url.pathname)) {
       if (employeeDeliveries.has(employee.id)) { json(res, 409, { error: '员工会话正在更新或接收消息，请稍后重试' }); return }
       employeeDeliveries.add(employee.id)
       lockedEmployee = employee.id
@@ -683,10 +683,11 @@ const server = createServer(async (req, res) => {
       employee.updatedAt = Date.now()
       await persist()
     }
-    const sendMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/send$/)
+    const sendMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/(?:send|retry)$/)
     if (sendMatch && result && typeof result === 'object') {
       const turn = (result as { turn?: { id?: string } }).turn
-      if (turn?.id) watchTask(device.id, sendMatch[1]!, turn.id, employee?.name || (typeof requestData?.name === 'string' ? requestData.name : 'Codex 会话'))
+      const targetId = typeof (result as { threadId?: unknown }).threadId === 'string' ? (result as { threadId: string }).threadId : sendMatch[1]!
+      if (turn?.id) watchTask(device.id, targetId, turn.id, employee?.name || (typeof requestData?.name === 'string' ? requestData.name : 'Codex 会话'))
     }
     if (url.pathname.startsWith('/api/images/') && result && typeof result === 'object' && (result as { __rmdexBinary?: boolean }).__rmdexBinary) {
       const image = result as { contentType: string; data: string }
