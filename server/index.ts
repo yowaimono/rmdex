@@ -63,11 +63,13 @@ const activeTurns = new Map<string, string>()
 type LiveItem = { id: string; type: string; [key: string]: unknown }
 type LiveTurn = { id: string; status: string; items: Map<string, LiveItem>; error?: unknown; sentText?: string }
 const liveTurns = new Map<string, LiveTurn>()
+const statusRefreshes = new Map<string, { expiresAt: number; request: Promise<void> }>()
 const approvals = new Map<string, { id: string | number; method: string; params: Record<string, unknown> }>()
 const sending = new Set<string>()
 const newThreads = new Map<string, Record<string, unknown>>()
 const subscriptions = new Map<string, Promise<void>>()
 function clearThreadRuntime(threadId: string) {
+  statusRefreshes.delete(threadId)
   activeTurns.delete(threadId)
   liveTurns.delete(threadId)
   for (const [key, request] of approvals) if (request.params.threadId === threadId) approvals.delete(key)
@@ -116,6 +118,43 @@ async function listThreadTurns(threadId: string, cursor?: string) {
   const page = await rpc('thread/turns/list', { threadId, limit: 10, sortDirection: 'desc', itemsView: 'full', ...(cursor ? { cursor } : {}) }) as { data?: Array<Record<string, unknown>>; nextCursor?: string | null }
   const turns = [...(page.data || [])].reverse()
   return { turns, page: { hasMore: Boolean(page.nextCursor), nextCursor: page.nextCursor || null } }
+}
+async function refreshThreadStatus(threadId: string) {
+  const previous = statusRefreshes.get(threadId)
+  if (previous && previous.expiresAt > Date.now()) return previous.request
+  const refresh = { expiresAt: Infinity, request: Promise.resolve() }
+  statusRefreshes.set(threadId, refresh)
+  refresh.request = (async () => {
+    const page = await rpc('thread/turns/list', { threadId, limit: 1, sortDirection: 'desc', itemsView: 'full' }) as { data?: Array<{ id: string; status: string; error?: unknown; items?: LiveItem[] }> }
+    if (!Array.isArray(page.data)) throw new Error('Codex returned invalid turn history')
+    const latest = page.data[0]
+    if (latest && (typeof latest.id !== 'string' || !['inProgress', 'completed', 'interrupted', 'failed', 'error'].includes(latest.status))) throw new Error('Codex returned invalid turn status')
+    // A lifecycle event or runtime reset after this read started is newer than
+    // its snapshot. Keep that event and let the next poll reconcile again.
+    if (statusRefreshes.get(threadId) !== refresh) return
+    if (latest) {
+      const live = liveTurns.get(threadId)
+      const persistedItems = (latest.items || []).map(item => [item.id, item] as const)
+      const liveItems = live?.id === latest.id ? [...live.items] : []
+      liveTurns.set(threadId, {
+        id: latest.id, status: latest.status, error: latest.error,
+        sentText: live?.id === latest.id ? live.sentText : undefined,
+        // Deltas may arrive while the snapshot is in flight. Preserve them
+        // during streaming; terminal snapshots contain the final item values.
+        items: new Map(latest.status === 'inProgress' ? [...persistedItems, ...liveItems] : [...liveItems, ...persistedItems]),
+      })
+    } else liveTurns.delete(threadId)
+    if (latest?.status === 'inProgress') activeTurns.set(threadId, latest.id)
+    else {
+      activeTurns.delete(threadId)
+      for (const [key, request] of approvals) if (request.params.threadId === threadId) approvals.delete(key)
+    }
+    refresh.expiresAt = Date.now() + 2000
+  })().catch(error => {
+    if (statusRefreshes.get(threadId) === refresh) statusRefreshes.delete(threadId)
+    throw error
+  })
+  return refresh.request
 }
 function registerImages(result: unknown) {
   const thread = result as ThreadRead
@@ -169,6 +208,7 @@ function handleMessage(line: string) {
     }
     if (message.method === 'turn/started' && message.params?.threadId && message.params?.turn?.id) {
       const { threadId, turn } = message.params
+      statusRefreshes.delete(threadId)
       activeTurns.set(threadId, turn.id)
       if (liveTurns.get(threadId)?.id !== turn.id) liveTurns.set(threadId, { id: turn.id, status: 'inProgress', items: new Map() })
     }
@@ -186,11 +226,14 @@ function handleMessage(line: string) {
         live.items.set(itemId, item)
       }
     }
-    if (message.method === 'turn/completed' && message.params?.threadId) {
-      activeTurns.delete(message.params.threadId)
-      const live = liveTurns.get(message.params.threadId)
-      if (live && live.id === message.params.turn?.id) { live.status = message.params.turn.status; live.error = message.params.turn.error }
-      for (const [key, request] of approvals) if (request.params.threadId === message.params.threadId) approvals.delete(key)
+    if (message.method === 'turn/completed' && message.params?.threadId && message.params?.turn?.id) {
+      const { threadId, turn } = message.params
+      statusRefreshes.delete(threadId)
+      if (activeTurns.get(threadId) === turn.id) activeTurns.delete(threadId)
+      const live = liveTurns.get(threadId)
+      if (live && live.id === turn.id) { live.status = turn.status; live.error = turn.error }
+      else if (!activeTurns.has(threadId)) liveTurns.set(threadId, { id: turn.id, status: turn.status, error: turn.error, items: new Map((turn.items || []).map((item: LiveItem) => [item.id, item])) })
+      if (!activeTurns.has(threadId)) for (const [key, request] of approvals) if (request.params.threadId === threadId) approvals.delete(key)
     }
     if (message.method === 'serverRequest/resolved') approvals.delete(String(message.params?.requestId))
     if (message.method === 'thread/reverted' && message.params?.threadId) clearThreadRuntime(message.params.threadId)
@@ -263,6 +306,7 @@ function disconnectShared(connection: WebSocket, message: string, log = true) {
   if (sharedStableTimer) { clearTimeout(sharedStableTimer); sharedStableTimer = undefined }
   activeTurns.clear()
   liveTurns.clear()
+  statusRefreshes.clear()
   approvals.clear()
   subscriptions.clear()
   for (const [id, request] of pending) {
@@ -506,6 +550,7 @@ const server = createServer(async (req, res) => {
             }
           }
           result = { outcome: 'queued', threadId, queuedSubmission: (queued as { queuedSubmission?: unknown }).queuedSubmission || null, ...(started && typeof started === 'object' ? started : {}) }
+          statusRefreshes.delete(threadId)
         } else {
           const expectedTurnId = typeof data.expectedTurnId === 'string' && data.expectedTurnId ? data.expectedTurnId : activeTurns.get(threadId)
           if (!expectedTurnId) throw new Error('当前没有可引导的运行中任务')
@@ -562,6 +607,7 @@ const server = createServer(async (req, res) => {
           }
           if (retried.outcome === 'started' && retried.turn?.id) {
             const targetId = retried.threadId
+            statusRefreshes.delete(targetId)
             const page = await listThreadTurns(targetId)
             const current = page.turns.find(turn => turn.id === retried.turn.id)
             if (current) retried.turn = { ...retried.turn, status: current.status }
@@ -587,6 +633,7 @@ const server = createServer(async (req, res) => {
           }
           const input = attachmentInput(text, attachments)
           const started = await rpc('turn/start', { threadId, input, ...options }) as { turn?: { id: string; status?: string } }
+          statusRefreshes.delete(threadId)
           newThreads.delete(threadId)
           if (started.turn?.id) {
             let live = liveTurns.get(threadId)
@@ -652,6 +699,7 @@ const server = createServer(async (req, res) => {
       registerImages(result)
     } else if (/^\/api\/threads\/[a-zA-Z0-9-]+\/status$/.test(url.pathname)) {
       const threadId = url.pathname.split('/')[3]!
+      await refreshThreadStatus(threadId)
       const live = liveTurns.get(threadId)
       result = {
         threadId,

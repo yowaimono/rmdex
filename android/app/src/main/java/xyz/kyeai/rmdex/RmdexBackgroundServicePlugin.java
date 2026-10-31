@@ -13,6 +13,11 @@ import com.getcapacitor.PluginMethod;
 @CapacitorPlugin(name = "RmdexBackgroundService")
 public class RmdexBackgroundServicePlugin extends Plugin {
     @PluginMethod
+    public void status(PluginCall call) {
+        call.resolve(RmdexBackgroundService.status(getContext()));
+    }
+
+    @PluginMethod
     public void start(PluginCall call) {
         String relayUrl = call.getString("relayUrl");
         String pushToken = call.getString("pushToken");
@@ -36,13 +41,7 @@ public class RmdexBackgroundServicePlugin extends Plugin {
 
     @PluginMethod
     public void stop(PluginCall call) {
-        Intent intent = new Intent(getContext(), RmdexBackgroundService.class)
-                .setAction(RmdexBackgroundService.ACTION_STOP);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            ContextCompat.startForegroundService(getContext(), intent);
-        } else {
-            getContext().startService(intent);
-        }
+        RmdexBackgroundService.stopAndClear(getContext());
         call.resolve();
     }
 }

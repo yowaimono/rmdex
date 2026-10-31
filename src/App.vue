@@ -194,6 +194,7 @@ let appStateListener: { remove: () => Promise<void> } | undefined
 let notificationListener: { remove: () => Promise<void> } | undefined
 let appActive = true
 let notificationSetupPromise: Promise<boolean> | undefined
+let backgroundNotificationsReady = false
 let backgroundNotificationSetupPromise: Promise<void> | undefined
 const trackedTasks = new Map<string, { turnId: string; text: string; name: string }>()
 const cacheHydratedKeys = new Set<string>()
@@ -346,6 +347,7 @@ function clearTask(threadId: string) {
 async function notifyTaskComplete(threadId: string, task: { turnId: string; text: string; name: string }, status: string) {
   clearTask(threadId)
   if (appActive || !Capacitor.isNativePlatform()) return
+  if (backgroundNotificationsReady) return
   try {
     const permission = await LocalNotifications.checkPermissions()
     if (permission.display !== 'granted') return
@@ -401,35 +403,46 @@ function installationId() {
 async function setupBackgroundNotifications() {
   if (!Capacitor.isNativePlatform() || !clientToken.value) return
   if (backgroundNotificationSetupPromise) return backgroundNotificationSetupPromise
+  const sessionToken = clientToken.value
   const setup = (async () => {
     try {
       if (!await setupNotifications()) return
+      const current = await get<{ device: { id: string } }>('/api/client')
       let pushToken = localStorage.getItem('rmdex-background-push-token') || ''
       let cursor: number | undefined
       if (pushToken) {
         const response = await fetch(apiUrl('/api/push/status'), { headers: { Authorization: `Bearer ${pushToken}` } })
-        if (!response.ok) {
+        const subscription = response.ok ? await response.json() as { deviceId?: string } : undefined
+        if (!subscription || subscription.deviceId !== current.device.id) {
           pushToken = ''
           localStorage.removeItem('rmdex-background-push-token')
         }
       }
+      if (sessionToken !== clientToken.value) return
       if (!pushToken) {
         const result = await post('/api/push/register', { installationId: installationId(), clientName: 'rmdex Android' }) as { pushToken: string; cursor?: number }
         pushToken = result.pushToken
         cursor = Number.isFinite(result.cursor) ? result.cursor : undefined
+        if (sessionToken !== clientToken.value) return
         localStorage.setItem('rmdex-background-push-token', pushToken)
       }
       await RmdexBackgroundService.start({ relayUrl: apiBase, pushToken, ...(cursor === undefined ? {} : { cursor }) })
-    } catch { /* The foreground service is optional on web and older Android installs. */ }
+      backgroundNotificationsReady = true
+    } catch (cause) {
+      console.warn('Android background notifications could not start', cause)
+      error.value = '后台通知连接失败，请检查网络并重新打开应用'
+    }
   })()
   backgroundNotificationSetupPromise = setup
   try {
     await setup
   } finally {
     if (backgroundNotificationSetupPromise === setup) backgroundNotificationSetupPromise = undefined
+    if (clientToken.value && sessionToken !== clientToken.value) void setupBackgroundNotifications()
   }
 }
 function stopBackgroundNotifications() {
+  backgroundNotificationsReady = false
   if (Capacitor.isNativePlatform()) void RmdexBackgroundService.stop().catch(() => {})
   localStorage.removeItem('rmdex-background-push-token')
 }

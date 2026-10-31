@@ -304,7 +304,8 @@ function rpc(deviceId: string, path: string, method: string, data?: unknown): Pr
   })
 }
 
-const taskWatchers = new Map<string, NodeJS.Timeout>()
+const taskWatchers = new Map<string, NodeJS.Timeout | null>()
+const terminalTurnStatuses = new Set(['completed', 'interrupted', 'failed', 'error'])
 function notificationWatchKey(watch: Pick<NotificationWatch, 'deviceId' | 'threadId' | 'turnId'>) {
   return `${watch.deviceId}:${watch.threadId}:${watch.turnId}`
 }
@@ -336,20 +337,31 @@ async function watchTask(deviceId: string, threadId: string, turnId: string, nam
   const watch: NotificationWatch = { deviceId, threadId, turnId, name: name || 'Codex 会话', createdAt: Date.now() }
   const key = notificationWatchKey(watch)
   if (taskWatchers.has(key)) return
+  // Reserve while persistence/RPC is in flight, not just between polls.
+  taskWatchers.set(key, null)
   if (!state.notificationWatches.some(item => notificationWatchKey(item) === key)) {
     state.notificationWatches.push(watch)
     await persist().catch(() => {})
   }
   const startedAt = Date.now()
   const poll = async () => {
-    taskWatchers.delete(key)
-    if (Date.now() - startedAt > 24 * 60 * 60_000) { await removeNotificationWatch(watch); return }
+    if (Date.now() - startedAt > 24 * 60 * 60_000) { await removeNotificationWatch(watch); taskWatchers.delete(key); return }
     try {
       const result = await rpc(deviceId, `/api/threads/${threadId}/status`, 'GET') as { activeTurnId?: string | null; lastTurn?: { id?: string; status?: string } | null }
-      const status = result.lastTurn?.status || ''
-      if (result.lastTurn?.id === turnId && !result.activeTurnId && status && !['inProgress', 'running', 'active', 'started'].includes(status)) {
+      let status = result.lastTurn?.id === turnId ? result.lastTurn.status || '' : ''
+      if (!terminalTurnStatuses.has(status)) {
+        // Older PC agents expose only an event cache at /status. A missed
+        // turn/completed must not make notifications wait for a phone read.
+        // /incremental reads persisted turns without the full-read live overlay.
+        const history = await rpc(deviceId, `/api/threads/${threadId}/incremental`, 'GET') as { thread?: { turns?: Array<{ id?: string; status?: string }> } }
+        status = history.thread?.turns?.find(turn => turn.id === turnId)?.status || ''
+      }
+      // A later queued turn can already be running. It must not suppress the
+      // completion of the specific turn being watched.
+      if (terminalTurnStatuses.has(status)) {
         await enqueueNotification(deviceId, threadId, turnId, status, `${watch.name}已完成`, status === 'completed' ? '任务已完成，点击查看结果' : `任务${status === 'interrupted' ? '已暂停' : '已结束'}，点击查看详情`)
         await removeNotificationWatch(watch)
+        taskWatchers.delete(key)
         return
       }
     } catch { /* The desktop agent may be reconnecting; keep watching. */ }
@@ -586,7 +598,7 @@ const server = createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/api/push/status') {
       const subscription = pushFor(req)
       if (!subscription) { json(res, 401, { error: '后台连接凭证已失效' }); return }
-      json(res, 200, { ok: true, cursor: notificationCursor(subscription.deviceId) }); return
+      json(res, 200, { ok: true, deviceId: subscription.deviceId, cursor: notificationCursor(subscription.deviceId) }); return
     }
     if (req.method === 'GET' && url.pathname === '/api/notifications/poll') {
       const subscription = pushFor(req)
@@ -708,7 +720,7 @@ const server = createServer(async (req, res) => {
       employee.updatedAt = Date.now()
       await persist()
     }
-    const sendMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/(?:send|retry)$/)
+    const sendMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/(?:send|retry|queue)$/)
     if (sendMatch && result && typeof result === 'object') {
       const turn = (result as { turn?: { id?: string } }).turn
       const targetId = typeof (result as { threadId?: unknown }).threadId === 'string' ? (result as { threadId: string }).threadId : sendMatch[1]!

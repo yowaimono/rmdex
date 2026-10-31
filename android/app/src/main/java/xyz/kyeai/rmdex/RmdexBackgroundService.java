@@ -7,15 +7,18 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.SharedPreferences;
 import android.content.Intent;
+import android.content.Context;
 import android.net.Uri;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
 import android.media.AudioAttributes;
 import android.media.RingtoneManager;
+import android.util.Log;
 
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
+import com.getcapacitor.JSObject;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -41,6 +44,8 @@ public class RmdexBackgroundService extends Service {
     private static final String PREF_RELAY_URL = "relayUrl";
     private static final String PREF_PUSH_TOKEN = "pushToken";
     private static final String PREF_CURSOR = "cursor";
+    private static final Object STATE_LOCK = new Object();
+    private static volatile RmdexBackgroundService instance;
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private volatile boolean stopped;
@@ -50,6 +55,12 @@ public class RmdexBackgroundService extends Service {
     private long cursor;
     private SharedPreferences preferences;
     private PowerManager.WakeLock wakeLock;
+    private volatile long generation;
+    private int lastHttpStatus;
+    private long lastSuccessAt;
+    private String lastError = "";
+    private int lastStartId;
+    private volatile HttpURLConnection activeConnection;
 
     @Override
     public void onCreate() {
@@ -60,16 +71,20 @@ public class RmdexBackgroundService extends Service {
             wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "rmdex:notification-poll");
             wakeLock.setReferenceCounted(false);
         }
-        restoreState();
+        synchronized (STATE_LOCK) { instance = this; restoreState(); }
         createChannels();
         startForeground(SERVICE_NOTIFICATION_ID, serviceNotification());
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        synchronized (STATE_LOCK) {
+        lastStartId = startId;
         if (intent != null && ACTION_STOP.equals(intent.getAction())) {
             clearState();
             stopped = true;
+            generation++;
+            if (activeConnection != null) activeConnection.disconnect();
             stopForeground(true);
             stopSelf(startId);
             return START_NOT_STICKY;
@@ -79,6 +94,10 @@ public class RmdexBackgroundService extends Service {
             String nextPushToken = intent.getStringExtra(EXTRA_PUSH_TOKEN);
             if (nextRelayUrl != null && !nextRelayUrl.isEmpty() && nextPushToken != null && !nextPushToken.isEmpty()) {
                 boolean tokenChanged = !nextRelayUrl.equals(relayUrl) || !nextPushToken.equals(pushToken);
+                if (tokenChanged) {
+                    generation++;
+                    if (activeConnection != null) activeConnection.disconnect();
+                }
                 if (tokenChanged) cursor = intent.hasExtra(EXTRA_CURSOR) ? Math.max(0L, intent.getLongExtra(EXTRA_CURSOR, 0L)) : 0L;
                 relayUrl = nextRelayUrl;
                 pushToken = nextPushToken;
@@ -86,48 +105,124 @@ public class RmdexBackgroundService extends Service {
             }
         }
         stopped = false;
+        if (relayUrl == null || pushToken == null) {
+            stopped = true;
+            stopForeground(STOP_FOREGROUND_REMOVE);
+            stopSelf(startId);
+            return START_NOT_STICKY;
+        }
         if (!polling && relayUrl != null && pushToken != null) {
             polling = true;
             executor.submit(this::pollLoop);
         }
         return START_STICKY;
+        }
+    }
+
+    public static void stopAndClear(Context context) {
+        synchronized (STATE_LOCK) {
+            if (instance != null) {
+                instance.stopped = true;
+                instance.generation++;
+                if (instance.activeConnection != null) instance.activeConnection.disconnect();
+            }
+            context.getSharedPreferences(PREFERENCES, MODE_PRIVATE).edit().clear().apply();
+            context.stopService(new Intent(context, RmdexBackgroundService.class));
+        }
+    }
+
+    public static JSObject status(Context context) {
+        synchronized (STATE_LOCK) {
+            RmdexBackgroundService service = instance;
+            SharedPreferences saved = context.getSharedPreferences(PREFERENCES, MODE_PRIVATE);
+            JSObject result = new JSObject();
+            result.put("running", service != null && !service.stopped);
+            result.put("polling", service != null && service.polling && !service.stopped);
+            result.put("configured", saved.contains(PREF_RELAY_URL) && saved.contains(PREF_PUSH_TOKEN));
+            result.put("cursor", saved.getLong(PREF_CURSOR, 0L));
+            result.put("lastHttpStatus", service == null ? 0 : service.lastHttpStatus);
+            result.put("lastSuccessAt", service == null ? 0L : service.lastSuccessAt);
+            result.put("lastError", service == null ? "" : service.lastError);
+            return result;
+        }
     }
 
     private void pollLoop() {
         try {
             while (!stopped && relayUrl != null && pushToken != null) {
                 HttpURLConnection connection = null;
+                final String requestUrl;
+                final String requestToken;
+                final long requestCursor;
+                final long requestGeneration;
+                final int requestStartId;
+                synchronized (STATE_LOCK) {
+                    requestUrl = relayUrl;
+                    requestToken = pushToken;
+                    requestCursor = cursor;
+                    requestGeneration = generation;
+                    requestStartId = lastStartId;
+                }
                 try {
                     if (wakeLock != null && !wakeLock.isHeld()) wakeLock.acquire(40_000L);
-                    String query = "/api/notifications/poll?wait=25000&after=" + cursor;
-                    URL url = new URL(relayUrl.replaceAll("/$", "") + query);
+                    String query = "/api/notifications/poll?wait=25000&after=" + requestCursor;
+                    URL url = new URL(requestUrl.replaceAll("/$", "") + query);
                     connection = (HttpURLConnection) url.openConnection();
+                    synchronized (STATE_LOCK) {
+                        if (stopped || generation != requestGeneration) continue;
+                        activeConnection = connection;
+                    }
                     connection.setRequestMethod("GET");
                     connection.setConnectTimeout(10000);
                     connection.setReadTimeout(35000);
-                    connection.setRequestProperty("Authorization", "Bearer " + pushToken);
+                    connection.setRequestProperty("Authorization", "Bearer " + requestToken);
                     int status = connection.getResponseCode();
+                    synchronized (STATE_LOCK) {
+                        if (stopped || generation != requestGeneration) continue;
+                        lastHttpStatus = status;
+                    }
                     if (status == HttpURLConnection.HTTP_UNAUTHORIZED || status == HttpURLConnection.HTTP_FORBIDDEN) {
+                      synchronized (STATE_LOCK) {
+                        if (stopped || generation != requestGeneration) continue;
                         clearState();
-                        stopSelf();
+                        stopped = true;
+                        stopSelf(requestStartId);
                         return;
+                      }
                     }
                     if (status != HttpURLConnection.HTTP_OK) throw new IllegalStateException("poll HTTP " + status);
                     String text = read(connection.getInputStream());
                     JSONObject response = new JSONObject(text);
-                    cursor = Math.max(cursor, response.optLong("cursor", cursor));
-                    persistCursor();
-                    JSONArray events = response.optJSONArray("data");
-                    if (events != null) for (int index = 0; index < events.length(); index++) showTask(events.getJSONObject(index));
-                } catch (Exception ignored) {
-                    sleep(3000);
+                    synchronized (STATE_LOCK) {
+                        if (stopped || generation != requestGeneration) continue;
+                        JSONArray events = response.optJSONArray("data");
+                        if (events != null) for (int index = 0; index < events.length(); index++) showTask(events.getJSONObject(index));
+                        // Acknowledge only after Android has accepted every notification.
+                        cursor = Math.max(cursor, response.optLong("cursor", cursor));
+                        persistCursor();
+                        lastSuccessAt = System.currentTimeMillis();
+                        lastError = "";
+                    }
+                } catch (Exception error) {
+                    if (!stopped && generation == requestGeneration) {
+                        synchronized (STATE_LOCK) { if (generation == requestGeneration) lastError = "后台通知连接失败，正在重试"; }
+                        Log.w("RmdexNotifications", "Background notification connection failed; retrying", error);
+                        sleep(3000);
+                    }
                 } finally {
                     if (connection != null) connection.disconnect();
+                    if (activeConnection == connection) activeConnection = null;
                     if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
                 }
             }
         } finally {
-            polling = false;
+            synchronized (STATE_LOCK) {
+                polling = false;
+                if (!stopped && relayUrl != null && pushToken != null && !executor.isShutdown()) {
+                    polling = true;
+                    executor.submit(this::pollLoop);
+                }
+            }
         }
     }
 
@@ -174,6 +269,7 @@ public class RmdexBackgroundService extends Service {
                 .setContentText(body)
                 .setStyle(new NotificationCompat.BigTextStyle().bigText(body))
                 .setAutoCancel(true)
+                .setOnlyAlertOnce(true)
                 .setContentIntent(pendingIntent)
                 .setPriority(NotificationCompat.PRIORITY_MAX)
                 .setCategory(NotificationCompat.CATEGORY_STATUS)
@@ -181,7 +277,10 @@ public class RmdexBackgroundService extends Service {
                 .setTicker(title)
                 .build();
         NotificationManager manager = getSystemService(NotificationManager.class);
-        if (manager != null) manager.notify(Math.abs((threadId + event.optString("turnId", "")).hashCode()), notification);
+        if (manager == null || !manager.areNotificationsEnabled()) throw new IllegalStateException("通知权限未开启");
+        NotificationChannel channel = manager.getNotificationChannel(TASK_CHANNEL);
+        if (channel != null && channel.getImportance() == NotificationManager.IMPORTANCE_NONE) throw new IllegalStateException("任务提醒渠道已关闭");
+        manager.notify(Math.abs((threadId + event.optString("turnId", "")).hashCode()), notification);
     }
 
     private Notification serviceNotification() {
@@ -231,7 +330,12 @@ public class RmdexBackgroundService extends Service {
 
     @Override
     public void onDestroy() {
-        stopped = true;
+        synchronized (STATE_LOCK) {
+            stopped = true;
+            generation++;
+            if (instance == this) instance = null;
+            if (activeConnection != null) activeConnection.disconnect();
+        }
         executor.shutdownNow();
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
         super.onDestroy();
@@ -239,7 +343,12 @@ public class RmdexBackgroundService extends Service {
 
     @Override
     public void onTimeout(int startId, int foregroundServiceType) {
-        stopped = true;
+        synchronized (STATE_LOCK) {
+            stopped = true;
+            generation++;
+            if (activeConnection != null) activeConnection.disconnect();
+            lastError = "Android 已停止超时的后台服务，请重新打开应用";
+        }
         executor.shutdownNow();
         stopForeground(STOP_FOREGROUND_REMOVE);
         stopSelf(startId);

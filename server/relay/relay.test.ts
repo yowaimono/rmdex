@@ -33,6 +33,10 @@ let ws: WebSocket | undefined
 let agent: ReturnType<typeof spawn> | undefined
 let forwardedBody: Record<string, unknown> | undefined
 let holdNotificationWatcher = false
+let missedCompletion = false
+let persistedCompletion = false
+let historyReads = 0
+let fullReads = 0
 const fakeAgent = createServer(async (req, res) => {
   if (req.url?.startsWith('/api/images/')) { res.setHeader('Content-Type', 'image/png'); res.end(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])); return }
   let raw = ''
@@ -41,14 +45,34 @@ const fakeAgent = createServer(async (req, res) => {
   res.setHeader('Content-Type', 'application/json')
   if (req.url === '/api/threads' && req.method === 'POST') { res.end(JSON.stringify({ thread: { id: 'employee-test-thread' } })); return }
   if (req.url === '/api/models') { res.end(JSON.stringify({ data: [{ id: 'dynamic-model', displayName: 'Dynamic Model' }] })); return }
-  if (req.url?.endsWith('/send')) {
+  if (req.url === '/api/threads/local-agent-test') fullReads++
+  if (req.url?.endsWith('/send') || (req.url?.endsWith('/queue') && req.method === 'POST')) {
+    if (forwardedBody?.text === 'missed completion event') {
+      missedCompletion = true
+      res.end(JSON.stringify({ turn: { id: 'missed-turn', status: 'inProgress' }, path: req.url })); return
+    }
+    if (forwardedBody?.text === 'idle queued task') {
+      missedCompletion = false
+      res.end(JSON.stringify({ turn: { id: 'queued-turn', status: 'completed' }, path: req.url })); return
+    }
     const turnId = forwardedBody?.text === 'hold notification watcher' ? 'held-turn' : 'completed-turn'
     res.end(JSON.stringify({ turn: { id: turnId }, path: req.url })); return
   }
   if (req.url?.endsWith('/status')) {
+    if (missedCompletion) {
+      // Simulate an old PC whose shared subscription missed turn/completed.
+      res.end(JSON.stringify({ activeTurnId: 'missed-turn', lastTurn: { id: 'missed-turn', status: 'inProgress' } })); return
+    }
+    if (forwardedBody?.text === 'idle queued task') {
+      res.end(JSON.stringify({ activeTurnId: 'later-turn', lastTurn: { id: 'queued-turn', status: 'completed' } })); return
+    }
     const heldTurn = forwardedBody?.text === 'hold notification watcher'
     const held = holdNotificationWatcher && heldTurn
     res.end(JSON.stringify({ activeTurnId: held ? 'held-turn' : null, lastTurn: { id: heldTurn ? 'held-turn' : 'completed-turn', status: held ? 'inProgress' : 'completed' }, path: req.url })); return
+  }
+  if (req.url?.endsWith('/incremental') && missedCompletion) {
+    historyReads++
+    res.end(JSON.stringify({ thread: { turns: [{ id: 'missed-turn', status: persistedCompletion ? 'completed' : 'inProgress' }] }, activeTurnId: 'missed-turn' })); return
   }
   res.end(JSON.stringify({ data: [{ id: 'local-agent-test' }], path: req.url }))
 })
@@ -123,6 +147,7 @@ try {
   assert.ok(pushRegistration.data.pushToken)
   assert.equal(pushRegistration.data.cursor, 0)
   assert.equal((await request('/api/push/status', { headers: { Authorization: `Bearer ${pushRegistration.data.pushToken}` } })).status, 200)
+  assert.equal((await request('/api/push/status', { headers: { Authorization: `Bearer ${pushRegistration.data.pushToken}` } })).data.deviceId, device.id)
   assert.equal((await request(`/api/notifications/poll?wait=0&after=0`, { headers: { Authorization: `Bearer ${pushRegistration.data.pushToken}` } })).status, 200)
   assert.equal((await request('/api/devices', { headers })).status, 401)
   assert.equal((await request('/api/client', { headers })).data.device.online, true)
@@ -205,6 +230,19 @@ try {
   assert.equal(heldNotification.data.data.filter((event: { turnId: string }) => event.turnId === 'held-turn').length, 1)
   const afterHeld = heldNotification.data.cursor
   assert.equal((await request(`/api/notifications/poll?wait=0&after=${afterHeld}`, { headers: { Authorization: `Bearer ${pushRegistration2.data.pushToken}` } })).data.data.length, 0)
+  const missedSend = await request('/api/threads/local-agent-test/send', json({ text: 'missed completion event' }, client2))
+  assert.equal(missedSend.status, 200)
+  await delay(200)
+  assert.equal((await request(`/api/notifications/poll?wait=0&after=${afterHeld}`, { headers: { Authorization: `Bearer ${pushRegistration2.data.pushToken}` } })).data.data.length, 0, 'running task must not notify')
+  persistedCompletion = true
+  const missed = await request(`/api/notifications/poll?wait=10000&after=${afterHeld}`, { headers: { Authorization: `Bearer ${pushRegistration2.data.pushToken}` } })
+  assert.equal(missed.data.data.filter((event: { turnId: string }) => event.turnId === 'missed-turn').length, 1, 'notify from persisted completion while event cache stays running')
+  assert.ok(historyReads > 0)
+  assert.equal(fullReads, 0, 'completion must not depend on opening the conversation')
+  assert.equal((await request(`/api/notifications/poll?wait=0&after=${missed.data.cursor}`, { headers: { Authorization: `Bearer ${pushRegistration2.data.pushToken}` } })).data.data.length, 0)
+  assert.equal((await request('/api/threads/local-agent-test/queue', json({ text: 'idle queued task' }, client2))).status, 200)
+  const queued = await request(`/api/notifications/poll?wait=10000&after=${missed.data.cursor}`, { headers: { Authorization: `Bearer ${pushRegistration2.data.pushToken}` } })
+  assert.equal(queued.data.data.filter((event: { turnId: string }) => event.turnId === 'queued-turn').length, 1, 'a later running turn must not suppress a completed watched turn')
   const retryRequest = { turnId: 'source-turn', operationId: crypto.randomUUID(), permissionMode: 'ask' }
   const forwardedRetry = await request('/api/threads/local-agent-test/retry', json(retryRequest, client2))
   assert.equal(forwardedRetry.status, 200)
