@@ -71,6 +71,32 @@ test('PC status keeps legacy root token enrollment compatible', async () => {
   }
 })
 
+test('PC status reports a live agent with a disconnected Codex RPC as degraded', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'rmdex-pc-degraded-'))
+  const previousPort = process.env.RMDEX_AGENT_PORT
+  const agent = createServer((req, res) => {
+    res.setHeader('Content-Type', 'application/json')
+    if (req.url === '/api/health') { res.writeHead(503); res.end(JSON.stringify({ state: 'disconnected', error: 'proxy closed' })); return }
+    if (req.url === '/api/settings') { res.end(JSON.stringify({ permissionMode: 'ask' })); return }
+    res.writeHead(404); res.end('{}')
+  })
+  await new Promise(resolve => agent.listen(0, '127.0.0.1', resolve))
+  process.env.RMDEX_AGENT_PORT = String(agent.address().port)
+  try {
+    const manager = new PcManager(root)
+    manager.agent = { exitCode: null, killed: false, pid: 1234 }
+    const status = await manager.status()
+    assert.equal(status.appServer.state, 'degraded')
+    assert.equal(status.appServer.connectionState, 'disconnected')
+    assert.equal(status.appServer.connectionError, 'proxy closed')
+  } finally {
+    agent.close()
+    if (previousPort === undefined) delete process.env.RMDEX_AGENT_PORT
+    else process.env.RMDEX_AGENT_PORT = previousPort
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('PC enrollment rejects incomplete credentials before contacting the relay', async () => {
   const root = await mkdtemp(join(tmpdir(), 'rmdex-pc-enroll-validation-'))
   try {

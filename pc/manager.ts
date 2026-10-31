@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { createServer as createNetServer } from 'node:net'
 
 export type PermissionMode = 'ask' | 'auto' | 'full'
-type ProcessState = 'stopped' | 'starting' | 'running' | 'error'
+type ProcessState = 'stopped' | 'starting' | 'running' | 'error' | 'degraded'
 type Phone = { name: string; online: boolean; lastSeenAt?: number }
 type Settings = { permissionMode: PermissionMode }
 
@@ -29,7 +29,7 @@ export type PcStatus = {
   phase: ProcessState
   permissionMode: PermissionMode
   codexDesktop: { state: ProcessState; pid?: number }
-  appServer: { state: ProcessState; socketPath: string; agentPort: number; pid?: number }
+  appServer: { state: ProcessState; connectionState: 'ready' | 'connecting' | 'disconnected' | 'unknown'; connectionError?: string; socketPath: string; agentPort: number; pid?: number }
   relay: { state: 'unknown' | 'online' | 'offline'; deviceName?: string; error?: string }
   phones: Phone[]
   error?: string
@@ -361,6 +361,19 @@ export class PcManager {
     await this.refreshRelay()
     const agentRunning = isAlive(this.agent)
     const desktopRunning = isAlive(this.desktop)
+    let connectionState: PcStatus['appServer']['connectionState'] = 'unknown'
+    let connectionError: string | undefined
+    if (agentRunning) {
+      try {
+        const response = await fetch(`http://127.0.0.1:${this.agentPort}/api/health`, { signal: AbortSignal.timeout(1500) })
+        const health = await response.json() as { state?: PcStatus['appServer']['connectionState']; error?: string }
+        connectionState = health.state || (response.ok || response.status === 404 ? 'unknown' : 'disconnected')
+        connectionError = health.state ? health.error : undefined
+      } catch (error) {
+        connectionState = 'disconnected'
+        connectionError = error instanceof Error ? error.message : String(error)
+      }
+    }
     let permissionMode = this.settings.permissionMode
     if (agentRunning) {
       try {
@@ -373,7 +386,7 @@ export class PcManager {
       phase: this.phase,
       permissionMode,
       codexDesktop: { state: desktopRunning ? 'running' : this.phase === 'starting' ? 'starting' : this.phase === 'error' ? 'error' : 'stopped', pid: this.desktop?.pid },
-      appServer: { state: agentRunning ? 'running' : this.phase === 'starting' ? 'starting' : this.phase === 'error' ? 'error' : 'stopped', socketPath: this.socketPath, agentPort: this.agentPort, pid: this.agent?.pid },
+      appServer: { state: !agentRunning ? this.phase === 'starting' ? 'starting' : this.phase === 'error' ? 'error' : 'stopped' : ['ready', 'unknown'].includes(connectionState) ? 'running' : 'degraded', connectionState, ...(connectionError ? { connectionError } : {}), socketPath: this.socketPath, agentPort: this.agentPort, pid: this.agent?.pid },
       relay: this.relayCache.state,
       phones: this.relayCache.phones,
       ...(this.error ? { error: this.error } : {}),

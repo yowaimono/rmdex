@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdtemp, unlink, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, unlink, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -29,11 +29,24 @@ async function waitFor(fn, timeout = 15000) {
 async function stopChild(child) {
   if (!child || child.exitCode !== null) return
   const exited = once(child, 'exit').catch(() => {})
-  child.kill()
+  if (process.platform === 'win32' && child.pid) {
+    const killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
+    await once(killer, 'exit').catch(() => {})
+  } else child.kill()
   await Promise.race([exited, delay(1000)])
   child.stdin?.destroy()
   child.stdout?.destroy()
   child.stderr?.destroy()
+}
+
+async function stopCodexForSocket(socket, child) {
+  if (process.platform === 'win32') {
+    const escaped = socket.replaceAll("'", "''")
+    const script = `$needle = '${escaped}'; Get-CimInstance Win32_Process -Filter "Name = 'codex.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($needle) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`
+    const powershell = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], { stdio: 'ignore', windowsHide: true })
+    await once(powershell, 'exit')
+  }
+  await stopChild(child)
 }
 
 function spawnCodex(args, options) {
@@ -51,12 +64,14 @@ test('shared client observes turns, forks history, and defers queued messages', 
   const agentPort = await listen(portProbe)
   await new Promise(resolve => portProbe.close(resolve))
   const codexSpawnOptions = { env: { ...process.env, CODEX_HOME: home, RMDEX_TEST_KEY: 'test' }, stdio: 'ignore', windowsHide: true }
-  const codex = spawnCodex([
+  const codexArgs = [
     '-c', 'model_provider="rmdextest"', '-c', 'model_providers.rmdextest.name="test"',
     '-c', `model_providers.rmdextest.base_url="http://127.0.0.1:${modelPort}/v1"`,
     '-c', 'model_providers.rmdextest.env_key="RMDEX_TEST_KEY"',
     'app-server', '--listen', `unix://${socket}`,
-  ], codexSpawnOptions)
+  ]
+  const startCodex = () => spawnCodex(codexArgs, codexSpawnOptions)
+  let codex = startCodex()
   let bridge, ws, agent
   try {
     await waitFor(async () => {
@@ -104,6 +119,11 @@ test('shared client observes turns, forks history, and defers queued messages', 
       env: { ...process.env, CODEX_HOME: home, RMDEX_CODEX_MODE: 'shared', RMDEX_CODEX_SOCKET: socket, RMDEX_AGENT_PORT: String(agentPort), RMDEX_RELAY_URL: '', RMDEX_DEVICE_TOKEN: '' },
       stdio: 'ignore', windowsHide: true,
     })
+    const health = await waitFor(async () => {
+      const result = await fetch(`http://127.0.0.1:${agentPort}/api/health`)
+      return result.ok ? result.json() : null
+    })
+    assert.equal(health.state, 'ready')
     const read = async () => {
       const result = await fetch(`http://127.0.0.1:${agentPort}/api/threads/${thread.id}`)
       const body = await result.json()
@@ -205,5 +225,49 @@ test('shared client observes turns, forks history, and defers queued messages', 
     model.closeAllConnections()
     await new Promise(resolve => model.close(resolve))
     await unlink(socket).catch(() => {})
+  }
+})
+
+test('shared proxy reconnects after the Codex app-server restarts', { timeout: 90000 }, async () => {
+  const home = await mkdtemp(join(tmpdir(), 'rmdex-reconnect-test-'))
+  const socket = join(homedir(), '.codex', 'app-server-control', `rmdex-reconnect-${process.pid}-${Date.now()}.sock`)
+  const model = createServer((req, res) => { req.resume(); res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{}') })
+  const modelPort = await listen(model)
+  const portProbe = createServer()
+  const agentPort = await listen(portProbe)
+  await new Promise(resolve => portProbe.close(resolve))
+  const codexSpawnOptions = { env: { ...process.env, CODEX_HOME: home, RMDEX_TEST_KEY: 'test' }, stdio: 'ignore', windowsHide: true }
+  const codexArgs = [
+    '-c', 'model_provider="rmdextest"', '-c', 'model_providers.rmdextest.name="test"',
+    '-c', `model_providers.rmdextest.base_url="http://127.0.0.1:${modelPort}/v1"`,
+    '-c', 'model_providers.rmdextest.env_key="RMDEX_TEST_KEY"',
+    'app-server', '--listen', `unix://${socket}`,
+  ]
+  const startCodex = () => spawnCodex(codexArgs, codexSpawnOptions)
+  let codex = startCodex()
+  const agent = spawn(process.execPath, ['--import', 'tsx', 'server/index.ts'], {
+    env: { ...process.env, CODEX_HOME: home, RMDEX_CODEX_MODE: 'shared', RMDEX_CODEX_SOCKET: socket, RMDEX_AGENT_PORT: String(agentPort), RMDEX_RELAY_URL: '', RMDEX_DEVICE_TOKEN: '' },
+    stdio: 'ignore', windowsHide: true,
+  })
+  const readHealth = async () => {
+    const response = await fetch(`http://127.0.0.1:${agentPort}/api/health`)
+    return { status: response.status, body: await response.json() }
+  }
+  try {
+    await waitFor(async () => { const health = await readHealth(); return health.status === 200 ? health : null })
+    await stopCodexForSocket(socket, codex)
+    await waitFor(async () => { const health = await readHealth(); return health.status === 503 ? health : null })
+    codex = startCodex()
+    const recovered = await waitFor(async () => { const health = await readHealth(); return health.status === 200 ? health : null })
+    assert.equal(recovered.body.state, 'ready')
+    const models = await fetch(`http://127.0.0.1:${agentPort}/api/models`)
+    assert.equal(models.status, 200, await models.text())
+  } finally {
+    await stopChild(agent)
+    await stopCodexForSocket(socket, codex)
+    model.closeAllConnections()
+    await new Promise(resolve => model.close(resolve))
+    await unlink(socket).catch(() => {})
+    await rm(home, { recursive: true, force: true })
   }
 })

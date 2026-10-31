@@ -9,7 +9,7 @@ type Status = {
   phase: 'stopped' | 'starting' | 'running' | 'error'
   permissionMode: PermissionMode
   codexDesktop: { state: string; pid?: number }
-  appServer: { state: string; socketPath: string; agentPort: number; pid?: number }
+  appServer: { state: string; connectionState?: string; connectionError?: string; socketPath: string; agentPort: number; pid?: number }
   relay: { state: string; deviceName?: string; error?: string }
   phones: Array<{ name: string; online: boolean; lastSeenAt?: number }>
   error?: string
@@ -90,8 +90,8 @@ async function copyLogs() {
   await navigator.clipboard?.writeText(`Agent\n${logs.value.agent}\n\nDesktop launcher\n${logs.value.desktop}`)
   copiedLog.value = true; setTimeout(() => { copiedLog.value = false }, 1600)
 }
-function stateText(value: string) { return ({ running: '运行中', starting: '启动中', stopped: '已停止', error: '异常', unknown: '未知', offline: '离线', online: '在线' }[value] || value) }
-function stateIcon(value: string) { return value === 'running' || value === 'online' ? Check : value === 'starting' ? LoaderCircle : value === 'error' ? AlertTriangle : WifiOff }
+function stateText(value: string) { return ({ running: '运行中', starting: '启动中', stopped: '已停止', error: '异常', degraded: '连接中断', ready: '可用', connecting: '正在恢复', disconnected: '断开', unknown: '未知', offline: '离线', online: '在线' }[value] || value) }
+function stateIcon(value: string) { return value === 'running' || value === 'online' || value === 'ready' ? Check : value === 'starting' || value === 'connecting' ? LoaderCircle : value === 'error' || value === 'degraded' || value === 'disconnected' ? AlertTriangle : WifiOff }
 function lastSeen(value?: number) { return value ? new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '尚未连接' }
 function selectView(view: View) { activeView.value = view; error.value = '' }
 onMounted(() => { void refresh(); timer = setInterval(() => void refresh(), 5000) })

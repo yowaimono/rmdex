@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { readFile, stat, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
@@ -42,16 +42,18 @@ const codexLaunch = process.platform === 'win32' && /\.ps1$/i.test(codexExecutab
   : process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(codexExecutable)
     ? { file: process.env.ComSpec || 'cmd.exe', args: ['/d', '/c', codexExecutable, ...codexArgs] }
     : { file: codexExecutable, args: codexArgs }
-const codex = spawn(codexLaunch.file, codexLaunch.args, {
-  stdio: ['pipe', 'pipe', 'pipe'],
-  windowsHide: true,
-})
-const sharedConnection = sharedMode
-  ? new WebSocket('ws://localhost/rpc', { createConnection: () => Duplex.from({ readable: codex.stdout, writable: codex.stdin }), handshakeTimeout: 10000 })
-  : undefined
+let codex: ChildProcess | undefined
+let sharedConnection: WebSocket | undefined
+let sharedConnectionAttempt: Promise<void> | undefined
+let sharedReconnectTimer: NodeJS.Timeout | undefined
+let sharedStableTimer: NodeJS.Timeout | undefined
+let sharedReconnectDelay = 1000
+let sharedConnectionState: 'ready' | 'connecting' | 'disconnected' = sharedMode ? 'disconnected' : 'ready'
+let sharedConnectionError = ''
+let shuttingDown = false
 let sequence = 0
-const pending = new Map<number, { resolve: (result: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>()
-let failure: string | undefined
+const pending = new Map<number, { connection?: WebSocket; resolve: (result: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>()
+const disconnectedConnections = new WeakSet<WebSocket>()
 const images = new Map<string, string>()
 const imageIds = new Map<string, string>()
 const attachmentStore = new AttachmentStore()
@@ -133,31 +135,16 @@ function registerImagePath(target: Record<string, unknown>, value: unknown) {
   target.assetUrl = `/api/images/${id}`
 }
 
-function failConnection(message: string) {
-  if (failure) return
-  failure = message
-  console.error(message)
-  activeTurns.clear()
-  liveTurns.clear()
-  approvals.clear()
-  subscriptions.clear()
-  for (const request of pending.values()) { clearTimeout(request.timer); request.reject(new Error(failure)) }
-  pending.clear()
-}
-codex.stderr.on('data', (data) => console.error(String(data).trim()))
-codex.on('error', (error) => failConnection(`Codex process failed: ${error.message}`))
-codex.on('exit', () => failConnection(sharedMode ? 'Codex shared proxy exited; check that the daemon is running' : 'Codex app-server exited'))
-sharedConnection?.on('error', (error) => failConnection(`Codex shared connection failed: ${error.message}`))
-sharedConnection?.on('close', () => failConnection('Codex shared connection closed'))
+const desiredSubscriptions = new Set<string>()
+
+function timestamp() { return new Date().toISOString() }
 function sendMessage(message: unknown, callback?: (error?: Error | null) => void) {
-  if (failure) { callback?.(new Error(failure)); return }
   const payload = JSON.stringify(message)
-  if (sharedConnection) {
-    if (sharedConnection.readyState !== WebSocket.OPEN) { callback?.(new Error('Codex shared connection is not ready')); return }
+  if (sharedMode) {
+    if (!sharedConnection || sharedConnection.readyState !== WebSocket.OPEN) { callback?.(new Error(sharedConnectionError || 'Codex shared connection is not ready')); return }
     sharedConnection.send(payload, callback)
-  } else {
-    codex.stdin.write(payload + '\n', callback)
-  }
+  } else if (codex?.stdin) codex.stdin.write(payload + '\n', callback)
+  else callback?.(new Error('Codex app-server is not available'))
 }
 function handleMessage(line: string) {
   try {
@@ -206,16 +193,105 @@ function handleMessage(line: string) {
     else request.resolve(message.result)
   } catch { console.error('Invalid app-server response') }
 }
-if (sharedConnection) sharedConnection.on('message', (data) => handleMessage(data.toString()))
-else createInterface({ input: codex.stdout }).on('line', handleMessage)
+if (!sharedMode) {
+  codex = spawn(codexLaunch.file, codexLaunch.args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+  codex.stderr?.on('data', data => console.error(`[${timestamp()}] Codex app-server: ${String(data).trim()}`))
+  codex.on('error', error => { sharedConnectionError = `Codex app-server failed: ${error.message}`; console.error(`[${timestamp()}] ${sharedConnectionError}`) })
+  codex.on('exit', (code, signal) => { sharedConnectionState = 'disconnected'; sharedConnectionError = `Codex app-server exited (code ${code ?? 'unknown'}, signal ${signal ?? 'none'})`; console.error(`[${timestamp()}] ${sharedConnectionError}`) })
+  createInterface({ input: codex.stdout! }).on('line', handleMessage)
+}
 
-function rpc(method: string, params: unknown): Promise<unknown> {
-  if (failure) return Promise.reject(new Error(failure))
+async function connectShared() {
+  const child = spawn(codexLaunch.file, codexLaunch.args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+  const connection = new WebSocket('ws://localhost/rpc', {
+    createConnection: () => Duplex.from({ readable: child.stdout!, writable: child.stdin! }),
+    handshakeTimeout: 10000,
+  })
+  codex = child
+  sharedConnection = connection
+  sharedConnectionState = 'connecting'
+  child.stderr?.on('data', data => console.error(`[${timestamp()}] Codex shared proxy: ${String(data).trim()}`))
+  child.on('error', error => disconnectShared(connection, `Codex shared proxy error: ${error.message}`))
+  child.on('exit', (code, signal) => {
+    const message = `Codex shared proxy exited (code ${code ?? 'unknown'}, signal ${signal ?? 'none'})`
+    console.error(`[${timestamp()}] ${message}`)
+    disconnectShared(connection, message, false)
+  })
+  connection.on('message', data => { if (sharedConnection === connection) handleMessage(data.toString()) })
+  connection.on('error', error => disconnectShared(connection, `Codex shared WebSocket error: ${error.message}`))
+  connection.on('close', (code, reason) => disconnectShared(connection, `Codex shared WebSocket closed (code ${code}${reason.length ? `, reason: ${reason.toString()}` : ''})`))
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      connection.once('open', resolve)
+      connection.once('error', reject)
+      connection.once('close', (code, reason) => reject(new Error(`WebSocket closed before open (code ${code}${reason.length ? `, reason: ${reason.toString()}` : ''})`)))
+    })
+    await rpc('initialize', { clientInfo: { name: 'rmdex', version: '0.0.1' }, capabilities: { experimentalApi: true } }, true)
+    sendMessage({ method: 'initialized', params: {} })
+    if (sharedConnection !== connection) throw new Error(sharedConnectionError || 'Codex shared connection closed during initialization')
+    sharedConnectionState = 'ready'
+    sharedConnectionError = ''
+    if (sharedStableTimer) clearTimeout(sharedStableTimer)
+    sharedStableTimer = setTimeout(() => { sharedReconnectDelay = 1000; sharedStableTimer = undefined }, 30000)
+    console.log(`[${timestamp()}] Codex shared connection ready`)
+    const resubscribe = [...desiredSubscriptions]
+    subscriptions.clear()
+    for (const threadId of resubscribe) void subscribeToThread(threadId).catch(error => console.error(`[${timestamp()}] Could not restore subscription for ${threadId}: ${error instanceof Error ? error.message : String(error)}`))
+  } catch (error) {
+    disconnectShared(connection, error instanceof Error ? error.message : String(error))
+    throw error
+  }
+}
+
+function disconnectShared(connection: WebSocket, message: string, log = true) {
+  if (disconnectedConnections.has(connection) || sharedConnection !== connection) return
+  disconnectedConnections.add(connection)
+  sharedConnection = undefined
+  sharedConnectionState = 'disconnected'
+  sharedConnectionError = message
+  if (log) console.error(`[${timestamp()}] ${message}`)
+  if (sharedStableTimer) { clearTimeout(sharedStableTimer); sharedStableTimer = undefined }
+  activeTurns.clear()
+  liveTurns.clear()
+  approvals.clear()
+  subscriptions.clear()
+  for (const [id, request] of pending) {
+    if (request.connection !== connection) continue
+    clearTimeout(request.timer)
+    request.reject(new Error(message))
+    pending.delete(id)
+  }
+  if (codex?.exitCode === null) codex.kill()
+  if (!shuttingDown && !sharedReconnectTimer) {
+    const delay = sharedReconnectDelay
+    sharedReconnectDelay = Math.min(sharedReconnectDelay * 2, 30000)
+    sharedReconnectTimer = setTimeout(() => {
+      sharedReconnectTimer = undefined
+      void ensureSharedConnected().catch(() => {})
+    }, delay)
+  }
+}
+
+function ensureSharedConnected(): Promise<void> {
+  if (!sharedMode || sharedConnectionState === 'ready') return Promise.resolve()
+  if (sharedConnectionAttempt) return sharedConnectionAttempt
+  if (sharedReconnectTimer) { clearTimeout(sharedReconnectTimer); sharedReconnectTimer = undefined }
+  const attempt = connectShared()
+  sharedConnectionAttempt = attempt
+  void attempt.finally(() => { if (sharedConnectionAttempt === attempt) sharedConnectionAttempt = undefined }).catch(() => {})
+  return attempt
+}
+
+async function rpc(method: string, params: unknown, allowConnecting = false): Promise<unknown> {
+  if (sharedMode && !allowConnecting) await ensureSharedConnected()
+  const connection = sharedConnection
+  if (sharedMode && (!connection || connection.readyState !== WebSocket.OPEN)) throw new Error(sharedConnectionError || 'Codex shared connection is not ready')
   return new Promise((resolve, reject) => {
     const id = ++sequence
     const timer = setTimeout(() => { pending.delete(id); reject(new Error('Codex request timed out')) }, 15000)
-    pending.set(id, { resolve, reject, timer })
-    sendMessage({ id, method, params }, (error) => {
+    pending.set(id, { connection, resolve, reject, timer })
+    sendMessage({ id, method, params }, error => {
       if (error && pending.has(id)) { clearTimeout(timer); pending.delete(id); reject(error) }
     })
   })
@@ -236,6 +312,7 @@ async function listModels() {
 }
 
 function subscribeToThread(threadId: string) {
+  desiredSubscriptions.add(threadId)
   let subscription = subscriptions.get(threadId)
   if (!subscription) {
     subscription = rpc('thread/resume', { threadId, excludeTurns: true }).then(() => {}).catch(error => {
@@ -254,15 +331,16 @@ function subscribeToThread(threadId: string) {
   return subscription
 }
 
-const transportReady = sharedConnection ? new Promise<void>((resolve, reject) => {
-  sharedConnection.once('open', resolve)
-  sharedConnection.once('error', reject)
-  sharedConnection.once('close', () => reject(new Error('Codex shared connection closed')))
-}) : Promise.resolve()
-const ready = transportReady.catch((error: Error) => { throw new Error(failure || `Codex shared connection failed: ${error.message}`) })
-  .then(() => rpc('initialize', { clientInfo: { name: 'rmdex', version: '0.0.1' }, capabilities: { experimentalApi: true } }))
-  .then(() => { sendMessage({ method: 'initialized', params: {} }) })
-ready.catch((error) => console.error('Codex initialization failed:', error.message))
+async function ensureReady() {
+  if (sharedMode) return ensureSharedConnected()
+  if (!standaloneReady) {
+    standaloneReady = rpc('initialize').then(() => { sendMessage({ method: 'initialized', params: {} }) })
+  }
+  return standaloneReady
+}
+
+let standaloneReady: Promise<void> | undefined
+void (sharedMode ? ensureSharedConnected() : ensureReady()).catch(error => console.error(`[${timestamp()}] Codex initialization failed: ${error.message}`))
 
 const server = createServer(async (req, res) => {
   res.setHeader('Content-Type', 'application/json; charset=utf-8')
@@ -278,7 +356,13 @@ const server = createServer(async (req, res) => {
   }
   try {
     const url = new URL(req.url || '/', 'http://localhost:18787')
-    await ready
+    if (url.pathname === '/api/health') {
+      const ready = !sharedMode || sharedConnectionState === 'ready'
+      res.writeHead(ready ? 200 : 503)
+      res.end(JSON.stringify({ ok: ready, state: sharedMode ? sharedConnectionState : 'ready', error: ready ? undefined : sharedConnectionError }))
+      return
+    }
+    await ensureReady()
     let result: unknown
     if (req.method === 'POST' || req.method === 'DELETE') {
       let body = ''
@@ -366,6 +450,7 @@ const server = createServer(async (req, res) => {
         await rpc('thread/delete', { threadId })
         threadListCache = undefined
         newThreads.delete(threadId)
+        desiredSubscriptions.delete(threadId)
         liveTurns.delete(threadId)
         activeTurns.delete(threadId)
         result = { threadId, deleted: true }
@@ -380,7 +465,16 @@ const server = createServer(async (req, res) => {
           // native state as shared Desktop turns may predate our subscription.
           const metadata = await rpc('thread/read', { threadId, includeTurns: false }) as { thread?: { status?: { type?: string } } }
           const running = metadata.thread?.status?.type === 'active' || activeTurns.has(threadId)
-          const started = running ? undefined : await rpc('thread/queue/start', { threadId })
+          let started: unknown
+          if (!running) {
+            try { started = await rpc('thread/queue/start', { threadId }) }
+            catch (error) {
+              // The app-server may consume queue/add between our status read
+              // and queue/start. Do not turn an accepted submission into a
+              // client-visible failure or retry it.
+              if (!/queue is empty/i.test(error instanceof Error ? error.message : String(error))) throw error
+            }
+          }
           result = { outcome: 'queued', threadId, queuedSubmission: (queued as { queuedSubmission?: unknown }).queuedSubmission || null, ...(started && typeof started === 'object' ? started : {}) }
         } else {
           const expectedTurnId = typeof data.expectedTurnId === 'string' && data.expectedTurnId ? data.expectedTurnId : activeTurns.get(threadId)
@@ -577,5 +671,13 @@ const server = createServer(async (req, res) => {
   }
 })
 server.listen(port, '127.0.0.1', () => console.log(`rmdex local agent listening on http://127.0.0.1:${port}`))
-for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => { sharedConnection?.terminate(); codex.kill(); server.close(); process.exit() })
+for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => {
+  shuttingDown = true
+  if (sharedReconnectTimer) clearTimeout(sharedReconnectTimer)
+  if (sharedStableTimer) clearTimeout(sharedStableTimer)
+  sharedConnection?.terminate()
+  codex?.kill()
+  server.close()
+  process.exit()
+})
 }
