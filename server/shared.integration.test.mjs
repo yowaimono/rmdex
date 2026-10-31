@@ -6,6 +6,7 @@ import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Duplex } from 'node:stream'
 import { setTimeout as delay } from 'node:timers/promises'
+import { once } from 'node:events'
 import { test } from 'node:test'
 import WebSocket from 'ws'
 import { createDesktopBridge } from './desktop-bridge.ts'
@@ -25,6 +26,21 @@ async function waitFor(fn, timeout = 15000) {
   throw lastError || new Error('Timed out waiting for test condition')
 }
 
+async function stopChild(child) {
+  if (!child || child.exitCode !== null) return
+  const exited = once(child, 'exit').catch(() => {})
+  child.kill()
+  await Promise.race([exited, delay(1000)])
+  child.stdin?.destroy()
+  child.stdout?.destroy()
+  child.stderr?.destroy()
+}
+
+function spawnCodex(args, options) {
+  if (process.platform === 'win32') return spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/c', 'codex.cmd', ...args], options)
+  return spawn('codex', args, options)
+}
+
 test('shared client observes a turn started by another client', { timeout: 40000 }, async () => {
   const home = await mkdtemp(join(tmpdir(), 'rmdex-shared-test-'))
   const socket = join(homedir(), '.codex', 'app-server-control', `rmdex-test-${process.pid}.sock`)
@@ -34,22 +50,32 @@ test('shared client observes a turn started by another client', { timeout: 40000
   const portProbe = createServer()
   const agentPort = await listen(portProbe)
   await new Promise(resolve => portProbe.close(resolve))
-  const codex = spawn('codex', [
+  const codexSpawnOptions = { env: { ...process.env, CODEX_HOME: home, RMDEX_TEST_KEY: 'test' }, stdio: 'ignore', windowsHide: true }
+  const codex = spawnCodex([
     '-c', 'model_provider="rmdextest"', '-c', 'model_providers.rmdextest.name="test"',
     '-c', `model_providers.rmdextest.base_url="http://127.0.0.1:${modelPort}/v1"`,
     '-c', 'model_providers.rmdextest.env_key="RMDEX_TEST_KEY"',
     'app-server', '--listen', `unix://${socket}`,
-  ], { env: { ...process.env, CODEX_HOME: home, RMDEX_TEST_KEY: 'test' }, stdio: 'ignore', windowsHide: true })
+  ], codexSpawnOptions)
   let bridge, ws, agent
   try {
     await waitFor(async () => {
-      const child = spawn('codex', ['app-server', 'proxy', '--sock', socket], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true })
+      const child = process.platform === 'win32'
+        ? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/c', 'codex.cmd', 'app-server', 'proxy', '--sock', socket], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true })
+        : spawn('codex', ['app-server', 'proxy', '--sock', socket], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true })
       child.on('error', () => {})
       const stream = Duplex.from({ readable: child.stdout, writable: child.stdin })
-      const connection = new WebSocket('ws://localhost/rpc', { createConnection: () => stream, handshakeTimeout: 1000 })
-      try { await new Promise((resolve, reject) => { connection.once('open', resolve); connection.once('error', reject) }); return true }
-      catch { return false }
-      finally { connection.terminate(); child.kill() }
+      let connection
+      try {
+        connection = new WebSocket('ws://localhost/rpc', { createConnection: () => stream, handshakeTimeout: 1000 })
+        await new Promise((resolve, reject) => { connection.once('open', resolve); connection.once('error', reject) })
+        return true
+      } catch { return false }
+      finally {
+        connection?.terminate()
+        await stopChild(child)
+        stream.destroy()
+      }
     })
     bridge = await createDesktopBridge(socket)
     const connect = (url, options) => new Promise((resolve, reject) => {
@@ -111,11 +137,10 @@ test('shared client observes a turn started by another client', { timeout: 40000
   } finally {
     ws?.terminate()
     bridge?.close()
-    agent?.kill()
-    codex.kill()
+    await stopChild(agent)
+    await stopChild(codex)
     response?.destroy()
-    model.close()
-    await delay(500)
+    await new Promise(resolve => model.close(resolve))
     await unlink(socket).catch(() => {})
   }
 })

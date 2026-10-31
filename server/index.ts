@@ -20,7 +20,7 @@ if (legacyDesktopMode) {
 
 // The local control API remains loopback-only. Remote access is relayed over
 // an authenticated outbound connection from remote-agent.ts.
-const codexExecutable = process.env.RMDEX_CODEX || 'codex'
+const codexExecutable = process.env.RMDEX_CODEX || (process.platform === 'win32' ? 'codex.cmd' : 'codex')
 const codexHome = process.env.CODEX_HOME || join(homedir(), '.codex')
 const sharedSocket = process.env.RMDEX_CODEX_SOCKET || join(codexHome, 'app-server-control', 'app-server-control.sock')
 const sharedMode = ['shared', 'proxy'].includes(requestedMode)
@@ -37,7 +37,9 @@ console.log(`[rmdex] Codex connection mode: ${sharedMode ? `shared proxy (${shar
 // of failing before the app-server has a chance to start.
 const codexLaunch = process.platform === 'win32' && /\.ps1$/i.test(codexExecutable)
   ? { file: process.env.ComSpec || 'cmd.exe', args: ['/d', '/c', 'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', codexExecutable, ...codexArgs] }
-  : { file: codexExecutable, args: codexArgs }
+  : process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(codexExecutable)
+    ? { file: process.env.ComSpec || 'cmd.exe', args: ['/d', '/c', codexExecutable, ...codexArgs] }
+    : { file: codexExecutable, args: codexArgs }
 const codex = spawn(codexLaunch.file, codexLaunch.args, {
   stdio: ['pipe', 'pipe', 'pipe'],
   windowsHide: true,

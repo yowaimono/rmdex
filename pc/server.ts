@@ -47,6 +47,12 @@ const server = createServer(async (req, res) => {
       if (req.method === 'POST' && url.pathname === '/pc-api/start') { json(res, 200, await manager.start()); return }
       if (req.method === 'POST' && url.pathname === '/pc-api/stop') { json(res, 200, await manager.stop()); return }
       if (req.method === 'POST' && url.pathname === '/pc-api/restart') { json(res, 200, await manager.restart()); return }
+      if (req.method === 'POST' && url.pathname === '/pc-api/enroll') {
+        const data = await body(req)
+        const result = await manager.enroll(String(data.username || ''), String(data.password || ''), String(data.deviceName || ''))
+        json(res, 200, result)
+        return
+      }
       if (req.method === 'POST' && url.pathname === '/pc-api/settings') {
         const data = await body(req)
         json(res, 200, await manager.setPermissionMode(String(data.permissionMode) as PermissionMode))

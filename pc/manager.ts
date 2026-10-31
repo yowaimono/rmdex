@@ -25,6 +25,7 @@ export function isCodexDesktopProcess(commandLine: string) {
 }
 
 export type PcStatus = {
+  enrolled: boolean
   phase: ProcessState
   permissionMode: PermissionMode
   codexDesktop: { state: ProcessState; pid?: number }
@@ -91,6 +92,9 @@ export class PcManager {
   private readonly root: string
   private readonly work: string
   private readonly settingsPath: string
+  private readonly deviceTokenPath: string
+  private readonly clientTokenPath: string
+  private readonly clientRefreshTokenPath: string
   private readonly agentPort: number
   private readonly socketPath: string
   private readonly relayUrl: string
@@ -107,6 +111,9 @@ export class PcManager {
     this.root = root
     this.work = join(root, 'work')
     this.settingsPath = join(this.work, 'pc-settings.json')
+    this.deviceTokenPath = join(this.work, '.device-token')
+    this.clientTokenPath = join(this.work, '.web-client-token')
+    this.clientRefreshTokenPath = join(this.work, '.web-client-refresh-token')
     this.agentPort = Number(process.env.RMDEX_AGENT_PORT || 18787)
     const codexHome = process.env.CODEX_HOME || join(process.env.USERPROFILE || '', '.codex')
     this.socketPath = process.env.RMDEX_CODEX_SOCKET || join(codexHome, 'app-server-control', 'app-server-control.sock')
@@ -190,8 +197,8 @@ export class PcManager {
     const stderr = join(this.work, 'pc-agent.stderr.log')
     this.agentLog = createWriteStream(stdout, { flags: 'a' })
     const errorLog = createWriteStream(stderr, { flags: 'a' })
-    const tokenPath = join(this.root, '.device-token')
-    const deviceToken = process.env.RMDEX_DEVICE_TOKEN || (await readFile(tokenPath, 'utf8').catch(() => '')).trim()
+    const rootTokenPath = join(this.root, '.device-token')
+    const deviceToken = process.env.RMDEX_DEVICE_TOKEN || (await readFile(rootTokenPath, 'utf8').catch(() => '')).trim() || (await readFile(this.deviceTokenPath, 'utf8').catch(() => '')).trim()
     // Keep the entrypoint relative to cwd. Node 24 + tsx can reject a Windows
     // drive-letter path passed as an ESM entrypoint (ERR_UNSUPPORTED_ESM_URL_SCHEME).
     const child = spawn(node, ['--import', 'tsx', 'server/index.ts'], {
@@ -278,6 +285,31 @@ export class PcManager {
     return this.start()
   }
 
+  async enroll(username: string, password: string, deviceName: string) {
+    const cleanUsername = username.trim()
+    const cleanName = deviceName.trim().slice(0, 80)
+    if (!cleanUsername || password.length < 1 || !cleanName) throw new Error('请输入工作空间管理员账号、密码和电脑名称')
+    const httpUrl = this.relayUrl.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:').replace(/\/agent$/, '')
+    const loginResponse = await fetch(`${httpUrl}/api/auth/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: cleanUsername, password }), signal: AbortSignal.timeout(10_000),
+    })
+    const login = await loginResponse.json() as { accessToken?: string; error?: string }
+    if (!loginResponse.ok || !login.accessToken) throw new Error(login.error || '工作空间登录失败')
+    const registerResponse = await fetch(`${httpUrl}/api/devices`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${login.accessToken}` }, body: JSON.stringify({ name: cleanName }), signal: AbortSignal.timeout(10_000),
+    })
+    const registration = await registerResponse.json() as { token?: string; accessToken?: string; refreshToken?: string; error?: string }
+    if (!registerResponse.ok || !registration.token) throw new Error(registration.error || '电脑注册失败')
+    await mkdir(this.work, { recursive: true })
+    await writeFile(this.deviceTokenPath, registration.token, { mode: 0o600 })
+    if (registration.accessToken && registration.refreshToken) {
+      await writeFile(this.clientTokenPath, registration.accessToken, { mode: 0o600 })
+      await writeFile(this.clientRefreshTokenPath, registration.refreshToken, { mode: 0o600 })
+    }
+    this.relayCache.at = 0
+    return this.start()
+  }
+
   async setPermissionMode(permissionMode: PermissionMode) {
     if (!validModes.includes(permissionMode)) throw new Error('permissionMode 必须是 ask、auto 或 full')
     this.settings.permissionMode = permissionMode
@@ -294,7 +326,7 @@ export class PcManager {
 
   private async refreshRelay() {
     if (Date.now() - this.relayCache.at < 5000) return
-    const token = process.env.RMDEX_WEB_CLIENT_TOKEN || (await readFile(join(this.root, '.web-client-token'), 'utf8').catch(() => '')).trim()
+    const token = process.env.RMDEX_WEB_CLIENT_TOKEN || (await readFile(join(this.root, '.web-client-token'), 'utf8').catch(() => '')).trim() || (await readFile(this.clientTokenPath, 'utf8').catch(() => '')).trim()
     if (!token) {
       this.relayCache = { at: Date.now(), state: { state: 'unknown', error: '未配置 .web-client-token' }, phones: [] }
       return
@@ -302,6 +334,18 @@ export class PcManager {
     try {
       const httpUrl = this.relayUrl.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:').replace(/\/agent$/, '')
       let response = await fetch(`${httpUrl}/api/client/peers`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(5000) })
+      if (response.status === 401 && !process.env.RMDEX_WEB_CLIENT_TOKEN) {
+        const refreshToken = (await readFile(this.clientRefreshTokenPath, 'utf8').catch(() => '')).trim()
+        if (refreshToken) {
+          const refreshed = await fetch(`${httpUrl}/api/auth/refresh`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ refreshToken }), signal: AbortSignal.timeout(5000) })
+          const credentials = await refreshed.json() as { accessToken?: string; refreshToken?: string }
+          if (refreshed.ok && credentials.accessToken && credentials.refreshToken) {
+            await writeFile(this.clientTokenPath, credentials.accessToken, { mode: 0o600 })
+            await writeFile(this.clientRefreshTokenPath, credentials.refreshToken, { mode: 0o600 })
+            response = await fetch(`${httpUrl}/api/client/peers`, { headers: { Authorization: `Bearer ${credentials.accessToken}` }, signal: AbortSignal.timeout(5000) })
+          }
+        }
+      }
       const oldRelay = response.status === 404
       if (oldRelay) response = await fetch(`${httpUrl}/api/client`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(5000) })
       const data = await response.json() as { device?: { name?: string }; phones?: Phone[]; error?: string }
@@ -324,6 +368,7 @@ export class PcManager {
       } catch { /* use persisted setting */ }
     }
     return {
+      enrolled: Boolean(process.env.RMDEX_DEVICE_TOKEN || await readFile(join(this.root, '.device-token'), 'utf8').catch(() => '') || await readFile(this.deviceTokenPath, 'utf8').catch(() => '')),
       phase: this.phase,
       permissionMode,
       codexDesktop: { state: desktopRunning ? 'running' : this.phase === 'starting' ? 'starting' : this.phase === 'error' ? 'error' : 'stopped', pid: this.desktop?.pid },

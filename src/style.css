@@ -308,6 +308,13 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .admin-login label, .claim-pair label { margin: 0; }
 .device-dialog .create-button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 9px 12px; border: 0; border-radius: 5px; background: #0879f9; color: white; font-size: 12px; white-space: nowrap; }
 .register-device, .claim-pair > div { display: flex; align-items: center; gap: 8px; }
+.tenant-admin { display: grid; gap: 9px; margin-top: 14px; padding: 12px; border: 1px solid #e4ebf2; border-radius: 7px; background: #fafcff; }
+.tenant-admin > strong, .tenant-select-label { color: #465667; font-size: 12px; font-weight: 600; }
+.tenant-create-form { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.tenant-create-form input { min-width: 0; width: 100%; }
+.tenant-create-form .create-button { grid-column: 1 / -1; justify-content: center; }
+.tenant-select-label { display: block; margin-top: 14px; }
+.tenant-select { width: 100%; margin-top: 6px; }
 .register-device input, .claim-pair input { flex: 1; min-width: 0; }
 .claim-pair { padding-top: 18px; margin-top: 18px; border-top: 1px solid #edf1f5; }
 .device-list { margin-top: 15px; }

@@ -6,6 +6,7 @@ import WebSocket, { WebSocketServer } from 'ws'
 
 // Desktop's local WebSocket client has no socket-path option on Windows.
 export async function createDesktopBridge(socketPath: string, codexExecutable = 'codex') {
+  const executable = process.platform === 'win32' && codexExecutable === 'codex' ? 'codex.cmd' : codexExecutable
   const secret = randomBytes(32).toString('hex')
   const server = createServer((_req, res) => { res.writeHead(404).end() })
   const wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024 })
@@ -23,7 +24,10 @@ export async function createDesktopBridge(socketPath: string, codexExecutable = 
   })
   wss.on('connection', client => {
     clients.add(client)
-    const proxy = spawn(codexExecutable, ['app-server', 'proxy', '--sock', socketPath], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+    const proxyArgs = ['app-server', 'proxy', '--sock', socketPath]
+    const proxy = process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(executable)
+      ? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/c', executable, ...proxyArgs], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+      : spawn(executable, proxyArgs, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
     proxies.add(proxy)
     proxy.stderr?.on('data', data => console.error(`Codex proxy: ${String(data).trim()}`))
     const stream = Duplex.from({ readable: proxy.stdout!, writable: proxy.stdin! })

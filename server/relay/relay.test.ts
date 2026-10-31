@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -11,8 +11,13 @@ const dir = await mkdtemp(join(tmpdir(), 'rmdex-test-'))
 const port = 21976
 const origin = `http://127.0.0.1:${port}`
 const password = 'test-password-not-for-production'
+const statePath = join(dir, 'state.json')
+const crypto = await import('node:crypto')
+const migratedDeviceTokenHash = crypto.createHash('sha256').update('legacy-device-token').digest('hex')
+const existingAdminPasswordHash = `sha256:${crypto.createHash('sha256').update(password).digest('hex')}`
+await writeFile(statePath, JSON.stringify({ devices: [{ id: 'legacy-pc', name: 'Migrated PC', tokenHash: migratedDeviceTokenHash, createdAt: 1 }], clients: [], pairings: [], pairRequests: [], users: [{ id: 'existing-admin', username: 'admin', passwordHash: existingAdminPasswordHash, role: 'admin', createdAt: 1 }], sessions: [], pushTokens: [], notifications: [] }))
 const child = spawn(process.execPath, ['--import', 'tsx', 'server/relay/index.ts'], {
-  env: { ...process.env, PORT: String(port), PUBLIC_ORIGIN: origin, RMDEX_STATE: join(dir, 'state.json'), RMDEX_ADMIN_HASH: (await import('node:crypto')).createHash('sha256').update(password).digest('hex') },
+  env: { ...process.env, PORT: String(port), PUBLIC_ORIGIN: origin, RMDEX_STATE: statePath, RMDEX_ADMIN_HASH: crypto.createHash('sha256').update(password).digest('hex') },
   stdio: ['ignore', 'ignore', 'pipe'],
 })
 let errors = ''
@@ -51,8 +56,30 @@ try {
   assert.equal(refreshed.status, 200)
   assert.equal((await request('/api/auth/refresh', json({ refreshToken: login.refreshToken }))).status, 401)
   const admin = (await request('/api/auth/login', json({ username: 'admin', password }))).data.accessToken as string
-  const deviceResponse = await request('/api/devices', json({ name: 'Synthetic test device' }, admin))
+  assert.equal((await request('/api/auth/me', { headers: { Authorization: `Bearer ${admin}` } })).data.user.id, 'existing-admin')
+  const defaultTenants = await request('/api/tenants', { headers: { Authorization: `Bearer ${admin}` } })
+  assert.equal(defaultTenants.status, 200)
+  assert.equal(defaultTenants.data.data[0].id, 'legacy-default')
+  assert.equal((await request('/api/devices', { headers: { Authorization: `Bearer ${admin}` } })).status, 403)
+  const createdTenant = await request('/api/tenants', json({ name: 'Tenant Two', username: 'tenant-two', password: 'tenant-password-long-enough' }, admin))
+  assert.equal(createdTenant.status, 201)
+  const tenantLogin = await request('/api/auth/login', json({ username: 'tenant-two', password: 'tenant-password-long-enough' }))
+  assert.equal(tenantLogin.status, 200)
+  assert.equal(tenantLogin.data.user.role, 'tenant-admin')
+  const tenantToken = tenantLogin.data.accessToken as string
+  const tenantList = await request('/api/tenants', { headers: { Authorization: `Bearer ${tenantToken}` } })
+  assert.deepEqual(tenantList.data.data.map((item: { id: string }) => item.id), [createdTenant.data.tenant.id])
+  const tenantDevice = await request('/api/devices', json({ name: 'Tenant PC' }, tenantToken))
+  assert.equal(tenantDevice.status, 201)
+  assert.equal(tenantDevice.data.tenantId, createdTenant.data.tenant.id)
+  assert.equal((await request('/api/devices?tenantId=legacy-default', { headers: { Authorization: `Bearer ${tenantToken}` } })).data.data[0].id, tenantDevice.data.id)
+  assert.equal((await request('/api/devices', { headers: { Authorization: `Bearer ${tenantToken}` } })).data.data[0].id, tenantDevice.data.id)
+  assert.equal((await request(`/api/devices/${tenantDevice.data.id}/web-client`, json({}, admin))).status, 201)
+  const deviceResponse = await request('/api/devices', json({ name: 'Synthetic test device', tenantId: 'legacy-default' }, admin))
   const device = deviceResponse.data
+  const migratedDevices = await request('/api/devices?tenantId=legacy-default', { headers: { Authorization: `Bearer ${admin}` } })
+  assert.ok(migratedDevices.data.data.some((item: { id: string }) => item.id === 'legacy-pc'))
+  assert.equal((await request(`/api/devices/${device.id}/web-client`, json({}, tenantToken))).status, 404)
   assert.ok(device.token && device.id)
   ws = new WebSocket(`ws://127.0.0.1:${port}/agent`)
   await new Promise<void>((resolve, reject) => { ws!.once('open', () => resolve()); ws!.once('error', reject) })
@@ -95,7 +122,7 @@ try {
   await new Promise<void>(resolve => fakeAgent.listen(0, '127.0.0.1', resolve))
   const address = fakeAgent.address()
   assert.ok(address && typeof address !== 'string')
-  const device2 = (await request('/api/devices', json({ name: 'Real outbound agent' }, admin))).data
+  const device2 = (await request('/api/devices', json({ name: 'Real outbound agent', tenantId: 'legacy-default' }, admin))).data
   agent = spawn(process.execPath, ['--import', 'tsx', 'server/remote-agent.ts'], {
     env: { ...process.env, RMDEX_RELAY_URL: `ws://127.0.0.1:${port}/agent`, RMDEX_DEVICE_TOKEN: device2.token, RMDEX_AGENT_PORT: String(address.port) },
     stdio: ['ignore', 'ignore', 'pipe'],

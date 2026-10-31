@@ -44,9 +44,16 @@ const adminUsername = ref(localStorage.getItem('rmdex-admin-username') || 'admin
 const adminPassword = ref('')
 const adminToken = ref(sessionStorage.getItem('rmdex-admin-token') || localStorage.getItem('rmdex-admin-access-token') || '')
 const adminRefreshToken = ref(localStorage.getItem('rmdex-admin-refresh-token') || '')
+const isPlatformAdmin = ref(false)
 const clientToken = ref(localStorage.getItem('rmdex-client-token') || localStorage.getItem('rmdex-client-access-token') || '')
 const clientRefreshToken = ref(localStorage.getItem('rmdex-client-refresh-token') || '')
 const devices = ref<Array<{ id: string; name: string; online: boolean }>>([])
+const tenants = ref<Array<{ id: string; name: string; deviceCount?: number }>>([])
+const selectedTenantId = ref('')
+const tenantName = ref('')
+const tenantUsername = ref('')
+const tenantPassword = ref('')
+const createdTenantCredentials = ref<{ name: string; username: string; password: string } | null>(null)
 const newDeviceToken = ref('')
 const pairCode = ref('')
 const pairQr = ref('')
@@ -1184,7 +1191,7 @@ async function loginAdmin() {
     const response = await fetch(apiUrl('/api/auth/login'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: adminUsername.value, password: adminPassword.value }) })
     const result = await readJsonResponse(response, '登录失败')
     if (!response.ok) throw new Error(result?.error || '登录失败')
-    storeSession('admin', result); localStorage.setItem('rmdex-admin-username', adminUsername.value); adminPassword.value = ''
+    storeSession('admin', result); isPlatformAdmin.value = result.user?.role === 'admin'; localStorage.setItem('rmdex-admin-username', adminUsername.value); adminPassword.value = ''
     await loadDevices()
     if (!clientToken.value) {
       const device = devices.value.find(item => item.online)
@@ -1197,14 +1204,32 @@ async function loginAdmin() {
 async function loadDevices() {
   if (!adminToken.value) return
   try {
+    const me = await adminFetch<{ user: { role: string; tenantId?: string | null } }>('/api/auth/me').catch(() => undefined)
+    if (me) isPlatformAdmin.value = me.user.role === 'admin'
+    const tenantResult = await adminFetch<{ data: typeof tenants.value }>('/api/tenants')
+    tenants.value = tenantResult.data
+    if (!tenants.value.some(item => item.id === selectedTenantId.value)) selectedTenantId.value = tenants.value[0]?.id || ''
+    const tenantQuery = selectedTenantId.value ? `?tenantId=${encodeURIComponent(selectedTenantId.value)}` : ''
     const [deviceResult, requestResult] = await Promise.all([
-      adminFetch<{ data: typeof devices.value }>('/api/devices'),
+      selectedTenantId.value ? adminFetch<{ data: typeof devices.value }>(`/api/devices${tenantQuery}`) : Promise.resolve({ data: [] as typeof devices.value }),
       adminFetch<{ data: typeof pairRequests.value }>('/api/pair-requests'),
     ])
     devices.value = deviceResult.data; pairRequests.value = requestResult.data
   }
   catch (e) { clearSession('admin'); pairError.value = e instanceof Error ? e.message : String(e) }
 }
+async function createTenant() {
+  pairError.value = ''; createdTenantCredentials.value = null
+  try {
+    const result = await adminFetch<{ tenant: { id: string; name: string } }>('/api/tenants', 'POST', { name: tenantName.value, username: tenantUsername.value, password: tenantPassword.value })
+    tenants.value = [...tenants.value, result.tenant]
+    selectedTenantId.value = result.tenant.id
+    createdTenantCredentials.value = { name: result.tenant.name, username: tenantUsername.value, password: tenantPassword.value }
+    tenantName.value = ''; tenantUsername.value = ''; tenantPassword.value = ''
+    await loadDevices()
+  } catch (e) { pairError.value = e instanceof Error ? e.message : String(e) }
+}
+async function selectTenant() { await loadDevices() }
 async function connectDevice(deviceId: string) {
   pairError.value = ''
   try {
@@ -1218,7 +1243,7 @@ async function connectDevice(deviceId: string) {
 async function registerDevice() {
   pairError.value = ''; newDeviceToken.value = ''; pairCode.value = ''; pairQr.value = ''
   try {
-    const result = await adminFetch<{ token: string; clientToken: string; accessToken?: string; refreshToken?: string }>('/api/devices', 'POST', { name: deviceName.value })
+    const result = await adminFetch<{ token: string; clientToken: string; accessToken?: string; refreshToken?: string }>('/api/devices', 'POST', { name: deviceName.value, tenantId: selectedTenantId.value })
     newDeviceToken.value = result.token
     storeSession('client', result)
     await loadDevices()
@@ -1663,8 +1688,12 @@ onUnmounted(() => { if (poll) clearInterval(poll); clearThreadLongPress(); void 
     <div v-if="pairApprovalPage" class="pair-status-backdrop"><section class="pair-status-page" role="dialog" aria-modal="true" aria-labelledby="pair-status-title"><button class="icon-button pair-status-close" type="button" title="返回设备连接" aria-label="返回设备连接" @click="returnToPairingEntry"><X :size="18" /></button><div class="pair-status-icon" :class="`is-${pairApprovalState}`"><LoaderCircle v-if="pairApprovalState === 'waiting'" :size="28" class="working-spinner" /><CircleAlert v-else :size="28" /></div><h2 id="pair-status-title">{{ pairApprovalState === 'waiting' ? '等待电脑端确认' : pairApprovalState === 'denied' ? '配对请求未通过' : pairApprovalState === 'expired' ? '配对请求已过期' : '配对暂时没有完成' }}</h2><p class="pair-status-copy">{{ pairApprovalState === 'waiting' ? '配对申请已经发送到电脑端，请在 Codex Desktop 中允许这台手机连接。' : pairError }}</p><div v-if="pairApprovalState === 'waiting'" class="pair-status-waiting"><span class="online"></span><span>正在等待电脑端审批</span></div><div v-else class="pair-status-actions"><button class="create-button" type="button" :disabled="scanningPair" @click="scanPairCode"><QrCode :size="16" />重新扫描二维码</button><button class="cancel-button" type="button" @click="returnToPairingEntry">手动输入配对码</button></div><form v-if="pairApprovalState !== 'waiting'" class="pair-status-manual" @submit.prevent="claimPair()"><label for="pair-status-code">输入 32 位配对码</label><div><input id="pair-status-code" v-model="pairInput" maxlength="32" inputmode="text" autocomplete="off" placeholder="输入配对码" /><button class="create-button" type="submit" :disabled="pairInput.length !== 32 || mobilePairing">继续</button></div></form></section></div>
     <div v-if="showDevices" class="modal-backdrop" @click.self="showDevices = false"><section class="create-dialog device-dialog" role="dialog" aria-modal="true" aria-labelledby="devices-title" @keydown.esc="showDevices = false"><header><div><h2 id="devices-title">设备连接</h2><p>管理 Codex 电脑与手机配对</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="showDevices = false"><X :size="18" /></button></header>
       <form v-if="!adminToken && !pairLanding" class="admin-login" @submit.prevent="loginAdmin"><label for="admin-username">管理员账号</label><input id="admin-username" v-model="adminUsername" autocomplete="username" required placeholder="输入管理员账号" /><label for="admin-password">管理员密码</label><p class="dialog-hint">登录后才能管理 Codex 电脑、生成手机配对码和审批手机连接。登录凭证会自动续期。</p><input id="admin-password" v-model="adminPassword" type="password" autocomplete="current-password" required placeholder="输入服务器管理员密码" /><button class="create-button" type="submit">登录管理设备</button></form>
-      <template v-else-if="adminToken"><div class="admin-status"><span class="online"></span><span>管理员已验证</span></div><form class="register-device" @submit.prevent="registerDevice"><input v-model="deviceName" aria-label="设备名称" maxlength="80" /><button class="create-button" type="submit"><Plus :size="15" />注册此电脑</button></form>
-        <div v-if="newDeviceToken" class="device-secret"><strong>设备密钥只显示这一次</strong><p>将它配置在运行 Codex Desktop 的电脑上。不要发送给其他人。</p><code>{{ newDeviceToken }}</code><button class="copy-button" type="button" @click="copyValue(newDeviceToken)"><Copy :size="15" />复制密钥</button><small>电脑代理环境变量：RMDEX_RELAY_URL=wss://code.kyeai.xyz/agent，RMDEX_DEVICE_TOKEN=上方密钥</small></div>
+      <template v-else-if="adminToken"><div class="admin-status"><span class="online"></span><span>{{ isPlatformAdmin ? '平台管理员已验证' : '工作空间管理员已验证' }}</span></div>
+        <section v-if="isPlatformAdmin" class="tenant-admin"><strong>工作空间管理</strong><form class="tenant-create-form" @submit.prevent="createTenant"><input v-model="tenantName" aria-label="工作空间名称" maxlength="80" required placeholder="工作空间名称" /><input v-model="tenantUsername" aria-label="租户管理员账号" minlength="3" maxlength="80" required placeholder="管理员账号" /><input v-model="tenantPassword" aria-label="租户管理员初始密码" minlength="12" type="password" required placeholder="初始密码（至少 12 位）" /><button class="create-button" type="submit"><Plus :size="15" />创建租户</button></form></section>
+        <div v-if="createdTenantCredentials" class="device-secret"><strong>租户已创建，请安全交付管理员凭证</strong><p>{{ createdTenantCredentials.name }}</p><code>{{ createdTenantCredentials.username }} / {{ createdTenantCredentials.password }}</code><button class="copy-button" type="button" @click="copyValue(createdTenantCredentials.username + '\n' + createdTenantCredentials.password, '已复制租户登录凭证')"><Copy :size="15" />复制凭证</button></div>
+        <label class="tenant-select-label" for="device-tenant">设备所属工作空间</label><select id="device-tenant" v-model="selectedTenantId" class="tenant-select" :disabled="!isPlatformAdmin || tenants.length < 2" @change="selectTenant"><option v-for="tenant in tenants" :key="tenant.id" :value="tenant.id">{{ tenant.name }}{{ tenant.deviceCount !== undefined ? `（${tenant.deviceCount} 台电脑）` : '' }}</option></select>
+        <form class="register-device" @submit.prevent="registerDevice"><input v-model="deviceName" aria-label="设备名称" maxlength="80" /><button class="create-button" type="submit" :disabled="!selectedTenantId"><Plus :size="15" />注册此电脑</button></form>
+        <div v-if="newDeviceToken" class="device-secret"><strong>手动注册设备密钥只显示这一次</strong><p>新电脑安装 rmdex-pc 后，可直接在本地面板登录工作空间自动注册；此密钥用于已有电脑的手动配置。不要发送给其他人。</p><code>{{ newDeviceToken }}</code><button class="copy-button" type="button" @click="copyValue(newDeviceToken)"><Copy :size="15" />复制密钥</button><small>手动配置：RMDEX_RELAY_URL=wss://code.kyeai.xyz/agent，RMDEX_DEVICE_TOKEN=上方密钥</small></div>
         <div v-if="pairRequests.length" class="pair-requests"><strong>等待确认的手机</strong><div v-for="request in pairRequests" :key="request.id" class="pair-request"><span>{{ request.name }}</span><button type="button" @click="decidePair(request.id, 'deny')">拒绝</button><button type="button" class="approve-pair" @click="decidePair(request.id, 'approve')">允许</button></div></div>
         <div class="device-list"><div v-for="device in devices" :key="device.id" class="device-row"><span class="device-icon"><Monitor :size="16" /></span><div class="device-copy"><strong>{{ device.name }}</strong><small>{{ device.online ? '在线' : '离线' }}</small></div><span class="online" :class="{ offline: !device.online }"></span><button class="icon-button" :class="{ 'connect-device-button': remoteDevice?.id !== device.id }" title="连接此设备" aria-label="连接此设备" :disabled="!device.online" @click="connectDevice(device.id)"><MessageSquare :size="16" /></button><button class="icon-button" title="生成手机配对码" aria-label="生成手机配对码" @click="createPair(device.id)"><Smartphone :size="16" /></button><button class="icon-button revoke-button" title="撤销设备" aria-label="撤销设备" @click="revokeDevice(device.id)"><Trash2 :size="15" /></button></div><p v-if="!devices.length" class="device-empty">尚未注册 Codex 电脑</p></div>
         <div v-if="pairCode" class="pair-result"><img :src="pairQr" alt="手机扫码配对二维码" /><div><strong>手机扫码配对</strong><p>二维码和配对码 3 分钟内有效，只能使用一次。</p><code>{{ pairCode }}</code><button class="copy-button" type="button" @click="copyValue(pairUrl)"><Copy :size="15" />复制配对链接</button></div></div>
