@@ -19,6 +19,7 @@ import { installInAppLinks } from './in-app-browser'
 import { colleagueMessage, messageRequest, timeline, userText, type ContentPart, type MessageEntry, type Turn } from './conversation'
 import { loadThreadCache, queueThreadCacheWrite, removeThreadCache } from './thread-cache'
 import { commandSummary } from './command-summary'
+import { modelPreferenceKey, resolveModelPreference, type ModelPreference } from './model-preferences'
 
 type PcLoginSession = { accessToken: string; refreshToken: string; device: { id: string; name: string; online: boolean } }
 const props = defineProps<{ pcLogin?: (username: string, password: string, deviceName: string) => Promise<PcLoginSession>; pcDeviceName?: string }>()
@@ -669,21 +670,40 @@ async function loadModels() {
     if (desktopMode.value && capabilities.value.models) {
       models.value = [{ id: desktopDefaultModel, model: '', displayName: '沿用 Desktop', description: '使用会话的现有模型，新对话使用桌面默认设置', hidden: false, isDefault: true, defaultReasoningEffort: '', supportedReasoningEfforts: [] }, ...models.value]
     }
-    const settingsKey = desktopMode.value ? `desktop:${deviceKey}` : deviceKey
-    const savedModel = localStorage.getItem(`rmdex-model:${settingsKey}`)
-    const savedEffort = localStorage.getItem(`rmdex-effort:${settingsKey}`)
-    const nextModel = models.value.find(model => model.id === savedModel) || models.value.find(model => model.isDefault) || models.value[0]
-    selectedModel.value = nextModel?.id || null
-    const nextEffort = nextModel?.supportedReasoningEfforts.some(item => item.reasoningEffort === savedEffort)
-      ? savedEffort
-      : nextModel?.defaultReasoningEffort || nextModel?.supportedReasoningEfforts[0]?.reasoningEffort || null
-    selectedEffort.value = nextEffort
+    restoreModelPreference(selected.value?.id)
     modelsLoadedKey = requestedKey
   } catch (e) {
     models.value = []; selectedModel.value = null; selectedEffort.value = null
     capabilities.value = { ...defaultCapabilities, models: false, permissions: false, stop: false, send: false, create: false }
     error.value = `设备设置暂不可用：${e instanceof Error ? e.message : String(e)}`
   } finally { modelLoading.value = false }
+}
+function readModelPreference(threadId: string): ModelPreference | null {
+  try {
+    const key = modelPreferenceKey(remoteDevice.value?.id, desktopMode.value ? 'desktop' : 'app-server', threadId)
+    const saved = JSON.parse(localStorage.getItem(key) || 'null') as Partial<ModelPreference> | null
+    return typeof saved?.model === 'string' && saved.model
+      ? { model: saved.model, effort: typeof saved.effort === 'string' ? saved.effort : null }
+      : null
+  } catch { return null }
+}
+function writeModelPreference(threadId: string, preference: ModelPreference) {
+  const key = modelPreferenceKey(remoteDevice.value?.id, desktopMode.value ? 'desktop' : 'app-server', threadId)
+  localStorage.setItem(key, JSON.stringify(preference))
+}
+function restoreModelPreference(threadId?: string) {
+  const preference = resolveModelPreference(models.value, threadId ? readModelPreference(threadId) : null)
+  selectedModel.value = preference.model || null
+  selectedEffort.value = preference.effort
+}
+function saveModelPreference() {
+  const threadId = selected.value?.id
+  if (!threadId || !selectedModel.value) return
+  writeModelPreference(threadId, { model: selectedModel.value, effort: selectedEffort.value })
+}
+function copyModelPreference(fromThreadId: string, toThreadId: string) {
+  const preference = readModelPreference(fromThreadId)
+  if (preference) writeModelPreference(toThreadId, preference)
 }
 async function loadThreads(force = false) {
   const scope = `${remoteDevice.value?.id || 'local'}:${desktopMode.value ? 'desktop' : 'app-server'}`
@@ -1117,13 +1137,11 @@ function rememberPermission(value: 'ask' | 'auto' | 'full') {
 }
 function rememberModel(value: string) {
   selectedModel.value = value
-  const deviceKey = remoteDevice.value?.id || 'local'
-  localStorage.setItem(`rmdex-model:${desktopMode.value ? `desktop:${deviceKey}` : deviceKey}`, value)
+  saveModelPreference()
 }
 function rememberEffort(value: string) {
   selectedEffort.value = value
-  const deviceKey = remoteDevice.value?.id || 'local'
-  localStorage.setItem(`rmdex-effort:${desktopMode.value ? `desktop:${deviceKey}` : deviceKey}`, value)
+  saveModelPreference()
 }
 function desktopSettings(): { model?: string; effort?: string } {
   if (!capabilities.value.models || !selectedModel.value || selectedModel.value === desktopDefaultModel) return {}
@@ -1280,6 +1298,7 @@ async function openThread(thread: Thread) {
   const cached = threadCache.get(threadCacheKey(thread.id))
   threadLoading.value = !cached; threadLoadError.value = ''; historyCursor.value = cached?.page?.hasMore ? cached.page.nextCursor : null; historyLoading.value = false; queuedUntil = 0
   selected.value = thread; activeEmployeeId.value = thread.employeeId || employeeForThread(thread.id)?.id || null; activeTurnId.value = null; pendingApprovals.value = []; lastTurn.value = null; queuedSubmissions.value = []; queueMenuId.value = null; mobileDetail.value = true; error.value = ''
+  restoreModelPreference(thread.id)
   void loadQueuedSubmissions(thread.id)
   if (cached) {
     applyRead(cloneRead(cached))
@@ -1734,6 +1753,7 @@ async function sendDesktopDraft(thread: Thread, text: string, attachments: Array
   }
   sessionStorage.removeItem(key)
   const created = result.thread
+  copyModelPreference(thread.id, created.id)
   localDraftThreads.value = localDraftThreads.value.filter(item => item.id !== thread.id)
   threads.value = [created, ...threads.value.filter(item => item.id !== thread.id && item.id !== created.id)]
   threadIndicators.value[created.id] = 'working'
