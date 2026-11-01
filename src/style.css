@@ -102,11 +102,15 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .search input { min-width: 0; width: 100%; border: 0; outline: 0; background: none; color: #263545; font-size: 13px; }
 .search input::placeholder { color: #a5b0bb; }
 .section-label { display: flex; align-items: center; justify-content: space-between; margin: 21px 17px 5px 20px; color: #778594; font-size: 12px; font-weight: 600; }
-.employee-section { margin-top: 2px; padding-bottom: 5px; border-bottom: 1px solid #e8edf2; }
+.employee-section { margin-top: 2px; padding-bottom: 5px; }
 .employee-plan-entry { width: 100%; display: flex; align-items: center; gap: 8px; margin-top: 6px; padding: 8px 10px; border: 0; border-radius: 6px; color: #708399; background: transparent; font-size: 11px; text-align: left; }
 .employee-plan-entry span { flex: 1; }
 .employee-plan-entry:hover { color: #1675e8; background: #f5f8fb; }
 .employee-section .section-label { margin-top: 8px; }
+.sidebar-section-label { cursor: pointer; user-select: none; }
+.sidebar-section-label > span { display: inline-flex; align-items: center; gap: 3px; }
+.section-chevron { flex: none; color: #99a7b5; }
+.sidebar-section-label:hover { color: #1675e8; }
 .employee-row { position: relative; display: flex; align-items: stretch; min-height: 43px; margin: 0 10px; overflow: hidden; border-radius: 6px; color: #445465; }
 .employee-row:hover, .employee-row.selected { background: #eef5fd; }
 .employee-row-content { position: relative; z-index: 1; min-width: 100%; display: flex; align-items: stretch; background: #fff; transition: transform .18s ease; }

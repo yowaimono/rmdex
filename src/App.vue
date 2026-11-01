@@ -186,6 +186,7 @@ const createError = ref('')
 const createProject = ref('')
 const projects = ref<Project[]>([])
 const collapsedProjectIds = ref<string[]>([])
+const collapsedSidebarSections = ref<Record<'employees' | 'plans' | 'sessions', boolean>>({ employees: false, plans: false, sessions: false })
 const projectEditor = ref(false)
 const editingProjectId = ref<string | null>(null)
 const projectName = ref('')
@@ -1003,6 +1004,27 @@ function loadCollapsedProjects() {
     collapsedProjectIds.value = raw ? JSON.parse(raw).filter((id: unknown): id is string => typeof id === 'string') : []
   } catch { collapsedProjectIds.value = [] }
 }
+function loadCollapsedSidebarSections() {
+  try {
+    const raw = localStorage.getItem(`rmdex-collapsed-sidebar-sections:${archiveScope()}`)
+    const saved = raw ? JSON.parse(raw) as Partial<Record<'employees' | 'plans' | 'sessions', unknown>> : {}
+    collapsedSidebarSections.value = {
+      employees: saved.employees === true,
+      plans: saved.plans === true,
+      sessions: saved.sessions === true,
+    }
+  } catch { collapsedSidebarSections.value = { employees: false, plans: false, sessions: false } }
+}
+function persistCollapsedSidebarSections() {
+  localStorage.setItem(`rmdex-collapsed-sidebar-sections:${archiveScope()}`, JSON.stringify(collapsedSidebarSections.value))
+}
+function sidebarSectionIsCollapsed(section: 'employees' | 'plans' | 'sessions') {
+  return collapsedSidebarSections.value[section]
+}
+function toggleSidebarSection(section: 'employees' | 'plans' | 'sessions') {
+  collapsedSidebarSections.value = { ...collapsedSidebarSections.value, [section]: !collapsedSidebarSections.value[section] }
+  persistCollapsedSidebarSections()
+}
 function persistCollapsedProjects() {
   localStorage.setItem(`rmdex-collapsed-projects:${archiveScope()}`, JSON.stringify(collapsedProjectIds.value))
 }
@@ -1382,6 +1404,7 @@ async function refresh(force = true) {
     loadArchivedThreads()
     loadPinnedThreads()
     loadCollapsedProjects()
+    loadCollapsedSidebarSections()
     await hydrateThreadCache()
     const [result] = await Promise.all([
       loadThreads(force),
@@ -1600,6 +1623,10 @@ async function loadPlans() {
 }
 function openPlanEditor() {
   planName.value = ''; planPrompt.value = ''; planEmployeeId.value = ''; planCwd.value = selected.value?.cwd || projects.value[0]?.path || ''; planTriggerType.value = 'interval'; planAt.value = ''; planIntervalMinutes.value = '60'; planOverlap.value = 'skip'; planEditor.value = true
+}
+function openPlanEditorFromSidebar() {
+  activePage.value = 'plan-detail'
+  openPlanEditor()
 }
 function openPlan(plan: Plan) {
   selectedPlanId.value = plan.id
@@ -2419,7 +2446,7 @@ onUnmounted(() => { themeMediaQuery?.removeEventListener('change', handleSystemT
     <section class="settings-content" aria-labelledby="plans-title">
       <div class="settings-heading"><p class="eyebrow">当前设备：{{ remoteDevice?.name || '本机设备' }}</p><h1 id="plans-title">{{ selectedPlan?.name || '计划任务' }}</h1><p>{{ selectedPlan ? '查看这个计划的配置、执行控制和历史执行记录。' : '正在加载当前设备的计划。' }}</p></div>
       <section class="settings-card plan-card" aria-labelledby="plan-list-title">
-        <div class="settings-card-heading"><span class="settings-card-icon"><CalendarClock :size="18" /></span><div><h2 id="plan-list-title">计划详情</h2><p>未绑定员工的执行线程会隐藏在普通会话列表之外。</p></div><button class="create-button automation-add-button" type="button" @click="openPlanEditor"><Plus :size="15" />新建计划</button></div>
+        <div class="settings-card-heading"><span class="settings-card-icon"><CalendarClock :size="18" /></span><div><h2 id="plan-list-title">计划详情</h2><p>未绑定员工的执行线程会隐藏在普通会话列表之外。</p></div></div>
         <p v-if="plansError" class="create-error" role="alert">{{ plansError }}</p>
         <div v-if="plansLoading" class="automation-state">正在加载当前设备的计划…</div>
         <template v-if="selectedPlan"><div class="plan-detail-summary"><div><span class="plan-detail-label">状态</span><strong>{{ selectedPlan.enabled ? '运行中' : '已暂停' }}</strong></div><div><span class="plan-detail-label">绑定员工</span><strong>{{ selectedPlan.employee?.name || '独立执行' }}</strong></div><div><span class="plan-detail-label">触发方式</span><strong>{{ formatPlanTrigger(selectedPlan) }}</strong></div><div><span class="plan-detail-label">下次执行</span><strong>{{ selectedPlan.enabled ? new Date(selectedPlan.nextRunAt).toLocaleString() : '已暂停' }}</strong></div></div><div class="plan-detail-prompt"><span class="plan-detail-label">任务内容</span><p>{{ selectedPlan.prompt }}</p></div><div class="plan-item-actions plan-detail-actions"><button type="button" @click="updatePlan(selectedPlan, 'run')">立即执行</button><button type="button" @click="updatePlan(selectedPlan, selectedPlan.enabled ? 'pause' : 'resume')">{{ selectedPlan.enabled ? '暂停计划' : '恢复计划' }}</button><button class="danger-text-button" type="button" @click="updatePlan(selectedPlan, 'delete')">删除计划</button></div><div class="plan-detail-runs"><div class="plan-detail-section-heading"><div><h3>执行记录</h3><p>只显示这个计划的执行历史。</p></div><button class="icon-button" type="button" title="刷新执行记录" aria-label="刷新执行记录" :disabled="plansLoading" @click="loadPlans"><RefreshCw :size="15" /></button></div><div v-if="!selectedPlanRuns.length" class="automation-state">这个计划还没有执行记录。</div><div v-else class="automation-list"><article v-for="run in selectedPlanRuns" :key="run.id" class="automation-item"><div><strong>{{ formatPlanRunStatus(run.status) }}</strong><small>{{ new Date(run.triggeredAt).toLocaleString() }} · {{ run.employeeName || '独立执行' }}</small><p>{{ run.error || run.summary || '等待执行结果' }}</p></div><button v-if="['pending', 'running'].includes(run.status)" type="button" @click="cancelPlanRun(run)">停止</button></article></div></div></template><div v-else class="automation-state">正在准备计划详情…</div>
@@ -2451,23 +2478,23 @@ onUnmounted(() => { themeMediaQuery?.removeEventListener('change', handleSystemT
       <button class="pair-entry" type="button" @click="showDevices = true"><QrCode :size="16" /><span>连接设备</span><span class="pair-entry-hint">切换或管理</span></button>
       <label class="search"><Search :size="16" /><input v-model="query" placeholder="搜索会话" aria-label="搜索会话" /></label>
         <div v-if="remoteMode" class="employee-section">
-          <div class="section-label"><span>AI 员工 <span class="count">{{ employees.length }}</span></span><button class="icon-button" type="button" title="新建 AI 员工" aria-label="新建 AI 员工" @click="openEmployeeEditor()"><Plus :size="15" /></button></div>
-          <div v-for="employee in employees" :key="employee.id" class="employee-row" :class="{ selected: activeEmployeeId === employee.id, 'is-swipe-open': employeeSwipeOpenId === employee.id }" @touchstart.passive="handleEmployeeTouchStart(employee, $event)" @touchmove.passive="handleEmployeeTouchMove(employee, $event)" @touchend="handleEmployeeTouchEnd(employee)">
+          <div class="section-label sidebar-section-label" role="button" tabindex="0" :aria-expanded="!sidebarSectionIsCollapsed('employees')" @click="toggleSidebarSection('employees')" @keydown.enter.prevent="toggleSidebarSection('employees')" @keydown.space.prevent="toggleSidebarSection('employees')"><span><ChevronRight v-if="sidebarSectionIsCollapsed('employees')" :size="14" class="section-chevron" /><ChevronDown v-else :size="14" class="section-chevron" />AI 员工 <span class="count">{{ employees.length }}</span></span><button class="icon-button" type="button" title="新建 AI 员工" aria-label="新建 AI 员工" @click.stop="openEmployeeEditor()"><Plus :size="15" /></button></div>
+          <template v-if="!sidebarSectionIsCollapsed('employees')"><div v-for="employee in employees" :key="employee.id" class="employee-row" :class="{ selected: activeEmployeeId === employee.id, 'is-swipe-open': employeeSwipeOpenId === employee.id }" @touchstart.passive="handleEmployeeTouchStart(employee, $event)" @touchmove.passive="handleEmployeeTouchMove(employee, $event)" @touchend="handleEmployeeTouchEnd(employee)">
             <div class="employee-row-content" :style="{ transform: employeeSwipeOpenId === employee.id ? 'translateX(-102px)' : 'translateX(0)' }">
               <button class="employee-select" type="button" @click="openEmployee(employee)"><span class="employee-icon"><Bot :size="15" /></span><span class="employee-copy"><strong>{{ employee.name }}</strong><small>{{ employee.role || employee.projectPath }}</small></span></button>
             </div>
             <div class="employee-swipe-actions" aria-label="AI 员工快捷操作"><button type="button" title="编辑员工" aria-label="编辑员工" @click.stop="openEmployeeEditor(employee)"><Pencil :size="15" /></button><button type="button" title="换绑 Thread" aria-label="换绑 Thread" :disabled="employeeResetting === employee.id" @click.stop="requestEmployeeThreadReset(employee)"><RotateCcw :size="15" :class="{ spin: employeeResetting === employee.id }" /></button></div>
-          </div>
-          <p v-if="!employees.length" class="employee-empty">创建一个有固定身份和长期记忆的 Codex 员工。</p>
+          </div></template>
+          <p v-if="!employees.length && !sidebarSectionIsCollapsed('employees')" class="employee-empty">创建一个有固定身份和长期记忆的 Codex 员工。</p>
         </div>
         <div v-if="remoteMode && clientToken" class="employee-section plan-section">
-          <div class="section-label"><span>计划任务 <span class="count">{{ plans.length }}</span></span><button class="icon-button" type="button" title="新建计划" aria-label="新建计划" @click="openPlanEditor()"><Plus :size="15" /></button></div>
-          <button v-for="plan in plans" :key="plan.id" class="plan-sidebar-row" type="button" :class="{ selected: selectedPlanId === plan.id }" @click="openPlan(plan)"><span class="employee-icon plan-icon"><CalendarClock :size="15" /></span><span class="employee-copy"><strong>{{ plan.name }}</strong><small>{{ plan.employee?.name || '独立计划' }} · {{ formatPlanSidebarMeta(plan) }}</small></span><ChevronRight :size="14" class="plan-sidebar-chevron" /></button>
-          <p v-if="!plans.length && !plansLoading" class="employee-empty">当前设备还没有计划。</p>
+          <div class="section-label sidebar-section-label" role="button" tabindex="0" :aria-expanded="!sidebarSectionIsCollapsed('plans')" @click="toggleSidebarSection('plans')" @keydown.enter.prevent="toggleSidebarSection('plans')" @keydown.space.prevent="toggleSidebarSection('plans')"><span><ChevronRight v-if="sidebarSectionIsCollapsed('plans')" :size="14" class="section-chevron" /><ChevronDown v-else :size="14" class="section-chevron" />计划任务 <span class="count">{{ plans.length }}</span></span><button class="icon-button" type="button" title="新建计划" aria-label="新建计划" @click.stop="openPlanEditorFromSidebar()"><Plus :size="15" /></button></div>
+          <template v-if="!sidebarSectionIsCollapsed('plans')"><button v-for="plan in plans" :key="plan.id" class="plan-sidebar-row" type="button" :class="{ selected: selectedPlanId === plan.id }" @click="openPlan(plan)"><span class="employee-icon plan-icon"><CalendarClock :size="15" /></span><span class="employee-copy"><strong>{{ plan.name }}</strong><small>{{ plan.employee?.name || '独立计划' }} · {{ formatPlanSidebarMeta(plan) }}</small></span><ChevronRight :size="14" class="plan-sidebar-chevron" /></button>
+          <p v-if="!plans.length && !plansLoading" class="employee-empty">当前设备还没有计划。</p></template>
         </div>
-        <div class="section-label"><span>会话与 Projects <span class="count">{{ filtered.length }}</span></span><div class="section-actions"><button class="archive-toggle" type="button" :class="{ active: showArchivedThreads }" :title="showArchivedThreads ? '隐藏已归档' : '显示已归档'" @click="showArchivedThreads = !showArchivedThreads"><Archive :size="14" /><span v-if="archivedThreads.length">{{ archivedThreads.length }}</span></button><button class="icon-button" title="新建 Project" aria-label="新建 Project" @click="openProjectEditor()"><FolderPlus :size="15" /></button><button class="icon-button" title="刷新会话" aria-label="刷新会话" :disabled="loading" @click="retryConnection"><RefreshCw :size="15" /></button></div></div>
+        <div class="section-label sidebar-section-label" role="button" tabindex="0" :aria-expanded="!sidebarSectionIsCollapsed('sessions')" @click="toggleSidebarSection('sessions')" @keydown.enter.prevent="toggleSidebarSection('sessions')" @keydown.space.prevent="toggleSidebarSection('sessions')"><span><ChevronRight v-if="sidebarSectionIsCollapsed('sessions')" :size="14" class="section-chevron" /><ChevronDown v-else :size="14" class="section-chevron" />会话与 Projects <span class="count">{{ filtered.length }}</span></span><div class="section-actions"><button class="archive-toggle" type="button" :class="{ active: showArchivedThreads }" :title="showArchivedThreads ? '隐藏已归档' : '显示已归档'" @click.stop="showArchivedThreads = !showArchivedThreads"><Archive :size="14" /><span v-if="archivedThreads.length">{{ archivedThreads.length }}</span></button><button class="icon-button" title="新建 Project" aria-label="新建 Project" @click.stop="openProjectEditor()"><FolderPlus :size="15" /></button><button class="icon-button" title="刷新会话" aria-label="刷新会话" :disabled="loading" @click.stop="retryConnection"><RefreshCw :size="15" /></button></div></div>
       <div v-if="threadActionError" class="sidebar-error">{{ threadActionError }}</div>
-      <div class="thread-list">
+      <div v-if="!sidebarSectionIsCollapsed('sessions')" class="thread-list">
         <div v-if="loading && !filtered.length" class="skeleton-list" aria-label="正在加载会话"><div v-for="index in 6" :key="index" class="skeleton-row"><span class="skeleton-line skeleton-line-title"></span><span class="skeleton-line skeleton-line-meta"></span></div></div>
          <div v-if="pinnedRootThreads.length" class="tree-section-label">置顶会话</div>
          <div v-for="thread in pinnedRootThreads" :key="thread.id" class="thread-row" :class="{ 'is-swipe-open': swipeOpenId === thread.id, 'is-menu-open': threadMenuId === thread.id }" @pointerdown="capabilities.rename && startThreadLongPress(thread)" @pointerup="clearThreadLongPress" @pointercancel="clearThreadLongPress" @pointerleave="clearThreadLongPress" @touchstart.passive="handleThreadTouchStart(thread, $event)" @touchmove.passive="handleThreadTouchMove(thread, $event)" @touchend="handleThreadTouchEnd(thread)" @contextmenu.prevent="capabilities.rename && beginRename(thread)">
