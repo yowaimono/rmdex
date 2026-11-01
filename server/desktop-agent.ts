@@ -7,6 +7,8 @@ import { ProjectStore } from './project-store.ts'
 import { DesktopAdapter, OperationJournal } from './desktop-adapter.ts'
 import { contextFile, readDesktopContext } from './desktop-context.ts'
 import { DesktopMcp } from './desktop-mcp.ts'
+import { createReadStream } from 'node:fs'
+import { ArtifactRegistry } from './artifacts.ts'
 
 const port = Number(process.env.RMDEX_AGENT_PORT || 18787)
 const journal = new OperationJournal(join(dirname(contextFile), 'desktop-operations.json'))
@@ -34,6 +36,7 @@ const images = new Map<string, string>()
 const imageIds = new Map<string, string>()
 const types: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' }
 const attachmentStore = new AttachmentStore()
+const artifactRegistry = new ArtifactRegistry()
 const projectStore = new ProjectStore(process.env.CODEX_HOME || join(homedir(), '.codex'))
 function registerImages(result: any) {
   for (const turn of result.thread?.turns || []) for (const item of turn.items || []) {
@@ -51,6 +54,10 @@ function registerImagePath(target: Record<string, unknown>, value: unknown) {
   const id = imageIds.get(value) || randomUUID()
   images.set(id, value); imageIds.set(value, id)
   target.assetUrl = `/api/images/${id}`
+}
+async function registerArtifacts(result: any, threadId: string) {
+  result.artifacts = await artifactRegistry.register(result, threadId)
+  for (const turn of result?.thread?.turns || []) turn.artifacts = result.artifacts.filter((artifact: { turnId: string }) => artifact.turnId === turn.id)
 }
 const server = createServer(async (req, res) => {
   res.setHeader('Content-Type', 'application/json; charset=utf-8')
@@ -104,15 +111,42 @@ const server = createServer(async (req, res) => {
       res.setHeader('X-Content-Type-Options', 'nosniff')
       res.end(await readFile(path)); return
     }
+    const artifactMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/artifacts\/([a-zA-Z0-9-]+)\/(content|preview)$/)
+    if (req.method === 'GET' && artifactMatch) {
+      const artifact = artifactRegistry.resolve(artifactMatch[2]!)
+      if (!artifact || artifact.threadId !== artifactMatch[1]) { res.writeHead(404).end(); return }
+      const info = await stat(artifact.path).catch(() => null)
+      if (!info?.isFile() || info.size !== artifact.size) { res.writeHead(404).end(); return }
+      if (artifactMatch[3] === 'preview' && artifact.previewMode === 'downloadOnly') { res.writeHead(415).end(JSON.stringify({ error: '此文件类型仅支持下载' })); return }
+      const range = req.headers.range?.match(/^bytes=(\d*)-(\d*)$/)
+      let start = 0; let end = info.size - 1; let status = 200
+      if (range) {
+        if (!range[1] && !range[2]) { res.writeHead(416).end(); return }
+        if (!range[1]) start = Math.max(0, info.size - Number(range[2]))
+        else start = Number(range[1])
+        if (range[2]) end = Math.min(end, Number(range[2]))
+        if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end || start >= info.size) { res.writeHead(416, { 'Content-Range': `bytes */${info.size}` }).end(); return }
+        status = 206
+      }
+      res.setHeader('Content-Type', artifact.mimeType)
+      res.setHeader('Content-Length', String(Math.max(0, end - start + 1)))
+      if (status === 206) res.setHeader('Content-Range', `bytes ${start}-${end}/${info.size}`)
+      res.setHeader('Content-Disposition', `${artifactMatch[3] === 'preview' && artifact.previewMode !== 'downloadOnly' ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(artifact.name)}`)
+      res.setHeader('Accept-Ranges', 'bytes'); res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Cache-Control', 'private, no-store')
+      if (info.size === 0) { res.writeHead(status); res.end(); return }
+      res.writeHead(status)
+      createReadStream(artifact.path, { start, end }).on('error', () => { if (!res.headersSent) res.writeHead(404); res.end() }).pipe(res)
+      return
+    }
     const desktop = await adapter()
     let result: any
     if (req.method === 'GET' && url.pathname === '/api/projects') result = { data: await projectStore.list(await desktop.projects()) }
     else if (req.method === 'GET' && url.pathname === '/api/models') result = await desktop.models()
     else if (req.method === 'GET' && url.pathname === '/api/threads') result = await desktop.list()
-    else if (req.method === 'GET' && match && !match[2]) { result = await desktop.read(match[1]!); registerImages(result) }
+    else if (req.method === 'GET' && match && !match[2]) { result = await desktop.read(match[1]!); registerImages(result); await registerArtifacts(result, match[1]!) }
     else if (req.method === 'POST' && match?.[2] === 'history') {
       if (typeof data.cursor !== 'string' || !data.cursor) throw new Error('缺少历史游标')
-      result = await desktop.read(match[1]!, data.cursor); registerImages(result)
+      result = await desktop.read(match[1]!, data.cursor); registerImages(result); await registerArtifacts(result, match[1]!)
     } else if (req.method === 'POST' && match?.[2] === 'send') result = await desktop.send(match[1]!, { ...data, attachments: attachmentStore.resolve(data.attachments) })
     else if (req.method === 'POST' && url.pathname === '/api/threads') result = await desktop.create({ ...data, attachments: attachmentStore.resolve(data.attachments) })
     else { res.writeHead(404).end(JSON.stringify({ error: 'Not found' })); return }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { Capacitor, registerPlugin } from '@capacitor/core'
 import { App as NativeApp } from '@capacitor/app'
 import { LocalNotifications } from '@capacitor/local-notifications'
@@ -9,6 +9,7 @@ import { Archive, ArrowLeft, ArrowUp, Bot, ChevronDown, ChevronRight, CircleAler
 import QRCode from 'qrcode'
 import logoUrl from './assets/rmdex-logo.jpg'
 import ToolEvent from './components/ToolEvent.vue'
+import ArtifactStrip from './components/ArtifactStrip.vue'
 import MessageBubble from './components/MessageBubble.vue'
 import PermissionMenu from './components/PermissionMenu.vue'
 import ModelMenu, { type ModelOption } from './components/ModelMenu.vue'
@@ -16,7 +17,7 @@ import ProjectMenu from './components/ProjectMenu.vue'
 import UserMenu from './components/UserMenu.vue'
 import SidebarResize from './components/SidebarResize.vue'
 import { installInAppLinks } from './in-app-browser'
-import { colleagueMessage, messageRequest, timeline, userText, type ContentPart, type MessageEntry, type Turn } from './conversation'
+import { colleagueMessage, messageRequest, timeline, userText, type Artifact, type ContentPart, type MessageEntry, type Turn } from './conversation'
 import { loadThreadCache, queueThreadCacheWrite, removeThreadCache } from './thread-cache'
 import { commandSummary } from './command-summary'
 import { modelPreferenceKey, resolveModelPreference, type ModelPreference } from './model-preferences'
@@ -238,9 +239,17 @@ type ThreadStatus = {
   activeTurnId: string | null
   approvals: Approval[]
   userInputs?: UserInput[]
+  artifacts?: Artifact[]
   lastTurn?: { id?: string; status: string; error?: { message?: string } } | null
   live?: { turnId: string; status: string; error?: { message?: string }; sentText?: string; items: Turn['items'] } | null
 }
+const artifactLoading = ref<string | null>(null)
+const artifactPreview = ref<Artifact | null>(null)
+const artifactPreviewUrl = ref('')
+const artifactImageUrls = ref<Record<string, string>>({})
+const artifactPreviewText = ref('')
+const artifactPreviewError = ref('')
+let artifactRequestVersion = 0
 const threadCache = new Map<string, ReadResult>()
 const threadRequests = new Map<string, Promise<ReadResult>>()
 let modelsLoadedKey = ''
@@ -520,6 +529,10 @@ function mergeThreadStatus(result: ThreadStatus) {
       else turn.items[index] = item
     }
   }
+  if (result.artifacts?.length) {
+    const artifactTurn = turns.find(item => item.id === result.lastTurn?.id || item.id === result.activeTurnId)
+    if (artifactTurn) artifactTurn.artifacts = result.artifacts.filter(item => item.turnId === artifactTurn.id)
+  }
   selected.value.turns = normalizeTurns(selected.value.turns)
   activeTurnId.value = result.activeTurnId
   pendingApprovals.value = result.approvals || []
@@ -592,7 +605,81 @@ function toolImageSource(item: Record<string, unknown>) {
 }
 function showImagePreview(url: string) { previewImageUrl.value = url }
 function closeImagePreview() { previewImageUrl.value = '' }
-function handlePreviewKey(event: KeyboardEvent) { if (event.key === 'Escape' && previewImageUrl.value) closeImagePreview() }
+function clearArtifactPreview() {
+  artifactRequestVersion++
+  if (artifactPreviewUrl.value && artifactPreview.value?.mimeType.startsWith('image/')) artifactImageUrls.value[artifactPreview.value.id] = artifactPreviewUrl.value
+  else if (artifactPreviewUrl.value) URL.revokeObjectURL(artifactPreviewUrl.value)
+  artifactPreviewUrl.value = ''
+  artifactPreviewText.value = ''
+  artifactPreviewError.value = ''
+  artifactPreview.value = null
+}
+function artifactUrl(artifact: Artifact, action: 'content' | 'preview') {
+  return `/api/threads/${encodeURIComponent(artifact.threadId)}/artifacts/${encodeURIComponent(artifact.id)}/${action}`
+}
+function formatArtifactSize(value: number) {
+  if (value < 1024) return `${value} B`
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
+  return `${(value / 1024 / 1024).toFixed(1)} MB`
+}
+async function downloadArtifact(artifact: Artifact) {
+  artifactLoading.value = artifact.id
+  try {
+    const response = await authenticatedFetch(artifactUrl(artifact, 'content'), {}, 'client')
+    if (!response.ok) {
+      const result = await readJsonResponse(response, '下载文件失败')
+      throw new Error(result?.error || '下载文件失败')
+    }
+    const url = URL.createObjectURL(await response.blob())
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = artifact.name
+    document.body.append(anchor)
+    anchor.click()
+    anchor.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 60_000)
+  } catch (cause) {
+    error.value = `下载 ${artifact.name} 失败：${cause instanceof Error ? cause.message : String(cause)}`
+  } finally { if (artifactLoading.value === artifact.id) artifactLoading.value = null }
+}
+async function previewArtifact(artifact: Artifact) {
+  clearArtifactPreview()
+  const version = artifactRequestVersion
+  artifactPreview.value = artifact
+  artifactLoading.value = artifact.id
+  try {
+    const response = await authenticatedFetch(artifactUrl(artifact, 'preview'), {}, 'client')
+    if (!response.ok) {
+      const result = await readJsonResponse(response, '预览文件失败')
+      throw new Error(result?.error || '预览文件失败')
+    }
+    if (version !== artifactRequestVersion) return
+    if (artifact.mimeType.startsWith('text/') || artifact.mimeType === 'application/json') {
+      const text = await response.text()
+      if (text.length > 256 * 1024) throw new Error('文本预览超过 256 KB，请下载查看')
+      if (version !== artifactRequestVersion) return
+      artifactPreviewText.value = text
+    } else {
+      const objectUrl = URL.createObjectURL(await response.blob())
+      if (version !== artifactRequestVersion) URL.revokeObjectURL(objectUrl)
+      else {
+        artifactPreviewUrl.value = objectUrl
+        if (artifact.mimeType.startsWith('image/')) artifactImageUrls.value[artifact.id] = objectUrl
+      }
+    }
+  } catch (cause) {
+    if (version === artifactRequestVersion) artifactPreviewError.value = cause instanceof Error ? cause.message : String(cause)
+  } finally { if (artifactLoading.value === artifact.id) artifactLoading.value = null }
+}
+function handlePreviewKey(event: KeyboardEvent) {
+  if (event.key === 'Escape' && artifactPreview.value) clearArtifactPreview()
+  else if (event.key === 'Escape' && previewImageUrl.value) closeImagePreview()
+}
+watch(() => selected.value?.id, () => {
+  clearArtifactPreview()
+  for (const url of Object.values(artifactImageUrls.value)) URL.revokeObjectURL(url)
+  artifactImageUrls.value = {}
+})
 
 async function readJsonResponse(response: Response, fallback: string) {
   const text = await response.text()
@@ -2090,7 +2177,7 @@ onMounted(async () => {
   authReady.value = true
   poll = setInterval(() => { void updateThread(); void refreshThreadIndicators(); if (adminToken.value && showDevices.value) void loadDevices() }, 2000)
 })
-onUnmounted(() => { themeMediaQuery?.removeEventListener('change', handleSystemThemeChange); removeInAppLinks?.(); window.removeEventListener('keydown', handlePreviewKey); if (poll) clearInterval(poll); clearThreadLongPress(); void appUrlListener?.remove(); void appStateListener?.remove(); void notificationListener?.remove() })
+onUnmounted(() => { themeMediaQuery?.removeEventListener('change', handleSystemThemeChange); removeInAppLinks?.(); window.removeEventListener('keydown', handlePreviewKey); if (poll) clearInterval(poll); clearThreadLongPress(); clearArtifactPreview(); for (const url of Object.values(authenticatedImages.value)) URL.revokeObjectURL(url); void appUrlListener?.remove(); void appStateListener?.remove(); void notificationListener?.remove() })
 </script>
 
 <template>
@@ -2226,11 +2313,14 @@ onUnmounted(() => { themeMediaQuery?.removeEventListener('change', handleSystemT
             <summary><Wrench :size="14" /><span>{{ toolSummary(message.items) }}</span><span v-if="message.items.some(item => item.status === 'failed' || item.status === 'declined' || item.success === false || (typeof item.exitCode === 'number' && item.exitCode !== 0))" class="group-failed">含失败</span><ChevronRight :size="14" class="group-chevron" /></summary>
             <div class="tool-group-content"><ToolEvent v-for="(item, index) in message.items" :key="item.id || index" :item="item" :image-url="toolImageSource(item)" @preview="showImagePreview" /></div>
           </details>
-          <MessageBubble v-else :role="message.role" :copy-text="message.copyText" :retryable="message.role === 'user' && !message.colleagueName && capabilities.retry" :retry-disabled="working || retrying" :retry-label="message.turnId === selected.turns?.at(-1)?.id ? '重试' : '从这里重试（新会话）'" :forkable="message.role === 'agent' && message.forkable && capabilities.fork" @copy="copyValue($event, '已复制消息')" @retry="retryMessage(message)" @fork="forkMessage(message)">
-            <div v-if="message.colleagueName" class="colleague-message-source">来自员工 · {{ message.colleagueName }}</div>
-            <div v-if="message.images.length" class="attachments"><template v-for="(image, index) in message.images" :key="index"><button v-if="imageSource(image)" type="button" class="attachment" title="放大预览图片" aria-label="放大预览图片" @click="showImagePreview(imageSource(image) || '')"><img :src="imageSource(image)" alt="图片附件" loading="lazy" /></button><span v-else class="attachment-unavailable">图片附件不可用</span></template></div>
-            <div v-if="message.text" class="message-text markdown" v-html="markdown.render(message.text)"></div>
-          </MessageBubble>
+          <template v-else>
+            <MessageBubble :role="message.role" :copy-text="message.copyText" :retryable="message.role === 'user' && !message.colleagueName && capabilities.retry" :retry-disabled="working || retrying" :retry-label="message.turnId === selected.turns?.at(-1)?.id ? '重试' : '从这里重试（新会话）'" :forkable="message.role === 'agent' && message.forkable && capabilities.fork" @copy="copyValue($event, '已复制消息')" @retry="retryMessage(message)" @fork="forkMessage(message)">
+              <div v-if="message.colleagueName" class="colleague-message-source">来自员工 · {{ message.colleagueName }}</div>
+              <div v-if="message.images.length" class="attachments"><template v-for="(image, index) in message.images" :key="index"><button v-if="imageSource(image)" type="button" class="attachment" title="放大预览图片" aria-label="放大预览图片" @click="showImagePreview(imageSource(image) || '')"><img :src="imageSource(image)" alt="图片附件" loading="lazy" /></button><span v-else class="attachment-unavailable">图片附件不可用</span></template></div>
+              <div v-if="message.text" class="message-text markdown" v-html="markdown.render(message.text)"></div>
+            </MessageBubble>
+            <ArtifactStrip v-if="message.role === 'agent' && message.forkable && message.artifacts?.length" :artifacts="message.artifacts" :loading="artifactLoading" :image-urls="artifactImageUrls" @download="downloadArtifact" @preview="previewArtifact" />
+          </template>
         </template>
         <MessageBubble v-for="failed in (failedMessages[selected.id] || [])" :key="failed.id" role="user" :copy-text="userText(failed.text)" :retryable="capabilities.send" :retry-disabled="working || retrying" failed @copy="copyValue($event, '已复制消息')" @retry="retryMessage(failed)">
           <div v-if="failed.files.length" class="pending-attachment-names">{{ failed.files.map(file => file.name).join(' · ') }}</div>
@@ -2272,6 +2362,7 @@ onUnmounted(() => { themeMediaQuery?.removeEventListener('change', handleSystemT
     <div v-if="employeeResetTarget" class="modal-backdrop" @click.self="closeEmployeeThreadResetConfirm"><section class="create-dialog delete-dialog employee-reset-dialog" role="dialog" aria-modal="true" aria-labelledby="employee-reset-title" @keydown.esc="closeEmployeeThreadResetConfirm"><header><div><h2 id="employee-reset-title">换绑员工 Thread</h2><p>为“{{ employeeResetTarget.name }}”创建新的执行会话。</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" :disabled="!!employeeResetting" @click="closeEmployeeThreadResetConfirm"><X :size="18" /></button></header><p class="delete-copy">当前 Thread 将被归档并创建新的 Thread。员工的长期记忆、SOP 和本地资产会保留，正在执行或排队的任务需要先结束。</p><p v-if="employeeResetError" class="create-error" role="alert">{{ employeeResetError }}</p><div class="dialog-actions"><button type="button" class="cancel-button" :disabled="!!employeeResetting" @click="closeEmployeeThreadResetConfirm">取消</button><button type="button" class="danger-confirm-button" :disabled="!!employeeResetting" @click="confirmEmployeeThreadReset">{{ employeeResetting ? '换绑中…' : '确认换绑' }}</button></div></section></div>
     <div v-if="copyFeedback" class="copy-toast" role="status" aria-live="polite">{{ copyFeedback }}</div>
     <div v-if="previewImageUrl" class="image-preview-backdrop" @click.self="closeImagePreview"><section class="image-preview-dialog" role="dialog" aria-modal="true" aria-label="图片预览"><button class="icon-button image-preview-close" type="button" title="关闭图片预览" aria-label="关闭图片预览" @click="closeImagePreview"><X :size="18" /></button><img :src="previewImageUrl" alt="图片大图预览" /></section></div>
+    <div v-if="artifactPreview" class="artifact-preview-backdrop" @click.self="clearArtifactPreview"><section class="artifact-preview-dialog" role="dialog" aria-modal="true" :aria-label="`预览 ${artifactPreview.name}`"><header><div><strong>{{ artifactPreview.name }}</strong><small>{{ artifactPreview.name.split('.').pop()?.toUpperCase() || 'FILE' }} · {{ formatArtifactSize(artifactPreview.size) }}</small></div><button type="button" class="icon-button" title="关闭预览" aria-label="关闭预览" @click="clearArtifactPreview"><X :size="18" /></button></header><img v-if="artifactPreview.mimeType.startsWith('image/') && artifactPreviewUrl" :src="artifactPreviewUrl" :alt="artifactPreview.name" /><iframe v-else-if="artifactPreview.mimeType === 'application/pdf' && artifactPreviewUrl" :src="artifactPreviewUrl" title="PDF 预览"></iframe><pre v-else-if="artifactPreviewText">{{ artifactPreviewText }}</pre><div v-else-if="artifactPreviewError" class="artifact-preview-error">预览失败：{{ artifactPreviewError }}<button type="button" @click="downloadArtifact(artifactPreview!)">下载文件</button></div><div v-else class="artifact-preview-loading">{{ artifactLoading === artifactPreview.id ? '正在准备预览…' : '暂无可用预览' }}</div></section></div>
     <div v-if="showFullAccessConfirm" class="modal-backdrop" @click.self="showFullAccessConfirm = false"><section class="create-dialog risk-dialog" role="dialog" aria-modal="true" aria-labelledby="full-access-title" @keydown.esc="showFullAccessConfirm = false"><header><div class="risk-heading"><span class="risk-icon"><ShieldAlert :size="19" /></span><div><h2 id="full-access-title">确认使用完全访问</h2><p>这次消息将跳过 Codex 审批。</p></div></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="showFullAccessConfirm = false"><X :size="18" /></button></header><div class="risk-copy"><p>完全访问模式允许 Codex 直接执行命令、修改工作目录中的文件，并访问电脑上的网络资源。</p><p>只在你明确知道这条消息会做什么时继续。你也可以取消后切换为“请求审批”。</p></div><label class="risk-checkbox"><input v-model="skipFullAccessConfirm" type="checkbox" /> <span>不再提醒</span></label><div class="dialog-actions"><button type="button" class="cancel-button" @click="showFullAccessConfirm = false">取消</button><button type="button" class="danger-confirm-button" @click="confirmFullAccess">继续发送</button></div></section></div>
      <div v-if="showCreate" class="modal-backdrop" @click.self="!creating && (showCreate = false)"><section class="create-dialog" role="dialog" aria-modal="true" aria-labelledby="create-title" @keydown.esc="!creating && (showCreate = false)"><header><h2 id="create-title">新建对话</h2><button class="icon-button" type="button" title="关闭" aria-label="关闭" :disabled="creating" @click="showCreate = false"><X :size="18" /></button></header><form @submit.prevent="createThread"><label for="new-thread-project">Project</label><ProjectMenu v-model="createProject" :projects="projects" :desktop-mode="desktopMode" :disabled="creating" @update:model-value="syncCreateProjectPath" /><template v-if="!desktopMode && !createProject"><label for="working-directory">工作目录</label><input id="working-directory" v-model="createPath" required autocomplete="off" placeholder="例如 D:\WorkSpace\rmdex" /></template><p v-else-if="createProject" class="project-path-hint">{{ projects.find(project => project.id === createProject)?.path }}</p><p v-if="createError" class="create-error" role="alert">{{ createError }}</p><div class="dialog-actions"><button type="button" class="cancel-button" :disabled="creating" @click="showCreate = false">取消</button><button type="submit" class="create-button" :disabled="creating || (!desktopMode && !createProject && !createPath.trim())">{{ creating ? '创建中…' : '创建对话' }}</button></div></form></section></div>
      <div v-if="employeeEditor" class="modal-backdrop" @click.self="!employeeSaving && (employeeEditor = false)"><section class="create-dialog employee-dialog" role="dialog" aria-modal="true" aria-labelledby="employee-title" @keydown.esc="!employeeSaving && (employeeEditor = false)"><header><div><h2 id="employee-title">{{ editingEmployeeId ? '编辑 AI 员工' : '新建 AI 员工' }}</h2><p>员工会使用绑定电脑上的 Codex Thread 工作。</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" :disabled="employeeSaving" @click="employeeEditor = false"><X :size="18" /></button></header><form @submit.prevent="saveEmployee"><label for="employee-name">名称</label><input id="employee-name" v-model="employeeName" maxlength="80" required placeholder="例如：回归测试员" /><label for="employee-role">职位</label><input id="employee-role" v-model="employeeRole" maxlength="120" placeholder="例如：负责运行测试并分析失败" /><label for="employee-project-path">Project 路径</label><input id="employee-project-path" v-model="employeeProjectPath" maxlength="1000" required placeholder="例如：D:\WorkSpace\rmdex" /><label for="employee-instructions">员工职责与沟通方式</label><textarea id="employee-instructions" v-model="employeeInstructions" rows="5" maxlength="12000" placeholder="描述它应该如何工作、如何汇报结果。"></textarea><p v-if="employeeError" class="create-error" role="alert">{{ employeeError }}</p><div class="dialog-actions"><button type="button" class="cancel-button" :disabled="employeeSaving" @click="employeeEditor = false">取消</button><button type="submit" class="create-button" :disabled="employeeSaving || !employeeName.trim() || !employeeProjectPath.trim()">{{ employeeSaving ? '保存中…' : '保存员工' }}</button></div></form></section></div>

@@ -9,6 +9,12 @@ if (relayUrl && deviceToken) {
   if (address.protocol !== 'wss:' && !(address.protocol === 'ws:' && ['localhost', '127.0.0.1', '[::1]'].includes(address.hostname))) throw new Error('Relay must use WSS')
   let stopped = false
   let socket: WebSocket | undefined
+  const streamAcks = new Map<string, () => void>()
+  const streamControllers = new Map<string, AbortController>()
+  const waitForStreamAck = (id: string) => new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => { streamAcks.delete(id); reject(new Error('artifact stream acknowledgement timed out')) }, 30000)
+    streamAcks.set(id, () => { clearTimeout(timeout); streamAcks.delete(id); resolve() })
+  })
   const connect = async () => {
     while (!stopped) {
       try {
@@ -24,7 +30,33 @@ if (relayUrl && deviceToken) {
                 await installEmployeeSkill(undefined, skill).catch(error => console.error('[rmdex] Employee skill installation failed:', error.message))
                 clearTimeout(timeout); resolve(); return
               }
+              if (message.type === 'ack' && typeof message.id === 'string') { streamAcks.get(message.id)?.(); return }
+              if (message.type === 'cancel' && typeof message.id === 'string') { streamControllers.get(message.id)?.abort(); streamAcks.get(message.id)?.(); return }
               if (message.type !== 'request' || typeof message.id !== 'string' || typeof message.path !== 'string' || !['GET', 'POST', 'DELETE'].includes(String(message.method))) return
+              if (message.stream === true && message.method === 'GET' && /^\/api\/threads\/[a-zA-Z0-9-]+\/artifacts\/[a-zA-Z0-9-]+\/(?:content|preview)$/.test(message.path)) {
+                const controller = new AbortController()
+                streamControllers.set(message.id, controller)
+                try {
+                  const response = await fetch(`http://127.0.0.1:${process.env.RMDEX_AGENT_PORT || 18787}${message.path}`, { headers: typeof message.range === 'string' ? { Range: message.range } : {}, signal: controller.signal })
+                  if (!response.ok || !response.body) throw new Error((await response.text().catch(() => '')) || 'Artifact unavailable')
+                  socket?.send(JSON.stringify({ type: 'stream', id: message.id, status: response.status, contentType: response.headers.get('content-type') || 'application/octet-stream', contentDisposition: response.headers.get('content-disposition') || undefined, contentLength: response.headers.get('content-length') || undefined, contentRange: response.headers.get('content-range') || undefined }))
+                  await waitForStreamAck(message.id)
+                  const reader = response.body.getReader()
+                  while (true) {
+                    const { done, value } = await reader.read()
+                    if (done) break
+                    for (let offset = 0; offset < value.length; offset += 48 * 1024) {
+                      const chunk = Buffer.from(value.subarray(offset, Math.min(offset + 48 * 1024, value.length)))
+                      socket?.send(JSON.stringify({ type: 'stream', id: message.id, data: chunk.toString('base64') }))
+                      await waitForStreamAck(message.id)
+                    }
+                  }
+                  socket?.send(JSON.stringify({ type: 'stream', id: message.id, done: true }))
+                } catch (error) {
+                  if (!controller.signal.aborted) socket?.send(JSON.stringify({ type: 'stream', id: message.id, error: error instanceof Error ? error.message : 'Artifact transfer failed', done: true }))
+                } finally { streamControllers.delete(message.id); streamAcks.delete(message.id) }
+                return
+              }
               if (message.method === 'POST' && message.path === '/api/employee-assets/prepare') {
                 try {
                   const result = await prepareEmployeeAssets((message.data || {}) as Parameters<typeof prepareEmployeeAssets>[0])
@@ -37,7 +69,7 @@ if (relayUrl && deviceToken) {
               const isAttachmentUpload = message.method === 'POST' && message.path === '/api/attachments'
               const isProjectMutation = message.method === 'POST' && /^\/api\/projects(?:\/[a-zA-Z0-9-]+\/(?:update|delete))?$/.test(message.path)
               const allowed = isAttachmentUpload || isProjectMutation || (message.method === 'GET'
-                ? /^\/api\/(?:models|projects|settings|threads(?:\/[a-zA-Z0-9-]+(?:\/(?:status|incremental|queue))?)?|images\/[a-f0-9-]+)$/.test(message.path)
+                ? /^\/api\/(?:models|projects|settings|threads(?:\/[a-zA-Z0-9-]+(?:\/(?:status|incremental|queue|artifacts\/[a-zA-Z0-9-]+\/(?:content|preview)))?)?|images\/[a-f0-9-]+)$/.test(message.path)
                 : /^\/api\/(?:settings|threads|threads\/[a-zA-Z0-9-]+\/(?:send|retry|stop|history|name|fork|archive|unarchive|delete|queue|steer)|threads\/[a-zA-Z0-9-]+\/queue\/[^/]+(?:\/(?:steer|delete))?|approvals\/[a-zA-Z0-9-]+|user-input\/[a-zA-Z0-9-]+)$/.test(message.path))
               if (!allowed) { socket?.send(JSON.stringify({ type: 'response', id: message.id, error: 'Forbidden' })); return }
               try {
@@ -52,7 +84,7 @@ if (relayUrl && deviceToken) {
                   const contentType = response.headers.get('content-type') || 'application/octet-stream'
                   if (!/^image\/(?:png|jpeg|gif|webp)$/.test(contentType)) throw new Error('Unsupported image type')
                   const bytes = Buffer.from(await response.arrayBuffer())
-                  if (bytes.length > 5 * 1024 * 1024) throw new Error('Image too large for secure relay')
+                  if (bytes.length > 5 * 1024 * 1024) throw new Error('图片过大，暂不支持远程预览')
                   socket?.send(JSON.stringify({ type: 'response', id: message.id, result: { __rmdexBinary: true, contentType, data: bytes.toString('base64') } }))
                   return
                 }

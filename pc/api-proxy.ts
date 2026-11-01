@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { Readable } from 'node:stream'
 
 export async function proxyAgentRequest(req: IncomingMessage, res: ServerResponse, agentPort: number) {
   const chunks: Buffer[] = []
@@ -12,7 +13,7 @@ export async function proxyAgentRequest(req: IncomingMessage, res: ServerRespons
     }
   }
   const headers = new Headers()
-  for (const name of ['authorization', 'accept', 'content-type']) {
+  for (const name of ['authorization', 'accept', 'content-type', 'range']) {
     const value = req.headers[name]
     if (typeof value === 'string') headers.set(name, value)
   }
@@ -25,11 +26,12 @@ export async function proxyAgentRequest(req: IncomingMessage, res: ServerRespons
     body: chunks.length ? Buffer.concat(chunks) : undefined,
     signal: AbortSignal.timeout(30_000),
   })
-  for (const name of ['content-type', 'cache-control']) {
+  for (const name of ['content-type', 'content-length', 'content-disposition', 'content-range', 'accept-ranges', 'cache-control']) {
     const value = response.headers.get(name)
     if (value) res.setHeader(name, value)
   }
   res.setHeader('X-Content-Type-Options', 'nosniff')
   res.writeHead(response.status)
-  res.end(Buffer.from(await response.arrayBuffer()))
+  if (response.body) Readable.fromWeb(response.body as import('node:stream/web').ReadableStream).pipe(res)
+  else res.end()
 }

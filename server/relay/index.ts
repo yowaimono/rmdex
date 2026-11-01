@@ -19,6 +19,7 @@ type MessageReceipt = { messageId: string; senderId: string; recipientId: string
 type State = { devices: Device[]; clients: Client[]; pairings: Pairing[]; pairRequests: PairRequest[]; users: User[]; sessions: AuthSession[]; pushTokens: PushToken[]; notifications: NotificationEvent[]; notificationWatches: NotificationWatch[]; employees: Employee[]; employeeMessages: MessageReceipt[] }
 type Credentials = { accessToken: string; refreshToken: string; expiresIn: number; user: { id: string; username: string; role?: User['role'] }; token?: string; clientToken?: string; deviceId?: string }
 type Pending = { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
+type StreamPending = { response: import('node:http').ServerResponse; timer: NodeJS.Timeout }
 
 const port = Number(process.env.PORT || 8787)
 const publicOrigin = process.env.PUBLIC_ORIGIN || 'https://code.kyeai.xyz'
@@ -35,6 +36,7 @@ const ASSET_CONTEXT_VERSION = 2
 const approvedPairTokens = new Map<string, Credentials>()
 const deviceSockets = new Map<string, WebSocket>()
 const devicePending = new Map<string, Map<string, Pending>>()
+const deviceStreams = new Map<string, Map<string, StreamPending>>()
 const authAttempts = new Map<string, { count: number; until: number }>()
 const notificationWaiters = new Map<string, Set<{ after: number; resolve: () => void; timer: NodeJS.Timeout }>>()
 const scryptAsync = promisify(scrypt)
@@ -302,6 +304,21 @@ function rpc(deviceId: string, path: string, method: string, data?: unknown): Pr
     devicePending.set(deviceId, requests)
     socket.send(JSON.stringify({ type: 'request', id, path, method, data }))
   })
+}
+function streamRpc(deviceId: string, path: string, method: string, response: import('node:http').ServerResponse, range: string | undefined, onClose: () => void) {
+  const socket = deviceSockets.get(deviceId)
+  if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error('设备当前离线')
+  const id = randomToken(12)
+  const timer = setTimeout(() => { deviceStreams.get(deviceId)?.delete(id); if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'cancel', id })); onClose() }, 5 * 60_000)
+  const streams = deviceStreams.get(deviceId) || new Map<string, StreamPending>()
+  streams.set(id, { response, timer })
+  deviceStreams.set(deviceId, streams)
+  response.once('close', () => {
+    if (!deviceStreams.get(deviceId)?.has(id)) return
+    clearTimeout(timer); deviceStreams.get(deviceId)?.delete(id)
+    if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'cancel', id }))
+  })
+  socket.send(JSON.stringify({ type: 'request', id, path, method, stream: true, ...(range ? { range } : {}) }))
 }
 
 const taskWatchers = new Map<string, NodeJS.Timeout | null>()
@@ -713,8 +730,8 @@ const server = createServer(async (req, res) => {
     }
     if (!['GET', 'POST', 'DELETE'].includes(req.method || '')) { json(res, 405, { error: 'Method not allowed' }); return }
     const allowed = req.method === 'GET'
-      ? /^\/api\/(?:models|projects|settings|threads(?:\/[a-zA-Z0-9-]+(?:\/(?:status|incremental|queue))?)?|images\/[a-f0-9-]+)$/.test(url.pathname)
-      : /^\/api\/(?:settings|threads|threads\/[a-zA-Z0-9-]+\/(?:send|retry|stop|history|name|fork|archive|unarchive|delete|queue|steer)|threads\/[a-zA-Z0-9-]+\/queue\/[^/]+(?:\/(?:steer|delete))?|approvals\/[a-zA-Z0-9-]+)$/.test(url.pathname)
+      ? /^\/api\/(?:models|projects|settings|threads(?:\/[a-zA-Z0-9-]+(?:\/(?:status|incremental|queue|artifacts\/[a-zA-Z0-9-]+\/(?:content|preview)))?)?|images\/[a-f0-9-]+)$/.test(url.pathname)
+      : /^\/api\/(?:settings|threads|threads\/[a-zA-Z0-9-]+\/(?:send|retry|stop|history|name|fork|archive|unarchive|delete|queue|steer)|threads\/[a-zA-Z0-9-]+\/queue\/[^/]+(?:\/(?:steer|delete))?|approvals\/[a-zA-Z0-9-]+|user-input\/[a-zA-Z0-9-]+)$/.test(url.pathname)
     const projectMutation = req.method === 'POST' && /^\/api\/projects(?:\/[a-zA-Z0-9-]+\/(?:update|delete))?$/.test(url.pathname)
     if ((!allowed && !(req.method === 'POST' && url.pathname === '/api/attachments') && !projectMutation) || url.search) { json(res, 404, { error: 'Not found' }); return }
     let requestData = req.method === 'POST' ? await body(req) : undefined
@@ -735,6 +752,10 @@ const server = createServer(async (req, res) => {
       delete forwarded.employeeId
       requestData = forwarded
     }
+    if (req.method === 'GET' && /\/artifacts\/[a-zA-Z0-9-]+\/(?:content|preview)$/.test(url.pathname)) {
+      streamRpc(device.id, url.pathname, req.method, res, req.headers.range, () => { if (res.headersSent) res.destroy(new Error('设备响应超时')); else { res.writeHead(504); res.end(JSON.stringify({ error: '设备响应超时' })) } })
+      return
+    }
     const result = await rpc(device.id, url.pathname + url.search, req.method!, requestData)
     if (employee && employeeNeedsContext) {
       employee.initializedThreadId = employee.threadId
@@ -749,9 +770,9 @@ const server = createServer(async (req, res) => {
       if (turn?.id) await watchTask(device.id, targetId, turn.id, employee?.name || (typeof requestData?.name === 'string' ? requestData.name : 'Codex 会话')).catch(() => {})
     }
     if (url.pathname.startsWith('/api/images/') && result && typeof result === 'object' && (result as { __rmdexBinary?: boolean }).__rmdexBinary) {
-      const image = result as { contentType: string; data: string }
-      res.writeHead(200, { 'Content-Type': image.contentType, 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' })
-      res.end(Buffer.from(image.data, 'base64')); return
+      const binary = result as { contentType: string; contentDisposition?: string; data: string }
+      res.writeHead(200, { 'Content-Type': binary.contentType, ...(binary.contentDisposition ? { 'Content-Disposition': binary.contentDisposition } : {}), 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' })
+      res.end(Buffer.from(binary.data, 'base64')); return
     }
     json(res, 200, result)
   } catch (error) {
@@ -777,6 +798,7 @@ sockets.on('connection', ws => {
         const previous = deviceSockets.get(device.id)
         if (previous && previous !== ws) {
           for (const pending of devicePending.get(device.id)?.values() || []) { clearTimeout(pending.timer); pending.reject(new Error('设备重新连接')) }
+          for (const pending of deviceStreams.get(device.id)?.values() || []) { clearTimeout(pending.timer); if (!pending.response.headersSent) pending.response.writeHead(502); pending.response.end(JSON.stringify({ error: '设备重新连接' })) }
           previous.close(4002, 'Reconnected')
         }
         deviceId = device.id
@@ -786,7 +808,24 @@ sockets.on('connection', ws => {
         ws.send(JSON.stringify({ type: 'ready', deviceId, employeeSkill }))
         return
       }
-      if (message.type === 'response' && typeof message.id === 'string') {
+      if (message.type === 'stream' && typeof message.id === 'string') {
+        const stream = deviceStreams.get(deviceId)?.get(message.id)
+        if (!stream) return
+        if (message.error) {
+          clearTimeout(stream.timer); deviceStreams.get(deviceId)?.delete(message.id)
+          if (stream.response.headersSent) stream.response.destroy(new Error(String(message.error)))
+          else { stream.response.writeHead(502); stream.response.end(JSON.stringify({ error: String(message.error) })) }
+          return
+        }
+        if (!stream.response.headersSent) {
+          stream.response.writeHead(Number(message.status) || 200, { 'Content-Type': typeof message.contentType === 'string' ? message.contentType : 'application/octet-stream', ...(typeof message.contentDisposition === 'string' ? { 'Content-Disposition': message.contentDisposition } : {}), ...(typeof message.contentLength === 'string' ? { 'Content-Length': message.contentLength } : {}), ...(typeof message.contentRange === 'string' ? { 'Content-Range': message.contentRange } : {}), 'Accept-Ranges': 'bytes', 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' })
+        }
+        if (typeof message.data === 'string' && message.data) {
+          if (!stream.response.write(Buffer.from(message.data, 'base64'))) await new Promise<void>(resolve => stream.response.once('drain', resolve))
+          if (deviceSockets.get(deviceId)?.readyState === WebSocket.OPEN) deviceSockets.get(deviceId)!.send(JSON.stringify({ type: 'ack', id: message.id }))
+        } else if (!message.done && deviceSockets.get(deviceId)?.readyState === WebSocket.OPEN) deviceSockets.get(deviceId)!.send(JSON.stringify({ type: 'ack', id: message.id }))
+        if (message.done) { clearTimeout(stream.timer); deviceStreams.get(deviceId)?.delete(message.id); stream.response.end() }
+      } else if (message.type === 'response' && typeof message.id === 'string') {
         const pending = devicePending.get(deviceId)?.get(message.id)
         if (pending) {
           clearTimeout(pending.timer)
@@ -802,7 +841,9 @@ sockets.on('connection', ws => {
     if (!deviceId || deviceSockets.get(deviceId) !== ws) return
     deviceSockets.delete(deviceId)
     for (const pending of devicePending.get(deviceId)?.values() || []) { clearTimeout(pending.timer); pending.reject(new Error('设备连接断开')) }
+    for (const pending of deviceStreams.get(deviceId)?.values() || []) { clearTimeout(pending.timer); if (!pending.response.headersSent) pending.response.writeHead(502); pending.response.end(JSON.stringify({ error: '设备连接断开' })) }
     devicePending.delete(deviceId)
+    deviceStreams.delete(deviceId)
   })
 })
 

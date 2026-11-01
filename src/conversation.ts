@@ -1,7 +1,8 @@
 export type ContentPart = { type: string; text?: string; url?: string; path?: string; assetUrl?: string }
 export type Item = { id?: string; type: string; text?: string; content?: ContentPart[]; [key: string]: unknown }
-export type Turn = { id: string; status: string; items: Item[] }
-export type MessageEntry = { role: 'user' | 'agent'; text: string; copyText: string; images: ContentPart[]; item: Item; turnId: string; forkable: boolean; colleagueName?: string }
+export type Artifact = { id: string; threadId: string; turnId: string; sourceItemId?: string; name: string; mimeType: string; size: number; previewMode: 'thumbnail' | 'inline' | 'downloadOnly' }
+export type Turn = { id: string; status: string; items: Item[]; artifacts?: Artifact[] }
+export type MessageEntry = { role: 'user' | 'agent'; text: string; copyText: string; images: ContentPart[]; item: Item; turnId: string; forkable: boolean; colleagueName?: string; artifacts?: Artifact[] }
 export type Entry = MessageEntry | { role: 'tools'; items: Item[] }
 
 // A retry must keep file references, but must not replay employee bootstrap
@@ -93,7 +94,7 @@ export function timeline(turns: Turn[]): Entry[] {
         if (text || images.length) entries.push({ role: 'user', text, copyText: text, images, item, turnId: turn.id, forkable: false, ...(colleague ? { colleagueName: colleague.senderName } : {}) })
       } else if (item.type === 'agentMessage') {
         flush()
-        if (item.text) entries.push({ role: 'agent', text: item.text, copyText: answer, images: [], item, turnId: turn.id, forkable: turn.status === 'completed' && answerItems.includes(original) })
+        if (item.text) entries.push({ role: 'agent', text: item.text, copyText: answer, images: [], item, turnId: turn.id, forkable: turn.status === 'completed' && answerItems.includes(original), ...(turn.status === 'completed' && answerItems.at(-1) === original && turn.artifacts?.length ? { artifacts: turn.artifacts } : {}) })
       } else group.push(item)
     }
     flush()

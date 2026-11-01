@@ -39,6 +39,23 @@ let historyReads = 0
 let fullReads = 0
 const fakeAgent = createServer(async (req, res) => {
   if (req.url?.startsWith('/api/images/')) { res.setHeader('Content-Type', 'image/png'); res.end(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])); return }
+  if (req.url === '/api/threads/local-agent-test/artifacts/artifact-test/content') {
+    const bytes = Buffer.from([0, 65, 255, 10, 13, 0, 254])
+    const range = req.headers.range?.match(/^bytes=(\d+)-(\d*)$/)
+    res.setHeader('Content-Type', 'application/octet-stream')
+    res.setHeader('Content-Disposition', "attachment; filename*=UTF-8''report.bin")
+    res.setHeader('Accept-Ranges', 'bytes')
+    if (range) {
+      const start = Number(range[1])
+      const end = Math.min(range[2] ? Number(range[2]) : bytes.length - 1, bytes.length - 1)
+      res.writeHead(206, { 'Content-Length': String(end - start + 1), 'Content-Range': `bytes ${start}-${end}/${bytes.length}` })
+      res.end(bytes.subarray(start, end + 1))
+    } else {
+      res.setHeader('Content-Length', String(bytes.length))
+      res.end(bytes)
+    }
+    return
+  }
   let raw = ''
   for await (const chunk of req) raw += String(chunk)
   if (raw) forwardedBody = JSON.parse(raw) as Record<string, unknown>
@@ -182,6 +199,15 @@ try {
     await delay(100)
     if (i === 49) throw new Error('Outbound agent did not connect')
   }
+  const artifactUrl = `${origin}/api/threads/local-agent-test/artifacts/artifact-test/content`
+  const artifact = await fetch(artifactUrl, { headers: headers2 })
+  assert.equal(artifact.status, 200)
+  assert.equal(artifact.headers.get('content-disposition'), "attachment; filename*=UTF-8''report.bin")
+  assert.deepEqual(Buffer.from(await artifact.arrayBuffer()), Buffer.from([0, 65, 255, 10, 13, 0, 254]))
+  const artifactRange = await fetch(artifactUrl, { headers: { ...headers2, Range: 'bytes=2-4' } })
+  assert.equal(artifactRange.status, 206)
+  assert.equal(artifactRange.headers.get('content-range'), 'bytes 2-4/7')
+  assert.deepEqual(Buffer.from(await artifactRange.arrayBuffer()), Buffer.from([255, 10, 13]))
   for (let i = 0; i < 50; i++) {
     const installed = await readFile(join(dir, 'skills', 'rmdex-employee', 'SKILL.md'), 'utf8').catch(() => '')
     if (installed === distributedSkill) break

@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { createReadStream } from 'node:fs'
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { homedir } from 'node:os'
@@ -12,6 +13,7 @@ import { ProjectStore } from './project-store.ts'
 import { installEmployeeSkill } from './employee-assets.ts'
 import { OperationJournal } from './desktop-adapter.ts'
 import { MessageRetryService } from './message-retry.ts'
+import { ArtifactRegistry } from './artifacts.ts'
 import './remote-agent.ts'
 
 await installEmployeeSkill().catch(error => console.error('[rmdex] Employee skill installation failed:', error.message))
@@ -59,6 +61,8 @@ const disconnectedConnections = new WeakSet<WebSocket>()
 const images = new Map<string, string>()
 const imageIds = new Map<string, string>()
 const attachmentStore = new AttachmentStore()
+const artifactRegistry = new ArtifactRegistry()
+const threadCwds = new Map<string, string>()
 const activeTurns = new Map<string, string>()
 type LiveItem = { id: string; type: string; [key: string]: unknown }
 type LiveTurn = { id: string; status: string; items: Map<string, LiveItem>; error?: unknown; sentText?: string }
@@ -187,6 +191,13 @@ function registerImagePath(target: Record<string, unknown>, value: unknown) {
   imageIds.set(value, id)
   images.set(id, value)
   target.assetUrl = `/api/images/${id}`
+}
+async function registerArtifacts(result: any, threadId: string) {
+  const cwd = typeof result?.thread?.cwd === 'string' ? result.thread.cwd : threadCwds.get(threadId)
+  if (cwd) { threadCwds.set(threadId, cwd); result.thread ||= {}; result.thread.cwd ||= cwd }
+  const artifacts = await artifactRegistry.register(result, threadId)
+  result.artifacts = artifacts
+  for (const turn of result?.thread?.turns || []) turn.artifacts = artifacts.filter((artifact: { turnId: string }) => artifact.turnId === turn.id)
 }
 
 const desiredSubscriptions = new Set<string>()
@@ -443,6 +454,36 @@ const server = createServer(async (req, res) => {
       res.end(JSON.stringify({ ok: ready, state: sharedMode ? sharedConnectionState : 'ready', error: ready ? undefined : sharedConnectionError }))
       return
     }
+    const artifactMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/artifacts\/([a-zA-Z0-9-]+)\/(content|preview)$/)
+    if (req.method === 'GET' && artifactMatch) {
+      const artifact = artifactRegistry.resolve(artifactMatch[2]!)
+      if (artifact?.threadId !== artifactMatch[1]) { res.writeHead(404).end(JSON.stringify({ error: 'Artifact not found' })); return }
+      if (!artifact) { res.writeHead(404).end(JSON.stringify({ error: 'Artifact not found' })); return }
+      const info = await stat(artifact.path).catch(() => null)
+      if (!info?.isFile() || info.size !== artifact.size) { res.writeHead(404).end(JSON.stringify({ error: 'Artifact unavailable' })); return }
+      if (artifactMatch[3] === 'preview' && artifact.previewMode === 'downloadOnly') { res.writeHead(415).end(JSON.stringify({ error: '此文件类型仅支持下载' })); return }
+      const range = req.headers.range?.match(/^bytes=(\d*)-(\d*)$/)
+      let start = 0; let end = info.size - 1; let status = 200
+      if (range) {
+        if (!range[1] && !range[2]) { res.writeHead(416).end(); return }
+        if (!range[1]) { start = Math.max(0, info.size - Number(range[2])) }
+        else start = Number(range[1])
+        if (range[2]) end = Math.min(end, Number(range[2]))
+        if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end || start >= info.size) { res.writeHead(416, { 'Content-Range': `bytes */${info.size}` }).end(); return }
+        status = 206
+      }
+      res.setHeader('Content-Type', artifact.mimeType)
+      res.setHeader('Content-Length', String(end - start + 1))
+      if (status === 206) res.setHeader('Content-Range', `bytes ${start}-${end}/${info.size}`)
+      const inline = artifactMatch[3] === 'preview' && artifact.previewMode !== 'downloadOnly'
+      res.setHeader('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(artifact.name)}`)
+      res.setHeader('Accept-Ranges', 'bytes')
+      res.setHeader('Cache-Control', 'private, no-store')
+      res.setHeader('X-Content-Type-Options', 'nosniff')
+      if (info.size === 0) { res.writeHead(status); res.end(); return }
+      createReadStream(artifact.path, { start, end }).on('error', () => { if (!res.headersSent) res.writeHead(404); res.end() }).pipe(res)
+      return
+    }
     await ensureReady()
     let result: unknown
     if (req.method === 'POST' || req.method === 'DELETE') {
@@ -490,6 +531,7 @@ const server = createServer(async (req, res) => {
         const started = await rpc('thread/start', { cwd }) as { thread?: Record<string, unknown> }
         if (typeof started.thread?.id !== 'string') throw new Error('Codex 未返回会话 ID')
         newThreads.set(started.thread.id, started.thread)
+        threadCwds.set(started.thread.id, cwd)
         threadListCache = undefined
         result = { thread: started.thread }
       } else if (forkMatch) {
@@ -596,6 +638,7 @@ const server = createServer(async (req, res) => {
         if (read.thread) read.thread = applyThreadName(read.thread)
         registerImages(result)
         const live = liveTurns.get(threadId)
+        await registerArtifacts(result, threadId)
         result = { ...(result as object), activeTurnId: activeTurns.get(threadId) || null, lastTurn: live ? { id: live.id, status: live.status, error: live.error } : null, approvals: [...approvals.entries()].filter(([, request]) => request.params.threadId === threadId).map(([id, request]) => ({ id, method: request.method, params: request.params })), userInputs: pendingUserInputs(threadId) }
       } else if (retryMatch) {
         const threadId = retryMatch[1]!
@@ -718,11 +761,13 @@ const server = createServer(async (req, res) => {
       const base = newThreads.get(threadId) || { id: threadId, name: threadNames[threadId] || null }
       const live = liveTurns.get(threadId)
       result = { thread: { ...applyThreadName(base), turns: page.turns }, page: page.page, activeTurnId: activeTurns.get(threadId) || null, lastTurn: live ? { id: live.id, status: live.status, error: live.error } : null, approvals: [...approvals.entries()].filter(([, request]) => request.params.threadId === threadId).map(([id, request]) => ({ id, method: request.method, params: request.params })), userInputs: pendingUserInputs(threadId) }
+      await registerArtifacts(result, threadId)
       registerImages(result)
     } else if (/^\/api\/threads\/[a-zA-Z0-9-]+\/status$/.test(url.pathname)) {
       const threadId = url.pathname.split('/')[3]!
       await refreshThreadStatus(threadId)
       const live = liveTurns.get(threadId)
+      const statusArtifacts = live ? await artifactRegistry.register({ thread: { cwd: threadCwds.get(threadId), turns: [{ id: live.id, status: live.status, items: [...live.items.values()] }] } }, threadId) : []
       result = {
         threadId,
         activeTurnId: activeTurns.get(threadId) || null,
@@ -730,6 +775,7 @@ const server = createServer(async (req, res) => {
           .filter(([, request]) => request.params.threadId === threadId)
           .map(([id, request]) => ({ id, method: request.method, params: request.params })),
         userInputs: [...userInputs.entries()].filter(([, request]) => request.params.threadId === threadId).map(([id, request]) => ({ id, method: request.method, params: request.params })),
+        artifacts: statusArtifacts,
         lastTurn: live ? { id: live.id, status: live.status, error: live.error } : null,
         live: live ? { turnId: live.id, status: live.status, error: live.error, sentText: live.sentText, items: [...live.items.values()] } : null,
       }
@@ -752,6 +798,7 @@ const server = createServer(async (req, res) => {
       if ((result as { thread?: Record<string, unknown> }).thread) {
         (result as { thread: Record<string, unknown> }).thread = applyThreadName((result as { thread: Record<string, unknown> }).thread)
       }
+      await registerArtifacts(result, threadId!)
       const currentRead = result as { thread?: { turns?: Array<{ id: string; status: string }> } }
       const runningTurn = currentRead.thread?.turns?.findLast(turn => turn.status === 'inProgress')
       if (sharedMode && runningTurn && !activeTurns.has(threadId!)) {
