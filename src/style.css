@@ -772,6 +772,9 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 :root[data-theme='dark'] .file-diff-line.is-context { color: #9ba9b7; }
 :root[data-theme='dark'] .file-diff-line.is-add { background: #193727; color: #a5d7b0; }
 :root[data-theme='dark'] .file-diff-line.is-remove { background: #3a2528; color: #e0a5a5; }
+:root[data-theme='dark'] .history-button { border-color: #344c65; background: #1b2d40; color: #9fc7ed; }
+:root[data-theme='dark'] .history-button:hover:not(:disabled) { border-color: #4d79a5; background: #243d57; color: #c3e0ff; }
+:root[data-theme='dark'] .history-button:disabled { color: #71859a; background: #202d3a; }
 :root[data-theme='dark'] .connection-indicator { background: #1a3428; }
 :root[data-theme='dark'] .connection-indicator:hover { background: #224936; }
 :root[data-theme='dark'] .send-button:not(.stop-button):disabled { color: #8294a7; background: #2b3947; }
