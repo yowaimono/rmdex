@@ -109,7 +109,6 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .employee-section .section-label { margin-top: 8px; }
 .sidebar-section-label { cursor: pointer; user-select: none; }
 .sidebar-section-label > span { display: inline-flex; align-items: center; gap: 3px; }
-.section-chevron { flex: none; color: #99a7b5; }
 .sidebar-section-label:hover { color: #1675e8; }
 .employee-row { position: relative; display: flex; align-items: stretch; min-height: 43px; margin: 0 10px; overflow: hidden; border-radius: 6px; color: #445465; }
 .employee-row:hover, .employee-row.selected { background: #eef5fd; }
@@ -136,7 +135,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .count { margin-left: 4px; color: #a8b3be; font-weight: 400; }
 .thread-list { padding: 0 9px; }
 .tree-section-label { padding: 12px 11px 5px; color: #8795a3; font-size: 10px; font-weight: 650; }
-.tree-section-label-other { margin-top: 8px; border-top: 1px solid #e9eef3; }
+.tree-section-label-other { margin-top: 8px; }
 .project-tree-group { margin: 3px 0; }
 .project-tree-row { min-height: 48px; display: flex; align-items: center; gap: 3px; padding: 4px 3px 4px 5px; border-radius: 6px; color: #455668; }
 .project-tree-row:hover { background: #eef3f8; }
@@ -150,7 +149,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .project-action { width: 27px; height: 29px; flex: none; display: grid; place-items: center; padding: 0; border: 0; border-radius: 4px; color: #8291a0; background: transparent; }
 .project-action:hover { color: #0879f9; background: #e1edf9; }
 .project-delete-action:hover { color: #bd5a4f; background: #fff1ef; }
-.project-thread-list { position: relative; margin-left: 16px; padding-left: 8px; border-left: 1px solid #e1e8ef; }
+.project-thread-list { position: relative; margin-left: 16px; padding-left: 8px; }
 .project-thread-row .thread { padding-top: 9px; padding-bottom: 9px; }
 .project-empty { padding: 9px 11px; color: #a0abb6; font-size: 11px; }
 .thread-row { position: relative; display: flex; align-items: stretch; margin-bottom: 2px; overflow: hidden; }
