@@ -111,6 +111,11 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .employee-row:hover, .employee-row.selected { background: #eef5fd; }
 .employee-row-content { position: relative; z-index: 1; min-width: 100%; display: flex; align-items: stretch; background: #fff; transition: transform .18s ease; }
 .employee-select { min-width: 0; flex: 1; display: flex; align-items: center; gap: 9px; padding: 7px; border: 0; border-radius: 5px; color: inherit; background: transparent; text-align: left; }
+.plan-sidebar-row { width: calc(100% - 20px); min-height: 43px; display: flex; align-items: center; gap: 9px; margin: 0 10px; padding: 7px; border: 0; border-radius: 6px; color: #445465; background: transparent; text-align: left; }
+.plan-sidebar-row:hover, .plan-sidebar-row.selected { color: #1675e8; background: #eef5fd; }
+.plan-sidebar-row .employee-copy { flex: 1; }
+.plan-icon { color: #6f55d9; background: #eeeaff; }
+.plan-sidebar-chevron { flex: none; color: #9aa8b5; }
 .employee-icon { width: 27px; height: 27px; flex: none; display: grid; place-items: center; border-radius: 6px; color: #0879f9; background: #e5f0ff; }
 .employee-copy { min-width: 0; display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
 .employee-copy strong, .employee-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -707,11 +712,29 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .plan-item-actions { display: flex; align-items: center; gap: 6px; flex: none; }
 .plan-item-actions button { min-height: 29px; padding: 0 8px; border: 1px solid #dce5ed; border-radius: 5px; color: #526d86; background: #fff; font-size: 10px; }
 .plan-item-actions button:hover { border-color: #a8c4e2; color: #0879f9; }
+.danger-text-button { border-color: #e5c8c4 !important; color: #b05248 !important; background: #fffafa !important; }
+.danger-text-button:hover { border-color: #d99a93 !important; color: #a4433a !important; background: #fff3f1 !important; }
+.plan-detail-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 18px; }
+.plan-detail-summary > div { min-width: 0; padding: 12px; border: 1px solid #e4eaf0; border-radius: 7px; background: #fbfcfd; }
+.plan-detail-label { display: block; margin-bottom: 6px; color: #8e9ca9; font-size: 11px; }
+.plan-detail-summary strong { display: block; overflow: hidden; color: #344252; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.plan-detail-prompt { margin-top: 18px; padding: 13px 14px; border: 1px solid #e4eaf0; border-radius: 7px; background: #fbfcfd; }
+.plan-detail-prompt p { margin: 0; color: #596b7b; font-size: 12px; line-height: 1.6; white-space: pre-wrap; }
+.plan-detail-actions { justify-content: flex-end; margin-top: 18px; }
+.plan-detail-runs { margin-top: 26px; padding-top: 18px; border-top: 1px solid #e4eaf0; }
+.plan-detail-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.plan-detail-section-heading h3 { margin: 0; color: #344252; font-size: 14px; }
+.plan-detail-section-heading p { margin: 4px 0 0; color: #8e9ca9; font-size: 11px; }
 .automation-dialog { width: min(100%, 560px); }
 .automation-dialog textarea { width: 100%; min-height: 110px; resize: vertical; padding: 9px 10px; border: 1px solid #dfe6ed; border-radius: 5px; outline: 0; color: #263545; background: #fff; font: inherit; font-size: 13px; line-height: 1.5; }
 .automation-dialog textarea:focus { border-color: #8dbcf0; box-shadow: 0 0 0 2px rgba(8, 121, 249, .1); }
 .settings-logout-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; flex: none; min-height: 36px; padding: 0 12px; border: 1px solid #e5c8c4; border-radius: 6px; color: #b05248; background: #fffafa; font-size: 12px; }
 .settings-logout-button:hover { border-color: #d99a93; color: #a4433a; background: #fff3f1; }
+@media (max-width: 700px) {
+  .plan-detail-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .plan-detail-actions { justify-content: stretch; flex-wrap: wrap; }
+  .plan-detail-actions button { flex: 1 1 120px; }
+}
 
 :root[data-theme='dark'] {
   color-scheme: dark;
@@ -765,6 +788,10 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 :root[data-theme='dark'] .search input::placeholder, :root[data-theme='dark'] .composer textarea::placeholder { color: #718398; }
 :root[data-theme='dark'] .section-label, :root[data-theme='dark'] .tree-section-label, :root[data-theme='dark'] .empty-list, :root[data-theme='dark'] .sidebar-error { color: #899aab; }
 :root[data-theme='dark'] .employee-row:hover, :root[data-theme='dark'] .employee-row.selected, :root[data-theme='dark'] .thread:hover, :root[data-theme='dark'] .project-tree-row:hover { background: #1e2d3d; }
+:root[data-theme='dark'] .plan-sidebar-row { color: #b8c6d5; }
+:root[data-theme='dark'] .plan-sidebar-row:hover, :root[data-theme='dark'] .plan-sidebar-row.selected { color: #72b2ff; background: #1e2d3d; }
+:root[data-theme='dark'] .plan-icon { color: #b3a1ff; background: #332c58; }
+:root[data-theme='dark'] .plan-sidebar-chevron { color: #8193a6; }
 :root[data-theme='dark'] .thread.selected { color: #74b5ff; background: #1d3855; }
 :root[data-theme='dark'] .thread-menu-trigger { background: rgba(21, 31, 43, .92); }
 :root[data-theme='dark'] .thread-menu-trigger:hover { color: #72b2ff; background: #21354b; }
@@ -773,6 +800,13 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 :root[data-theme='dark'] .side-account-actions button:hover { color: #72b2ff; background: #21354b; }
 :root[data-theme='dark'] .employee-plan-entry { color: #a8b8c8; }
 :root[data-theme='dark'] .employee-plan-entry:hover { color: #72b2ff; background: #21354b; }
+:root[data-theme='dark'] .plan-detail-summary > div, :root[data-theme='dark'] .plan-detail-prompt, :root[data-theme='dark'] .automation-item { border-color: #304154; background: #17222e; }
+:root[data-theme='dark'] .plan-detail-summary strong, :root[data-theme='dark'] .plan-detail-section-heading h3 { color: #d5e0eb; }
+:root[data-theme='dark'] .plan-detail-prompt p { color: #aebdca; }
+:root[data-theme='dark'] .plan-detail-runs { border-color: #2c3d4f; }
+:root[data-theme='dark'] .plan-detail-section-heading p, :root[data-theme='dark'] .plan-detail-label { color: #8193a6; }
+:root[data-theme='dark'] .danger-text-button { border-color: #68403d !important; color: #e28d83 !important; background: #2b2021 !important; }
+:root[data-theme='dark'] .danger-text-button:hover { border-color: #8d514b !important; color: #ffaaa0 !important; background: #382426 !important; }
 :root[data-theme='dark'] .thread-menu, :root[data-theme='dark'] .message-action-menu, :root[data-theme='dark'] .model-popup, :root[data-theme='dark'] .permission-popup, :root[data-theme='dark'] .project-popup, :root[data-theme='dark'] .user-menu-popup, :root[data-theme='dark'] .queued-followup-menu { border-color: #34475b; background: #1b2837; box-shadow: 0 12px 30px rgba(0, 0, 0, .32); }
 :root[data-theme='dark'] .thread-menu button, :root[data-theme='dark'] .message-action-option, :root[data-theme='dark'] .model-option, :root[data-theme='dark'] .permission-option, :root[data-theme='dark'] .project-option, :root[data-theme='dark'] .user-menu-option { color: #c2cfdd; }
 :root[data-theme='dark'] .thread-menu button:hover, :root[data-theme='dark'] .message-action-option:hover, :root[data-theme='dark'] .model-option:hover, :root[data-theme='dark'] .model-option.is-selected, :root[data-theme='dark'] .permission-option:hover, :root[data-theme='dark'] .project-option:hover, :root[data-theme='dark'] .user-menu-option:hover, :root[data-theme='dark'] .user-menu-option.is-selected { color: #75b6ff; background: #24394f; }

@@ -67,12 +67,12 @@ const pcDeviceName = ref(props.pcDeviceName || 'Codex 电脑')
 const loginError = ref('')
 const loginLoading = ref(false)
 const authReady = ref(false)
-const activePage = ref<'workspace' | 'users' | 'settings' | 'plans'>('workspace')
+const activePage = ref<'workspace' | 'users' | 'settings' | 'plan-detail'>('workspace')
 const plans = ref<Plan[]>([])
 const planRuns = ref<PlanRun[]>([])
 const plansLoading = ref(false)
 const plansError = ref('')
-const planTab = ref<'plans' | 'runs'>('plans')
+const selectedPlanId = ref<string | null>(null)
 const planEditor = ref(false)
 const planSaving = ref(false)
 const planName = ref('')
@@ -83,6 +83,8 @@ const planTriggerType = ref<'once' | 'interval'>('interval')
 const planAt = ref('')
 const planIntervalMinutes = ref('60')
 const planOverlap = ref<'skip' | 'queue' | 'parallel'>('skip')
+const selectedPlan = computed(() => plans.value.find(plan => plan.id === selectedPlanId.value) || null)
+const selectedPlanRuns = computed(() => planRuns.value.filter(run => run.planId === selectedPlanId.value).sort((a, b) => b.triggeredAt - a.triggeredAt))
 type ThemePreference = 'system' | 'light' | 'dark'
 const themePreference = ref<ThemePreference>((localStorage.getItem('rmdex-theme-preference') as ThemePreference | null) || 'system')
 const themeMediaQuery = typeof window !== 'undefined' ? window.matchMedia('(prefers-color-scheme: dark)') : null
@@ -1599,6 +1601,18 @@ async function loadPlans() {
 function openPlanEditor() {
   planName.value = ''; planPrompt.value = ''; planEmployeeId.value = ''; planCwd.value = selected.value?.cwd || projects.value[0]?.path || ''; planTriggerType.value = 'interval'; planAt.value = ''; planIntervalMinutes.value = '60'; planOverlap.value = 'skip'; planEditor.value = true
 }
+function openPlan(plan: Plan) {
+  selectedPlanId.value = plan.id
+  activePage.value = 'plan-detail'
+  void loadPlans()
+}
+function backToWorkspace() {
+  selectedPlanId.value = null
+  activePage.value = 'workspace'
+}
+function formatPlanSidebarMeta(plan: Plan) {
+  return `${plan.enabled ? '运行中' : '已暂停'} · ${formatPlanTrigger(plan)}`
+}
 function formatPlanTrigger(plan: Plan) {
   return plan.trigger.type === 'once' ? `一次性 · ${new Date(plan.trigger.at || 0).toLocaleString()}` : `每 ${plan.trigger.intervalMinutes || 60} 分钟`
 }
@@ -1610,14 +1624,23 @@ async function savePlan() {
   planSaving.value = true; plansError.value = ''
   try {
     const payload = { mode: 'create', name: planName.value.trim(), prompt: planPrompt.value.trim(), cwd: planCwd.value.trim(), ...(planEmployeeId.value ? { employeeId: planEmployeeId.value } : {}), triggerType: planTriggerType.value, ...(planTriggerType.value === 'once' ? { at: new Date(planAt.value).getTime() } : { intervalMinutes: Number(planIntervalMinutes.value) }), overlap: planOverlap.value }
-    await post('/api/plans/update', payload)
-    planEditor.value = false; await loadPlans()
+    const result = await post('/api/plans/update', payload) as { plan?: Plan }
+    planEditor.value = false
+    await loadPlans()
+    if (result.plan?.id) {
+      selectedPlanId.value = result.plan.id
+      activePage.value = 'plan-detail'
+    }
   } catch (e) { plansError.value = e instanceof Error ? e.message : String(e) }
   finally { planSaving.value = false }
 }
 async function updatePlan(plan: Plan, mode: 'pause' | 'resume' | 'run' | 'delete') {
   if (mode === 'delete' && !window.confirm(`删除计划“${plan.name}”？`)) return
-  try { await post('/api/plans/update', { mode, id: plan.id }); await loadPlans() }
+  try {
+    await post('/api/plans/update', { mode, id: plan.id })
+    if (mode === 'delete' && selectedPlanId.value === plan.id) backToWorkspace()
+    await loadPlans()
+  }
   catch (e) { plansError.value = e instanceof Error ? e.message : String(e) }
 }
 async function cancelPlanRun(run: PlanRun) {
@@ -1769,6 +1792,7 @@ function resetDeviceScopedState() {
   modelsLoadedKey = ''
   plans.value = []
   planRuns.value = []
+  selectedPlanId.value = null
   plansError.value = ''
 }
 function requestDeviceSwitch(device: { id: string; name: string; online: boolean }) {
@@ -2390,17 +2414,15 @@ onUnmounted(() => { themeMediaQuery?.removeEventListener('change', handleSystemT
       </section>
     </section>
   </main>
-  <main v-else-if="activePage === 'plans'" class="settings-page">
-    <header class="settings-topbar"><button class="admin-brand" type="button" @click="activePage = 'workspace'"><img :src="logoUrl" alt="" /><span>rmdex</span></button><button class="admin-nav-button" type="button" @click="activePage = 'workspace'"><ArrowLeft :size="16" />返回工作区</button></header>
+  <main v-else-if="activePage === 'plan-detail'" class="settings-page">
+    <header class="settings-topbar"><button class="admin-brand" type="button" @click="backToWorkspace"><img :src="logoUrl" alt="" /><span>rmdex</span></button><button class="admin-nav-button" type="button" @click="backToWorkspace"><ArrowLeft :size="16" />返回工作区</button></header>
     <section class="settings-content" aria-labelledby="plans-title">
-      <div class="settings-heading"><p class="eyebrow">当前设备：{{ remoteDevice?.name || '本机设备' }}</p><h1 id="plans-title">计划任务</h1><p>计划属于当前设备，可绑定员工，也可以作为独立任务执行。</p></div>
+      <div class="settings-heading"><p class="eyebrow">当前设备：{{ remoteDevice?.name || '本机设备' }}</p><h1 id="plans-title">{{ selectedPlan?.name || '计划任务' }}</h1><p>{{ selectedPlan ? '查看这个计划的配置、执行控制和历史执行记录。' : '正在加载当前设备的计划。' }}</p></div>
       <section class="settings-card plan-card" aria-labelledby="plan-list-title">
-        <div class="settings-card-heading"><span class="settings-card-icon"><CalendarClock :size="18" /></span><div><h2 id="plan-list-title">设备计划</h2><p>未绑定员工的执行线程会隐藏在普通会话列表之外。</p></div><button class="create-button automation-add-button" type="button" @click="openPlanEditor"><Plus :size="15" />新建计划</button></div>
-        <div class="plan-tabs" role="tablist"><button type="button" :class="{ selected: planTab === 'plans' }" @click="planTab = 'plans'">计划</button><button type="button" :class="{ selected: planTab === 'runs' }" @click="planTab = 'runs'">执行记录</button></div>
+        <div class="settings-card-heading"><span class="settings-card-icon"><CalendarClock :size="18" /></span><div><h2 id="plan-list-title">计划详情</h2><p>未绑定员工的执行线程会隐藏在普通会话列表之外。</p></div><button class="create-button automation-add-button" type="button" @click="openPlanEditor"><Plus :size="15" />新建计划</button></div>
         <p v-if="plansError" class="create-error" role="alert">{{ plansError }}</p>
         <div v-if="plansLoading" class="automation-state">正在加载当前设备的计划…</div>
-        <template v-else-if="planTab === 'plans'"><div v-if="!plans.length" class="automation-state">当前设备还没有计划。</div><div v-else class="automation-list"><article v-for="plan in plans" :key="plan.id" class="automation-item"><div><strong>{{ plan.name }}</strong><small>{{ plan.employee?.name || '独立计划' }} · {{ formatPlanTrigger(plan) }} · {{ plan.enabled ? '运行中' : '已暂停' }}</small><p>{{ plan.prompt }}</p></div><div class="plan-item-actions"><button type="button" @click="updatePlan(plan, 'run')">立即执行</button><button type="button" @click="updatePlan(plan, plan.enabled ? 'pause' : 'resume')">{{ plan.enabled ? '暂停' : '恢复' }}</button><button class="icon-button" type="button" title="删除计划" aria-label="删除计划" @click="updatePlan(plan, 'delete')"><Trash2 :size="15" /></button></div></article></div></template>
-        <template v-else><div v-if="!planRuns.length" class="automation-state">当前设备还没有执行记录。</div><div v-else class="automation-list"><article v-for="run in planRuns" :key="run.id" class="automation-item"><div><strong>{{ run.planName }}</strong><small>{{ run.employeeName || '独立执行' }} · {{ formatPlanRunStatus(run.status) }} · {{ new Date(run.triggeredAt).toLocaleString() }}</small><p>{{ run.error || run.summary || '等待执行结果' }}</p></div><button v-if="['pending', 'running'].includes(run.status)" type="button" @click="cancelPlanRun(run)">停止</button></article></div></template>
+        <template v-if="selectedPlan"><div class="plan-detail-summary"><div><span class="plan-detail-label">状态</span><strong>{{ selectedPlan.enabled ? '运行中' : '已暂停' }}</strong></div><div><span class="plan-detail-label">绑定员工</span><strong>{{ selectedPlan.employee?.name || '独立执行' }}</strong></div><div><span class="plan-detail-label">触发方式</span><strong>{{ formatPlanTrigger(selectedPlan) }}</strong></div><div><span class="plan-detail-label">下次执行</span><strong>{{ selectedPlan.enabled ? new Date(selectedPlan.nextRunAt).toLocaleString() : '已暂停' }}</strong></div></div><div class="plan-detail-prompt"><span class="plan-detail-label">任务内容</span><p>{{ selectedPlan.prompt }}</p></div><div class="plan-item-actions plan-detail-actions"><button type="button" @click="updatePlan(selectedPlan, 'run')">立即执行</button><button type="button" @click="updatePlan(selectedPlan, selectedPlan.enabled ? 'pause' : 'resume')">{{ selectedPlan.enabled ? '暂停计划' : '恢复计划' }}</button><button class="danger-text-button" type="button" @click="updatePlan(selectedPlan, 'delete')">删除计划</button></div><div class="plan-detail-runs"><div class="plan-detail-section-heading"><div><h3>执行记录</h3><p>只显示这个计划的执行历史。</p></div><button class="icon-button" type="button" title="刷新执行记录" aria-label="刷新执行记录" :disabled="plansLoading" @click="loadPlans"><RefreshCw :size="15" /></button></div><div v-if="!selectedPlanRuns.length" class="automation-state">这个计划还没有执行记录。</div><div v-else class="automation-list"><article v-for="run in selectedPlanRuns" :key="run.id" class="automation-item"><div><strong>{{ formatPlanRunStatus(run.status) }}</strong><small>{{ new Date(run.triggeredAt).toLocaleString() }} · {{ run.employeeName || '独立执行' }}</small><p>{{ run.error || run.summary || '等待执行结果' }}</p></div><button v-if="['pending', 'running'].includes(run.status)" type="button" @click="cancelPlanRun(run)">停止</button></article></div></div></template><div v-else class="automation-state">正在准备计划详情…</div>
       </section>
     </section>
     <div v-if="planEditor" class="modal-backdrop" @click.self="!planSaving && (planEditor = false)"><section class="create-dialog automation-dialog" role="dialog" aria-modal="true" aria-labelledby="plan-create-title"><header><div><h2 id="plan-create-title">新建计划</h2><p>计划保存在当前设备，由 rmdex server 调度。</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="planEditor = false"><X :size="18" /></button></header><form @submit.prevent="savePlan"><label for="plan-name">名称</label><input id="plan-name" v-model="planName" required maxlength="120" placeholder="例如：每天检查项目状态" /><label for="plan-employee">绑定员工（可选）</label><select id="plan-employee" v-model="planEmployeeId"><option value="">不绑定员工，创建独立执行线程</option><option v-for="employee in employees" :key="employee.id" :value="employee.id">{{ employee.name }}</option></select><label for="plan-prompt">任务内容</label><textarea id="plan-prompt" v-model="planPrompt" required rows="5" maxlength="20000" placeholder="描述员工或独立任务需要完成的工作"></textarea><label for="plan-cwd">工作目录</label><input id="plan-cwd" v-model="planCwd" required placeholder="例如：D:\WorkSpace\rmdex" /><label for="plan-trigger">触发方式</label><select id="plan-trigger" v-model="planTriggerType"><option value="interval">按间隔执行</option><option value="once">一次性执行</option></select><input v-if="planTriggerType === 'interval'" v-model="planIntervalMinutes" type="number" min="1" max="525600" required placeholder="间隔分钟数" /><input v-else v-model="planAt" type="datetime-local" required /><label for="plan-overlap">上次未完成时</label><select id="plan-overlap" v-model="planOverlap"><option value="skip">跳过本次</option><option value="queue">排队等待</option><option value="parallel">允许并行</option></select><p v-if="plansError" class="create-error" role="alert">{{ plansError }}</p><div class="dialog-actions"><button type="button" class="cancel-button" @click="planEditor = false">取消</button><button type="submit" class="create-button" :disabled="planSaving || !planName.trim() || !planPrompt.trim() || !planCwd.trim()">{{ planSaving ? '创建中…' : '创建计划' }}</button></div></form></section></div>
@@ -2437,7 +2459,11 @@ onUnmounted(() => { themeMediaQuery?.removeEventListener('change', handleSystemT
             <div class="employee-swipe-actions" aria-label="AI 员工快捷操作"><button type="button" title="编辑员工" aria-label="编辑员工" @click.stop="openEmployeeEditor(employee)"><Pencil :size="15" /></button><button type="button" title="换绑 Thread" aria-label="换绑 Thread" :disabled="employeeResetting === employee.id" @click.stop="requestEmployeeThreadReset(employee)"><RotateCcw :size="15" :class="{ spin: employeeResetting === employee.id }" /></button></div>
           </div>
           <p v-if="!employees.length" class="employee-empty">创建一个有固定身份和长期记忆的 Codex 员工。</p>
-          <button v-if="clientToken" class="employee-plan-entry" type="button" @click="activePage = 'plans'; void loadPlans()"><CalendarClock :size="15" /><span>计划任务</span><ChevronRight :size="14" /></button>
+        </div>
+        <div v-if="remoteMode && clientToken" class="employee-section plan-section">
+          <div class="section-label"><span>计划任务 <span class="count">{{ plans.length }}</span></span><button class="icon-button" type="button" title="新建计划" aria-label="新建计划" @click="openPlanEditor()"><Plus :size="15" /></button></div>
+          <button v-for="plan in plans" :key="plan.id" class="plan-sidebar-row" type="button" :class="{ selected: selectedPlanId === plan.id }" @click="openPlan(plan)"><span class="employee-icon plan-icon"><CalendarClock :size="15" /></span><span class="employee-copy"><strong>{{ plan.name }}</strong><small>{{ plan.employee?.name || '独立计划' }} · {{ formatPlanSidebarMeta(plan) }}</small></span><ChevronRight :size="14" class="plan-sidebar-chevron" /></button>
+          <p v-if="!plans.length && !plansLoading" class="employee-empty">当前设备还没有计划。</p>
         </div>
         <div class="section-label"><span>会话与 Projects <span class="count">{{ filtered.length }}</span></span><div class="section-actions"><button class="archive-toggle" type="button" :class="{ active: showArchivedThreads }" :title="showArchivedThreads ? '隐藏已归档' : '显示已归档'" @click="showArchivedThreads = !showArchivedThreads"><Archive :size="14" /><span v-if="archivedThreads.length">{{ archivedThreads.length }}</span></button><button class="icon-button" title="新建 Project" aria-label="新建 Project" @click="openProjectEditor()"><FolderPlus :size="15" /></button><button class="icon-button" title="刷新会话" aria-label="刷新会话" :disabled="loading" @click="retryConnection"><RefreshCw :size="15" /></button></div></div>
       <div v-if="threadActionError" class="sidebar-error">{{ threadActionError }}</div>
