@@ -250,6 +250,7 @@ const artifactImageUrls = ref<Record<string, string>>({})
 const artifactPreviewText = ref('')
 const artifactPreviewError = ref('')
 let artifactRequestVersion = 0
+const artifactThumbnailLoads = new Map<string, Promise<void>>()
 const threadCache = new Map<string, ReadResult>()
 const threadRequests = new Map<string, Promise<ReadResult>>()
 let modelsLoadedKey = ''
@@ -616,6 +617,20 @@ function clearArtifactPreview() {
 }
 function artifactUrl(artifact: Artifact, action: 'content' | 'preview') {
   return `/api/threads/${encodeURIComponent(artifact.threadId)}/artifacts/${encodeURIComponent(artifact.id)}/${action}`
+}
+function loadArtifactThumbnail(artifact: Artifact) {
+  if (artifactImageUrls.value[artifact.id] || artifactThumbnailLoads.has(artifact.id) || artifact.previewMode !== 'thumbnail') return
+  const request = (async () => {
+    try {
+      const response = await authenticatedFetch(artifactUrl(artifact, 'preview'), {}, 'client')
+      if (!response.ok) return
+      const objectUrl = URL.createObjectURL(await response.blob())
+      if (selected.value?.id !== artifact.threadId) URL.revokeObjectURL(objectUrl)
+      else artifactImageUrls.value[artifact.id] = objectUrl
+    } catch { /* Keep the file card usable if thumbnail preview is unavailable. */ }
+    finally { artifactThumbnailLoads.delete(artifact.id) }
+  })()
+  artifactThumbnailLoads.set(artifact.id, request)
 }
 function formatArtifactSize(value: number) {
   if (value < 1024) return `${value} B`
@@ -2110,7 +2125,8 @@ async function answerUserInput(request: UserInput, skip = false) {
   for (const question of request.params.questions) {
     const choice = chosenUserInput(request.id, question.id)
     const other = userInputOther.value[`${request.id}:${question.id}`] || ''
-    answers[question.id] = { answers: skip ? [] : [choice === '__other__' ? other : choice].filter(Boolean) }
+    const customAnswer = choice === '__other__' || (!question.options?.length && !question.isOther)
+    answers[question.id] = { answers: skip ? [] : [customAnswer ? other : choice].filter(Boolean) }
   }
   answeringUserInput.value = request.id
   try {
@@ -2319,7 +2335,7 @@ onUnmounted(() => { themeMediaQuery?.removeEventListener('change', handleSystemT
               <div v-if="message.images.length" class="attachments"><template v-for="(image, index) in message.images" :key="index"><button v-if="imageSource(image)" type="button" class="attachment" title="放大预览图片" aria-label="放大预览图片" @click="showImagePreview(imageSource(image) || '')"><img :src="imageSource(image)" alt="图片附件" loading="lazy" /></button><span v-else class="attachment-unavailable">图片附件不可用</span></template></div>
               <div v-if="message.text" class="message-text markdown" v-html="markdown.render(message.text)"></div>
             </MessageBubble>
-            <ArtifactStrip v-if="message.role === 'agent' && message.forkable && message.artifacts?.length" :artifacts="message.artifacts" :loading="artifactLoading" :image-urls="artifactImageUrls" @download="downloadArtifact" @preview="previewArtifact" />
+            <ArtifactStrip v-if="message.role === 'agent' && message.forkable && message.artifacts?.length" :artifacts="message.artifacts" :loading="artifactLoading" :image-urls="artifactImageUrls" @download="downloadArtifact" @preview="previewArtifact" @load-thumbnail="loadArtifactThumbnail" />
           </template>
         </template>
         <MessageBubble v-for="failed in (failedMessages[selected.id] || [])" :key="failed.id" role="user" :copy-text="userText(failed.text)" :retryable="capabilities.send" :retry-disabled="working || retrying" failed @copy="copyValue($event, '已复制消息')" @retry="retryMessage(failed)">
@@ -2334,7 +2350,7 @@ onUnmounted(() => { themeMediaQuery?.removeEventListener('change', handleSystemT
       <div v-if="selected && !threadLoading && !threadLoadError" class="compose-area">
         <section v-if="queuedSubmissions.length" class="queued-followups" aria-label="排队任务"><div class="queued-followups-heading"><span>排队中</span><span class="queued-count">{{ queuedSubmissions.length }}</span></div><div v-for="item in queuedSubmissions" :key="item.id" class="queued-followup"><CornerDownRight :size="15" class="queued-followup-icon" /><span class="queued-followup-text">{{ queuedText(item) }}</span><div class="queued-followup-actions"><button v-if="!isColleagueQueued(item)" type="button" class="queue-steer-button" :disabled="!!queueActionId || !activeTurnId" @click="steerQueued(item)"><CornerDownRight :size="14" />Steer</button><button type="button" class="queue-icon-button" title="删除排队任务" aria-label="删除排队任务" :disabled="!!queueActionId" @click="deleteQueued(item)"><Trash2 :size="15" /></button><button v-if="!isColleagueQueued(item)" type="button" class="queue-icon-button" title="更多操作" aria-label="更多操作" :disabled="!!queueActionId" @click="queueMenuId = queueMenuId === item.id ? null : item.id"><Ellipsis :size="16" /></button></div><div v-if="queueMenuId === item.id && !isColleagueQueued(item)" class="queued-followup-menu"><button type="button" :disabled="!!queueActionId" @click="editQueued(item)"><Pencil :size="14" />编辑消息</button></div></div></section>
         <p v-if="desktopMode" class="desktop-hint">{{ capabilities.models ? '模型与推理强度可在右侧选择；权限、审批和暂停请在 Desktop 处理。' : '当前设备未提供可识别的模型目录；模型、权限、审批和暂停请在 Desktop 处理。' }}</p><div v-for="approval in (capabilities.approvals ? pendingApprovals : [])" :key="approval.id" class="approval"><strong>{{ approval.method.includes('commandExecution') ? '命令执行需要确认' : '文件修改需要确认' }}</strong><p v-if="approval.params.reason">{{ approval.params.reason }}</p><pre v-if="approval.params.command">{{ approval.params.command }}</pre><p v-if="approval.params.cwd">工作目录：{{ approval.params.cwd }}</p><p v-if="approval.params.grantRoot">授权目录：{{ approval.params.grantRoot }}</p><details><summary>完整请求信息</summary><pre>{{ JSON.stringify(approval.params, null, 2) }}</pre></details><p v-if="approval.method.includes('fileChange')">请先在上方工具调用中查看文件变更，再决定是否允许。</p><div class="approval-actions"><button @click="decide(approval, 'decline')">拒绝</button><button @click="decide(approval, 'accept')">允许本次</button></div></div>
-        <section v-for="request in pendingUserInputs" :key="request.id" class="user-input-request" aria-live="polite"><div v-for="question in request.params.questions" :key="question.id" class="user-input-question"><div class="user-input-header"><strong>{{ question.header }}</strong><span>{{ question.isSecret ? '敏感信息' : '需要你的选择' }}</span></div><p>{{ question.question }}</p><div v-if="question.options?.length" class="user-input-options"><button v-for="option in question.options" :key="option.label" type="button" :class="{ selected: chosenUserInput(request.id, question.id) === option.label }" @click="chooseUserInput(request.id, question.id, option.label)"><strong>{{ option.label }}</strong><small>{{ option.description }}</small></button><button v-if="question.isOther" type="button" :class="{ selected: chosenUserInput(request.id, question.id) === '__other__' }" @click="chooseUserInput(request.id, question.id, '__other__')"><strong>其他</strong><small>输入自定义回答</small></button></div><textarea v-if="question.isOther && chosenUserInput(request.id, question.id) === '__other__'" v-model="userInputOther[`${request.id}:${question.id}`]" class="user-input-other" rows="2" :placeholder="question.isSecret ? '输入敏感回答' : '输入你的回答'"></textarea></div><div class="user-input-actions"><button type="button" class="cancel-button" :disabled="answeringUserInput === request.id" @click="answerUserInput(request, true)">跳过</button><button type="button" class="create-button" :disabled="answeringUserInput === request.id" @click="answerUserInput(request)">{{ answeringUserInput === request.id ? '提交中…' : '提交回答' }}</button></div></section>
+        <section v-for="request in pendingUserInputs" :key="request.id" class="user-input-request" aria-live="polite"><div v-for="question in request.params.questions" :key="question.id" class="user-input-question"><div class="user-input-header"><strong>{{ question.header }}</strong><span>{{ question.isSecret ? '敏感信息' : '需要你的选择' }}</span></div><p>{{ question.question }}</p><div v-if="question.options?.length || question.isOther" class="user-input-options"><button v-for="option in question.options || []" :key="option.label" type="button" :class="{ selected: chosenUserInput(request.id, question.id) === option.label }" @click="chooseUserInput(request.id, question.id, option.label)"><strong>{{ option.label }}</strong><small>{{ option.description }}</small></button><button v-if="question.isOther" type="button" :class="{ selected: chosenUserInput(request.id, question.id) === '__other__' }" @click="chooseUserInput(request.id, question.id, '__other__')"><strong>自定义输入</strong><small>输入你自己的回答</small></button></div><textarea v-if="question.isOther && chosenUserInput(request.id, question.id) === '__other__'" v-model="userInputOther[`${request.id}:${question.id}`]" class="user-input-other" rows="2" :placeholder="question.isSecret ? '输入敏感回答' : '输入你的回答'"></textarea><textarea v-if="!question.options?.length && !question.isOther" v-model="userInputOther[`${request.id}:${question.id}`]" class="user-input-other" rows="2" :placeholder="question.isSecret ? '输入敏感回答' : '输入你的回答'"></textarea></div><div class="user-input-actions"><button type="button" class="cancel-button" :disabled="answeringUserInput === request.id" @click="answerUserInput(request, true)">跳过</button><button type="button" class="create-button" :disabled="answeringUserInput === request.id" @click="answerUserInput(request)">{{ answeringUserInput === request.id ? '提交中…' : '提交回答' }}</button></div></section>
         <form class="composer" @submit.prevent="send()">
           <div v-if="selectedAttachments.length" class="composer-attachments" aria-label="待发送附件">
             <div v-for="(file, index) in selectedAttachments" :key="`${file.name}-${file.lastModified}-${index}`" class="composer-attachment">

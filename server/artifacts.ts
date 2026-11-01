@@ -36,11 +36,21 @@ function within(root: string, target: string) {
 }
 
 function pathsFromText(value: string) {
-  const matches = [
+  const markdownTargets = [...value.matchAll(/\[[^\]]*\]\((?:<([^>]+)>|([^\s)]+))(?:\s+['"][^)]*['"])?\)/g)]
+    .map(match => ({ path: match[1] || match[2] || '', explicitlyLinked: true }))
+  const plainPaths = [
     ...(value.match(/(?:[A-Za-z]:\\|\/)[^<>"\r\n]+/g) || []),
     ...(value.match(/(?:\.\.?[\\/])?[^\s<>"'`()]+\.(?:pdf|docx?|xlsx?|pptx?|csv|json|md|txt|png|jpe?g|gif|webp|zip|7z|rar|exe)(?=$|[\s<>"'`()])/gi) || []),
-  ]
-  return [...new Set(matches.map(trimPath).filter(Boolean))]
+  ].map(path => ({ path, explicitlyLinked: false }))
+  return [...markdownTargets, ...plainPaths].map(candidate => ({ ...candidate, path: trimPath(candidate.path) })).filter(candidate => candidate.path)
+}
+
+function linkPath(value: string) {
+  if (value.startsWith('file://')) {
+    try { return decodeURIComponent(new URL(value).pathname.replace(/^\/(\w:)/, '$1')) }
+    catch { return value }
+  }
+  return value
 }
 
 function previewMode(mimeType: string, size: number): Artifact['previewMode'] {
@@ -89,28 +99,28 @@ export class ArtifactRegistry {
       const replies = turn.items.filter((item: any) => item?.type === 'agentMessage' && typeof item.text === 'string' && item.text.trim())
       const finalReplies = replies.filter((item: any) => item.phase === 'final_answer')
       const textItems = finalReplies.length ? finalReplies : replies.filter((item: any) => !item.phase).slice(-1)
-      for (const item of textItems) for (const path of pathsFromText(item.text)) candidates.push({ path, sourceItemId: item.id })
+      for (const item of textItems) for (const candidate of pathsFromText(item.text)) candidates.push({ ...candidate, path: linkPath(candidate.path), sourceItemId: item.id })
       for (const item of turn.items) {
         if (item?.type !== 'imageGeneration') continue
-        for (const path of [item.path, item.savedPath]) if (typeof path === 'string') candidates.push({ path, sourceItemId: item.id })
+        for (const path of [item.path, item.savedPath]) if (typeof path === 'string') candidates.push({ path, sourceItemId: item.id, explicitlyLinked: true })
       }
       for (const candidate of candidates) {
         const resolved = isAbsolute(candidate.path) ? resolve(candidate.path) : resolve(root, candidate.path)
         if (changedPaths.has(relative(root, resolved).toLowerCase())) continue
-        await this.registerFile(threadId, turn.id, root, candidate.path, candidate.sourceItemId)
+        await this.registerFile(threadId, turn.id, root, candidate.path, candidate.sourceItemId, candidate.explicitlyLinked)
       }
     }
     return this.list(threadId)
   }
 
-  private async registerFile(threadId: string, turnId: string, root: string, rawPath: string, sourceItemId?: string) {
+  private async registerFile(threadId: string, turnId: string, root: string, rawPath: string, sourceItemId?: string, explicitlyLinked = false) {
     const path = trimPath(rawPath)
     const target = isAbsolute(path) ? path : resolve(root, path)
-    if (!within(root, target)) return
+    if (!explicitlyLinked && !within(root, target)) return
     const extension = extname(path).toLowerCase()
     if (sourceExtensions.has(extension) && extension !== '.md') return
     const [canonicalRoot, canonicalTarget] = await Promise.all([realpath(root).catch(() => ''), realpath(target).catch(() => '')])
-    if (!canonicalRoot || !canonicalTarget || !within(canonicalRoot, canonicalTarget)) return
+    if (!canonicalRoot || !canonicalTarget || (!explicitlyLinked && !within(canonicalRoot, canonicalTarget))) return
     const info = await stat(canonicalTarget).catch(() => null)
     if (!info?.isFile() || info.size > 512 * 1024 * 1024) return
     const key = `${threadId}:${turnId}:${canonicalTarget}:${info.size}:${info.mtimeMs}`

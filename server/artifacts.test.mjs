@@ -55,3 +55,15 @@ test('only registers image generation output, not viewed input images', async ()
   const artifacts = await new ArtifactRegistry().register(result, threadId)
   assert.equal(artifacts.some(item => item.name === 'input.png'), false)
 })
+
+test('registers explicitly linked delivery files outside the project directory', async () => {
+  const { root, threadId, result } = await fixture()
+  const screenshot = join(root, '..', 'desktop-shot.png')
+  await writeFile(screenshot, 'image-data')
+  try {
+    result.thread.turns[0].items.at(-1).text = `已生成文件：${join(root, 'out', 'report.docx')}\n桌面截图已保存：[查看截图](${screenshot})`
+    const artifacts = await new ArtifactRegistry().register(result, threadId)
+    assert.deepEqual(artifacts.map(artifact => artifact.name), ['desktop-shot.png', 'report.docx'])
+    assert.equal(artifacts.find(artifact => artifact.name === 'desktop-shot.png').previewMode, 'thumbnail')
+  } finally { await rm(screenshot, { force: true }) }
+})

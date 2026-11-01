@@ -1,13 +1,16 @@
 <script setup lang="ts">
 import { ChevronDown, ChevronUp, Download, FileArchive, FileCode2, FileImage, FileSpreadsheet, FileText, FileType, Presentation } from 'lucide-vue-next'
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 export type Artifact = { id: string; threadId: string; turnId: string; sourceItemId?: string; name: string; mimeType: string; size: number; previewMode: 'thumbnail' | 'inline' | 'downloadOnly' }
-const emit = defineEmits<{ download: [artifact: Artifact]; preview: [artifact: Artifact] }>()
+const emit = defineEmits<{ download: [artifact: Artifact]; preview: [artifact: Artifact]; 'load-thumbnail': [artifact: Artifact] }>()
 const expanded = ref(false)
 const props = defineProps<{ artifacts: Artifact[]; loading?: string | null; imageUrls?: Record<string, string> }>()
 const visibleArtifacts = computed(() => expanded.value ? props.artifacts : props.artifacts.slice(0, 3))
 const hiddenCount = computed(() => Math.max(0, props.artifacts.length - 3))
+watch(visibleArtifacts, artifacts => {
+  for (const artifact of artifacts) if (artifact.previewMode === 'thumbnail' && !props.imageUrls?.[artifact.id]) emit('load-thumbnail', artifact)
+}, { immediate: true })
 function icon(artifact: Artifact) {
   if (artifact.mimeType.startsWith('image/')) return FileImage
   if (artifact.mimeType.includes('spreadsheet') || artifact.mimeType === 'text/csv') return FileSpreadsheet
@@ -38,7 +41,7 @@ function openPreview(artifact: Artifact) {
     <div class="artifact-list">
       <article v-for="artifact in visibleArtifacts" :key="artifact.id" class="artifact-card">
         <button type="button" class="artifact-main" :title="artifact.previewMode === 'downloadOnly' ? '下载文件' : '预览文件'" @click="openPreview(artifact)">
-          <img v-if="artifact.mimeType.startsWith('image/') && props.imageUrls?.[artifact.id]" class="artifact-thumbnail" :src="props.imageUrls[artifact.id]" :alt="artifact.name" />
+          <img v-if="artifact.mimeType.startsWith('image/') && props.imageUrls?.[artifact.id]" class="artifact-thumbnail" :src="props.imageUrls[artifact.id]" :alt="artifact.name" loading="lazy" />
           <component v-else :is="icon(artifact)" :size="20" class="artifact-icon" />
           <span class="artifact-info"><strong>{{ artifact.name }}</strong><small>{{ typeLabel(artifact) }} · {{ size(artifact.size) }}</small></span>
         </button>

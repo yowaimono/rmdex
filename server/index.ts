@@ -217,7 +217,7 @@ function handleMessage(line: string) {
     if (message.method && message.id !== undefined) {
       if (['item/commandExecution/requestApproval', 'item/fileChange/requestApproval'].includes(message.method)) {
         approvals.set(String(message.id), { id: message.id, method: message.method, params: message.params || {} })
-      } else if (message.method === 'item/tool/requestUserInput' && message.params?.threadId && Array.isArray(message.params?.questions)) {
+      } else if (['item/tool/requestUserInput', 'item/tool/request_user_input'].includes(String(message.method)) && message.params?.threadId && Array.isArray(message.params?.questions)) {
         userInputs.set(String(message.id), { id: message.id, method: message.method, params: message.params })
       } else if (!sharedMode) {
         sendMessage({ id: message.id, error: { code: -32601, message: 'This client does not support this request' } })
