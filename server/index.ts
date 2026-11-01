@@ -220,6 +220,16 @@ function sendMessage(message: unknown, callback?: (error?: Error | null) => void
 }
 let desktopMirror: WebSocket | undefined
 let desktopMirrorReconnect: NodeJS.Timeout | undefined
+const pendingDesktopMirrorResponses = new Map<string, { resolve: () => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>()
+function desktopMirrorResponseKey(clientId: string, requestId: string) { return `${clientId}:${requestId}` }
+function settleDesktopMirrorResponse(key: string, error?: Error) {
+  const pending = pendingDesktopMirrorResponses.get(key)
+  if (!pending) return
+  clearTimeout(pending.timer)
+  pendingDesktopMirrorResponses.delete(key)
+  if (error) pending.reject(error)
+  else pending.resolve()
+}
 function desktopMirrorUrl() {
   if (process.env.RMDEX_DESKTOP_MIRROR_URL) return process.env.RMDEX_DESKTOP_MIRROR_URL
   const mirrorPort = Number(process.env.RMDEX_DESKTOP_MIRROR_PORT || 0)
@@ -238,30 +248,45 @@ function connectDesktopMirror() {
   connection.on('open', () => console.log(`[${timestamp()}] Desktop question mirror ready`))
   connection.on('message', data => {
     try {
-      const event = JSON.parse(data.toString()) as { type?: string; clientId?: string; requestId?: string; request?: { id?: string | number; method?: string; params?: UserInputRequest['params'] } }
-      if (event.type === 'request' && event.clientId && event.requestId && event.request?.id !== undefined && event.request.params?.threadId && Array.isArray(event.request.params.questions)) {
+      const event = JSON.parse(data.toString()) as { type?: string; clientId?: string; requestId?: string; error?: string; request?: { id?: string | number; method?: string; params?: UserInputRequest['params'] } }
+      if ((event.type === 'responseForwarded' || event.type === 'responseError') && event.clientId && event.requestId) {
+        settleDesktopMirrorResponse(desktopMirrorResponseKey(event.clientId, event.requestId), event.type === 'responseError' ? new Error(event.error || 'Codex Desktop 回答发送失败') : undefined)
+      } else if (event.type === 'request' && event.clientId && event.requestId && event.request?.id !== undefined && event.request.params?.threadId && Array.isArray(event.request.params.questions)) {
         const id = `desktop-${event.clientId}-${event.requestId}`
         userInputs.set(id, { id, rpcId: event.request.id, method: event.request.method || 'item/tool/requestUserInput', params: event.request.params, transport: 'desktop-mirror', mirrorClientId: event.clientId })
+        console.log(`[${timestamp()}] Desktop question mirrored client=${event.clientId} request=${event.requestId} thread=${event.request.params.threadId} questions=${event.request.params.questions.length}`)
       } else if (event.type === 'resolved' && event.clientId && event.requestId) {
         userInputs.delete(`desktop-${event.clientId}-${event.requestId}`)
+        console.log(`[${timestamp()}] Desktop question resolved client=${event.clientId} request=${event.requestId}`)
       }
     } catch { console.error('Invalid Desktop mirror event') }
   })
   const clear = () => {
     if (desktopMirror === connection) desktopMirror = undefined
+    for (const key of pendingDesktopMirrorResponses.keys()) settleDesktopMirrorResponse(key, new Error('Codex Desktop 提问通道已断开'))
     for (const [key, request] of userInputs) if (request.transport === 'desktop-mirror') userInputs.delete(key)
     scheduleDesktopMirrorReconnect()
   }
   connection.on('error', clear)
   connection.on('close', clear)
 }
-function sendUserInputResponse(request: UserInputRequest, result: unknown) {
+async function sendUserInputResponse(request: UserInputRequest, result: unknown) {
   if (request.transport === 'desktop-mirror') {
     if (!desktopMirror || desktopMirror.readyState !== WebSocket.OPEN || !request.mirrorClientId) throw new Error('Codex Desktop 提问通道已断开')
-    desktopMirror.send(JSON.stringify({ type: 'response', clientId: request.mirrorClientId, requestId: String(request.rpcId), result }))
+    const requestId = String(request.rpcId)
+    const key = desktopMirrorResponseKey(request.mirrorClientId, requestId)
+    if (pendingDesktopMirrorResponses.has(key)) throw new Error('Codex Desktop 正在处理这条回答')
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => settleDesktopMirrorResponse(key, new Error('Codex Desktop 回答确认超时')), 10000)
+      pendingDesktopMirrorResponses.set(key, { resolve, reject, timer })
+      desktopMirror.send(JSON.stringify({ type: 'response', clientId: request.mirrorClientId, requestId, result }), error => {
+        if (error) settleDesktopMirrorResponse(key, error)
+      })
+    })
+    console.log(`[${timestamp()}] Desktop question response acknowledged client=${request.mirrorClientId} request=${requestId}`)
     return
   }
-  sendMessage({ id: request.rpcId, result })
+  await new Promise<void>((resolve, reject) => sendMessage({ id: request.rpcId, result }, error => error ? reject(error) : resolve()))
 }
 function handleMessage(line: string) {
   try {
@@ -773,7 +798,7 @@ const server = createServer(async (req, res) => {
           if (!answer || !Array.isArray(answer.answers) || answer.answers.some((value: unknown) => typeof value !== 'string')) throw new Error('问题答案格式无效')
           answers[question.id] = { answers: answer.answers }
         }
-        sendUserInputResponse(request, { answers })
+        await sendUserInputResponse(request, { answers })
         userInputs.delete(userInputMatch[1]!)
         result = { ok: true }
       } else { res.writeHead(404).end(JSON.stringify({ error: 'Not found' })); return }

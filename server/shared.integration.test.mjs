@@ -9,7 +9,7 @@ import { Duplex } from 'node:stream'
 import { setTimeout as delay } from 'node:timers/promises'
 import { once } from 'node:events'
 import { test } from 'node:test'
-import WebSocket from 'ws'
+import WebSocket, { WebSocketServer } from 'ws'
 import { createDesktopBridge } from './desktop-bridge.ts'
 
 async function listen(server) {
@@ -73,7 +73,7 @@ test('shared client observes turns, forks history, and defers queued messages', 
   ]
   const startCodex = () => spawnCodex(codexArgs, codexSpawnOptions)
   let codex = startCodex()
-  let bridge, ws, agent
+  let bridge, ws, agent, mirrorHttp, mirrorWss, mirrorClient
   try {
     await waitFor(async () => {
       const child = process.platform === 'win32'
@@ -116,8 +116,22 @@ test('shared client observes turns, forks history, and defers queued messages', 
     const { thread } = await rpc('thread/start', { cwd: home, approvalPolicy: 'never' })
     const { turn } = await rpc('turn/start', { threadId: thread.id, input: [{ type: 'text', text: 'test', text_elements: [] }] })
     await waitFor(() => response)
+    mirrorHttp = createServer()
+    mirrorWss = new WebSocketServer({ noServer: true })
+    mirrorHttp.on('upgrade', (request, socket, head) => mirrorWss.handleUpgrade(request, socket, head, client => mirrorWss.emit('connection', client, request)))
+    const mirrorPort = await listen(mirrorHttp)
+    let mirroredAnswer
+    mirrorWss.on('connection', client => {
+      mirrorClient = client
+      client.on('message', raw => {
+        const message = JSON.parse(raw.toString())
+        if (message.type !== 'response') return
+        mirroredAnswer = message
+        client.send(JSON.stringify({ type: 'responseForwarded', clientId: message.clientId, requestId: message.requestId }))
+      })
+    })
     agent = spawn(process.execPath, ['--import', 'tsx', 'server/index.ts'], {
-      env: { ...process.env, CODEX_HOME: home, RMDEX_CODEX_MODE: 'shared', RMDEX_CODEX_SOCKET: socket, RMDEX_AGENT_PORT: String(agentPort), RMDEX_RELAY_URL: '', RMDEX_DEVICE_TOKEN: '' },
+      env: { ...process.env, CODEX_HOME: home, RMDEX_CODEX_MODE: 'shared', RMDEX_CODEX_SOCKET: socket, RMDEX_AGENT_PORT: String(agentPort), RMDEX_RELAY_URL: '', RMDEX_DEVICE_TOKEN: '', RMDEX_DESKTOP_MIRROR_URL: `ws://127.0.0.1:${mirrorPort}/test-token` },
       stdio: 'ignore', windowsHide: true,
     })
     const health = await waitFor(async () => {
@@ -125,6 +139,7 @@ test('shared client observes turns, forks history, and defers queued messages', 
       return result.ok ? result.json() : null
     })
     assert.equal(health.state, 'ready')
+    await waitFor(() => mirrorClient)
     const read = async () => {
       const result = await fetch(`http://127.0.0.1:${agentPort}/api/threads/${thread.id}`)
       const body = await result.json()
@@ -140,6 +155,28 @@ test('shared client observes turns, forks history, and defers queued messages', 
     const status = await fetch(`http://127.0.0.1:${agentPort}/api/threads/${thread.id}/status`)
     assert.equal(status.status, 200)
     assert.equal((await status.json()).activeTurnId, turn.id)
+    const question = {
+      id: 77,
+      method: 'item/tool/requestUserInput',
+      params: { threadId: thread.id, turnId: turn.id, itemId: 'question-item', questions: [{ id: 'choice', header: 'Choice', question: 'Continue?', options: [{ label: 'Yes', description: 'Continue the task' }] }], isBlocking: true },
+    }
+    mirrorClient.send(JSON.stringify({ type: 'request', clientId: 'desktop-test-client', requestId: '77', request: question }))
+    const pendingQuestion = await waitFor(async () => {
+      const result = await fetch(`http://127.0.0.1:${agentPort}/api/threads/${thread.id}/status`).then(response => response.json())
+      return result.userInputs?.length ? result : null
+    })
+    assert.deepEqual(pendingQuestion.userInputs[0].params.questions, question.params.questions)
+    const answer = await fetch(`http://127.0.0.1:${agentPort}/api/user-input/desktop-desktop-test-client-77`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'http://localhost:5173' },
+      body: JSON.stringify({ answers: { choice: { answers: ['Yes'] } } }),
+    })
+    assert.equal(answer.status, 200, await answer.text())
+    assert.deepEqual(mirroredAnswer.result, { answers: { choice: { answers: ['Yes'] } } })
+    mirrorClient.send(JSON.stringify({ type: 'resolved', clientId: 'desktop-test-client', requestId: '77' }))
+    await waitFor(async () => {
+      const result = await fetch(`http://127.0.0.1:${agentPort}/api/threads/${thread.id}/status`).then(response => response.json())
+      return result.userInputs?.length === 0
+    })
     const incremental = await fetch(`http://127.0.0.1:${agentPort}/api/threads/${thread.id}/incremental`)
     assert.equal(incremental.status, 200)
     assert.ok(Array.isArray((await incremental.json()).thread.turns))
@@ -256,9 +293,13 @@ test('shared client observes turns, forks history, and defers queued messages', 
     })
   } finally {
     ws?.terminate()
+    mirrorClient?.terminate()
     bridge?.close()
     await stopChild(agent)
     await stopChild(codex)
+    mirrorWss?.close()
+    mirrorHttp?.closeAllConnections()
+    if (mirrorHttp?.listening) await new Promise(resolve => mirrorHttp.close(resolve))
     response?.destroy()
     model.closeAllConnections()
     await new Promise(resolve => model.close(resolve))

@@ -32,12 +32,14 @@ const json = (data: unknown, token?: string): RequestInit => ({ method: 'POST', 
 let ws: WebSocket | undefined
 let agent: ReturnType<typeof spawn> | undefined
 let forwardedBody: Record<string, unknown> | undefined
+let forwardedPath: string | undefined
 let holdNotificationWatcher = false
 let missedCompletion = false
 let persistedCompletion = false
 let historyReads = 0
 let fullReads = 0
 const fakeAgent = createServer(async (req, res) => {
+  forwardedPath = req.url || ''
   if (req.url?.startsWith('/api/images/')) { res.setHeader('Content-Type', 'image/png'); res.end(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])); return }
   if (req.url === '/api/threads/local-agent-test/artifacts/artifact-test/content') {
     const bytes = Buffer.from([0, 65, 255, 10, 13, 0, 254])
@@ -235,6 +237,14 @@ try {
   const models = await request('/api/models', { headers: headers2 })
   assert.equal(models.status, 200)
   assert.equal(models.data.data[0].id, 'dynamic-model')
+  const questionStatus = await request('/api/threads/local-agent-test/status', { headers: headers2 })
+  assert.equal(questionStatus.status, 200)
+  assert.equal(questionStatus.data.path, '/api/threads/local-agent-test/status')
+  const questionAnswer = { answers: { choice: { answers: ['Continue'] } } }
+  const forwardedAnswer = await request('/api/user-input/desktop-client-77', json(questionAnswer, client2))
+  assert.equal(forwardedAnswer.status, 200)
+  assert.equal(forwardedPath, '/api/user-input/desktop-client-77')
+  assert.deepEqual(forwardedBody, questionAnswer)
   const projects = await request('/api/projects', { headers: headers2 })
   assert.equal(projects.status, 200)
   assert.equal(projects.data.path, '/api/projects')
