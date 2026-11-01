@@ -374,6 +374,20 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .approval pre { max-height: 150px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.5 Consolas, monospace; }
 .approval-actions { display: flex; gap: 8px; justify-content: flex-end; }
 .approval-actions button { padding: 6px 10px; border: 1px solid #d4dde6; border-radius: 5px; background: white; color: #344252; }
+.user-input-request { margin-bottom: 10px; padding: 12px; border: 1px solid #b9d4f2; border-radius: 6px; background: #f7fbff; color: #263545; }
+.user-input-question + .user-input-question { margin-top: 14px; padding-top: 14px; border-top: 1px solid #dce8f4; }
+.user-input-header, .user-input-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.user-input-header span { color: #718398; font-size: 11px; }
+.user-input-question p { margin: 7px 0 9px; font-size: 13px; }
+.user-input-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 7px; }
+.user-input-options button { min-height: 48px; padding: 8px 10px; text-align: left; border: 1px solid #d4e0ec; border-radius: 5px; background: #fff; color: inherit; }
+.user-input-options button.selected { border-color: #4b8ed8; background: #eaf3ff; }
+.user-input-options small { display: block; margin-top: 3px; color: #718398; font-size: 11px; }
+.user-input-other { width: 100%; margin-top: 8px; padding: 7px; border: 1px solid #d4e0ec; border-radius: 5px; resize: vertical; background: #fff; color: inherit; }
+:root[data-theme='dark'] .user-input-request { border-color: #315b80; background: #1b2a3a; color: #e5edf5; }
+:root[data-theme='dark'] .user-input-question + .user-input-question { border-color: #2c4055; }
+:root[data-theme='dark'] .user-input-options button, :root[data-theme='dark'] .user-input-other { border-color: #3a536c; background: #223447; color: #e5edf5; }
+:root[data-theme='dark'] .user-input-options button.selected { border-color: #5d9de0; background: #24486b; }
 .error { display: flex; align-items: center; gap: 8px; margin: 18px 28px 0; padding: 12px; border-radius: 6px; background: #fff3f1; color: #a25249; font-size: 13px; }
 .error span { overflow-wrap: anywhere; }
 .error button { margin-left: auto; border: 0; background: transparent; color: inherit; }

@@ -65,6 +65,12 @@ type LiveTurn = { id: string; status: string; items: Map<string, LiveItem>; erro
 const liveTurns = new Map<string, LiveTurn>()
 const statusRefreshes = new Map<string, { expiresAt: number; request: Promise<void> }>()
 const approvals = new Map<string, { id: string | number; method: string; params: Record<string, unknown> }>()
+type UserInputQuestion = { header: string; id: string; question: string; options?: Array<{ label: string; description: string }> | null; isOther?: boolean; isSecret?: boolean }
+type UserInputRequest = { id: string | number; method: string; params: { threadId: string; turnId: string; itemId: string; questions: UserInputQuestion[]; isBlocking: boolean } }
+const userInputs = new Map<string, UserInputRequest>()
+function pendingUserInputs(threadId: string) {
+  return [...userInputs.entries()].filter(([, request]) => request.params.threadId === threadId).map(([id, request]) => ({ id, method: request.method, params: request.params }))
+}
 const sending = new Set<string>()
 const newThreads = new Map<string, Record<string, unknown>>()
 const subscriptions = new Map<string, Promise<void>>()
@@ -73,6 +79,7 @@ function clearThreadRuntime(threadId: string) {
   activeTurns.delete(threadId)
   liveTurns.delete(threadId)
   for (const [key, request] of approvals) if (request.params.threadId === threadId) approvals.delete(key)
+  for (const [key, request] of userInputs) if (request.params.threadId === threadId) userInputs.delete(key)
   threadListCache = undefined
 }
 type PermissionMode = 'ask' | 'auto' | 'full'
@@ -199,6 +206,8 @@ function handleMessage(line: string) {
     if (message.method && message.id !== undefined) {
       if (['item/commandExecution/requestApproval', 'item/fileChange/requestApproval'].includes(message.method)) {
         approvals.set(String(message.id), { id: message.id, method: message.method, params: message.params || {} })
+      } else if (message.method === 'item/tool/requestUserInput' && message.params?.threadId && Array.isArray(message.params?.questions)) {
+        userInputs.set(String(message.id), { id: message.id, method: message.method, params: message.params })
       } else if (!sharedMode) {
         sendMessage({ id: message.id, error: { code: -32601, message: 'This client does not support this request' } })
       } else {
@@ -235,7 +244,7 @@ function handleMessage(line: string) {
       else if (!activeTurns.has(threadId)) liveTurns.set(threadId, { id: turn.id, status: turn.status, error: turn.error, items: new Map((turn.items || []).map((item: LiveItem) => [item.id, item])) })
       if (!activeTurns.has(threadId)) for (const [key, request] of approvals) if (request.params.threadId === threadId) approvals.delete(key)
     }
-    if (message.method === 'serverRequest/resolved') approvals.delete(String(message.params?.requestId))
+    if (message.method === 'serverRequest/resolved') { approvals.delete(String(message.params?.requestId)); userInputs.delete(String(message.params?.requestId)) }
     if (message.method === 'thread/reverted' && message.params?.threadId) clearThreadRuntime(message.params.threadId)
     if (typeof message.id !== 'number' || !pending.has(message.id)) return
     const request = pending.get(message.id)!
@@ -387,7 +396,7 @@ function subscribeToThread(threadId: string) {
 async function ensureReady() {
   if (sharedMode) return ensureSharedConnected()
   if (!standaloneReady) {
-    standaloneReady = rpc('initialize').then(() => { sendMessage({ method: 'initialized', params: {} }) })
+    standaloneReady = rpc('initialize', { clientInfo: { name: 'rmdex', version: '0.3.3' }, capabilities: { experimentalApi: true } }).then(() => { sendMessage({ method: 'initialized', params: {} }) })
   }
   return standaloneReady
 }
@@ -456,6 +465,7 @@ const server = createServer(async (req, res) => {
       const queueDeleteMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/queue\/([^/]+)$/)
       const queueSteerMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/queue\/([^/]+)\/steer$/)
       const approvalMatch = url.pathname.match(/^\/api\/approvals\/([a-zA-Z0-9-]+)$/)
+      const userInputMatch = url.pathname.match(/^\/api\/user-input\/([a-zA-Z0-9-]+)$/)
       const projectUpdateMatch = url.pathname.match(/^\/api\/projects\/([a-zA-Z0-9-]+)\/update$/)
       const projectDeleteMatch = url.pathname.match(/^\/api\/projects\/([a-zA-Z0-9-]+)\/delete$/)
       if (url.pathname === '/api/attachments') {
@@ -586,7 +596,7 @@ const server = createServer(async (req, res) => {
         if (read.thread) read.thread = applyThreadName(read.thread)
         registerImages(result)
         const live = liveTurns.get(threadId)
-        result = { ...(result as object), activeTurnId: activeTurns.get(threadId) || null, lastTurn: live ? { id: live.id, status: live.status, error: live.error } : null, approvals: [...approvals.entries()].filter(([, request]) => request.params.threadId === threadId).map(([id, request]) => ({ id, method: request.method, params: request.params })) }
+        result = { ...(result as object), activeTurnId: activeTurns.get(threadId) || null, lastTurn: live ? { id: live.id, status: live.status, error: live.error } : null, approvals: [...approvals.entries()].filter(([, request]) => request.params.threadId === threadId).map(([id, request]) => ({ id, method: request.method, params: request.params })), userInputs: pendingUserInputs(threadId) }
       } else if (retryMatch) {
         const threadId = retryMatch[1]!
         const options = await turnOptions(data)
@@ -654,6 +664,18 @@ const server = createServer(async (req, res) => {
         approvals.delete(approvalMatch[1]!)
         sendMessage({ id: request.id, result: { decision: data.decision } })
         result = { ok: true }
+      } else if (userInputMatch) {
+        const request = userInputs.get(userInputMatch[1]!)
+        if (!request || !data.answers || typeof data.answers !== 'object') throw new Error('问题已失效')
+        const answers: Record<string, { answers: string[] }> = {}
+        for (const question of request.params.questions) {
+          const answer = data.answers[question.id]
+          if (!answer || !Array.isArray(answer.answers) || answer.answers.some((value: unknown) => typeof value !== 'string')) throw new Error('问题答案格式无效')
+          answers[question.id] = { answers: answer.answers }
+        }
+        userInputs.delete(userInputMatch[1]!)
+        sendMessage({ id: request.id, result: { answers } })
+        result = { ok: true }
       } else { res.writeHead(404).end(JSON.stringify({ error: 'Not found' })); return }
     } else if (url.pathname === '/api/settings') {
       result = { permissionMode: defaultPermissionMode, mode: sharedMode ? 'shared' : 'standalone' }
@@ -695,7 +717,7 @@ const server = createServer(async (req, res) => {
       const page = await listThreadTurns(threadId)
       const base = newThreads.get(threadId) || { id: threadId, name: threadNames[threadId] || null }
       const live = liveTurns.get(threadId)
-      result = { thread: { ...applyThreadName(base), turns: page.turns }, page: page.page, activeTurnId: activeTurns.get(threadId) || null, lastTurn: live ? { id: live.id, status: live.status, error: live.error } : null, approvals: [...approvals.entries()].filter(([, request]) => request.params.threadId === threadId).map(([id, request]) => ({ id, method: request.method, params: request.params })) }
+      result = { thread: { ...applyThreadName(base), turns: page.turns }, page: page.page, activeTurnId: activeTurns.get(threadId) || null, lastTurn: live ? { id: live.id, status: live.status, error: live.error } : null, approvals: [...approvals.entries()].filter(([, request]) => request.params.threadId === threadId).map(([id, request]) => ({ id, method: request.method, params: request.params })), userInputs: pendingUserInputs(threadId) }
       registerImages(result)
     } else if (/^\/api\/threads\/[a-zA-Z0-9-]+\/status$/.test(url.pathname)) {
       const threadId = url.pathname.split('/')[3]!
@@ -707,6 +729,7 @@ const server = createServer(async (req, res) => {
         approvals: [...approvals.entries()]
           .filter(([, request]) => request.params.threadId === threadId)
           .map(([id, request]) => ({ id, method: request.method, params: request.params })),
+        userInputs: [...userInputs.entries()].filter(([, request]) => request.params.threadId === threadId).map(([id, request]) => ({ id, method: request.method, params: request.params })),
         lastTurn: live ? { id: live.id, status: live.status, error: live.error } : null,
         live: live ? { turnId: live.id, status: live.status, error: live.error, sentText: live.sentText, items: [...live.items.values()] } : null,
       }
@@ -751,7 +774,7 @@ const server = createServer(async (req, res) => {
         }
       }
       registerImages(result)
-      result = { ...(result as object), activeTurnId: activeTurns.get(threadId!) || null, lastTurn: live ? { id: live.id, status: live.status, error: live.error } : null, approvals: [...approvals.entries()].filter(([, request]) => request.params.threadId === threadId).map(([id, request]) => ({ id, method: request.method, params: request.params })) }
+      result = { ...(result as object), activeTurnId: activeTurns.get(threadId!) || null, lastTurn: live ? { id: live.id, status: live.status, error: live.error } : null, approvals: [...approvals.entries()].filter(([, request]) => request.params.threadId === threadId).map(([id, request]) => ({ id, method: request.method, params: request.params })), userInputs: pendingUserInputs(threadId!) }
     } else if (/^\/api\/images\/[a-f0-9-]+$/.test(url.pathname)) {
       const path = images.get(url.pathname.split('/').pop()!)
       if (!path) { res.writeHead(404).end(JSON.stringify({ error: 'Image not found' })); return }

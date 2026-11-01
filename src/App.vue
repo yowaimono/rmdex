@@ -214,6 +214,11 @@ const desktopDefaultModel = '__rmdex_desktop_default__'
 const lastTurn = ref<{ id?: string; status: string; error?: { message?: string } } | null>(null)
 type Approval = { id: string; method: string; params: { command?: string; reason?: string; cwd?: string; grantRoot?: string } }
 const pendingApprovals = ref<Approval[]>([])
+type UserInput = { id: string; method: string; params: { threadId: string; turnId: string; itemId: string; questions: Array<{ header: string; id: string; question: string; options?: Array<{ label: string; description: string }> | null; isOther?: boolean; isSecret?: boolean }>; isBlocking: boolean } }
+const pendingUserInputs = ref<UserInput[]>([])
+const userInputAnswers = ref<Record<string, Record<string, string>>>({})
+const userInputOther = ref<Record<string, string>>({})
+const answeringUserInput = ref<string | null>(null)
 let poll: ReturnType<typeof setInterval> | undefined
 let pollBusy = false
 let threadStatusPollBusy = false
@@ -227,11 +232,12 @@ const trackedTasks = new Map<string, { turnId: string; text: string; name: strin
 const cacheHydratedKeys = new Set<string>()
 const threadListCache = new Map<string, { savedAt: number; data: Thread[] }>()
 const threadListRequests = new Map<string, Promise<Thread[]>>()
-type ReadResult = { thread: Thread; activeTurnId: string | null; approvals: Approval[]; lastTurn?: { id?: string; status: string; error?: { message?: string } } | null; page?: { hasMore: boolean; nextCursor: string | null } }
+type ReadResult = { thread: Thread; activeTurnId: string | null; approvals: Approval[]; userInputs?: UserInput[]; lastTurn?: { id?: string; status: string; error?: { message?: string } } | null; page?: { hasMore: boolean; nextCursor: string | null } }
 type ThreadStatus = {
   threadId: string
   activeTurnId: string | null
   approvals: Approval[]
+  userInputs?: UserInput[]
   lastTurn?: { id?: string; status: string; error?: { message?: string } } | null
   live?: { turnId: string; status: string; error?: { message?: string }; sentText?: string; items: Turn['items'] } | null
 }
@@ -517,6 +523,7 @@ function mergeThreadStatus(result: ThreadStatus) {
   selected.value.turns = normalizeTurns(selected.value.turns)
   activeTurnId.value = result.activeTurnId
   pendingApprovals.value = result.approvals || []
+  pendingUserInputs.value = result.userInputs || []
   lastTurn.value = result.lastTurn || null
   if (result.activeTurnId) threadIndicators.value[result.threadId] = 'working'
   else if (result.lastTurn?.status && ['completed', 'interrupted', 'failed', 'error'].includes(result.lastTurn.status)) threadIndicators.value[result.threadId] = ['failed', 'error'].includes(result.lastTurn.status) ? 'failed' : 'completed'
@@ -529,7 +536,7 @@ function applyRead(result: ReadResult) {
     result.thread.turns = [...new Map([...(selected.value.turns || []), ...(result.thread.turns || [])].map(turn => [turn.id, turn])).values()]
     result.thread.turns = normalizeTurns(result.thread.turns)
   }
-  selected.value = result.thread; activeTurnId.value = result.activeTurnId; pendingApprovals.value = result.approvals || []; lastTurn.value = result.lastTurn || null
+  selected.value = result.thread; activeTurnId.value = result.activeTurnId; pendingApprovals.value = result.approvals || []; pendingUserInputs.value = result.userInputs || []; lastTurn.value = result.lastTurn || null
   if (result.activeTurnId) threadIndicators.value[result.thread.id] = 'working'
   else if (result.lastTurn?.status && ['completed', 'interrupted', 'failed', 'error'].includes(result.lastTurn.status)) threadIndicators.value[result.thread.id] = ['failed', 'error'].includes(result.lastTurn.status) ? 'failed' : 'completed'
   for (const turn of result.thread.turns || []) for (const item of turn.items || []) {
@@ -2005,6 +2012,27 @@ async function decide(approval: Approval, decision: 'accept' | 'decline') {
   try { await post(`/api/approvals/${approval.id}`, { decision }); pendingApprovals.value = pendingApprovals.value.filter(item => item.id !== approval.id) }
   catch (e) { error.value = e instanceof Error ? e.message : String(e) }
 }
+function chooseUserInput(requestId: string, questionId: string, value: string) {
+  const answers = userInputAnswers.value[requestId] || (userInputAnswers.value[requestId] = {})
+  answers[questionId] = value
+}
+function chosenUserInput(requestId: string, questionId: string) { return userInputAnswers.value[requestId]?.[questionId] || '' }
+async function answerUserInput(request: UserInput, skip = false) {
+  if (answeringUserInput.value) return
+  const answers: Record<string, { answers: string[] }> = {}
+  for (const question of request.params.questions) {
+    const choice = chosenUserInput(request.id, question.id)
+    const other = userInputOther.value[`${request.id}:${question.id}`] || ''
+    answers[question.id] = { answers: skip ? [] : [choice === '__other__' ? other : choice].filter(Boolean) }
+  }
+  answeringUserInput.value = request.id
+  try {
+    await post(`/api/user-input/${request.id}`, { answers })
+    pendingUserInputs.value = pendingUserInputs.value.filter(item => item.id !== request.id)
+    delete userInputAnswers.value[request.id]
+  } catch (e) { error.value = e instanceof Error ? e.message : String(e) }
+  finally { answeringUserInput.value = null }
+}
 function date(value?: number) { return value ? new Date(value * 1000).toLocaleDateString() : '' }
 async function handleAppUrl(rawUrl: string) {
   const url = new URL(rawUrl)
@@ -2216,6 +2244,7 @@ onUnmounted(() => { themeMediaQuery?.removeEventListener('change', handleSystemT
       <div v-if="selected && !threadLoading && !threadLoadError" class="compose-area">
         <section v-if="queuedSubmissions.length" class="queued-followups" aria-label="排队任务"><div class="queued-followups-heading"><span>排队中</span><span class="queued-count">{{ queuedSubmissions.length }}</span></div><div v-for="item in queuedSubmissions" :key="item.id" class="queued-followup"><CornerDownRight :size="15" class="queued-followup-icon" /><span class="queued-followup-text">{{ queuedText(item) }}</span><div class="queued-followup-actions"><button v-if="!isColleagueQueued(item)" type="button" class="queue-steer-button" :disabled="!!queueActionId || !activeTurnId" @click="steerQueued(item)"><CornerDownRight :size="14" />Steer</button><button type="button" class="queue-icon-button" title="删除排队任务" aria-label="删除排队任务" :disabled="!!queueActionId" @click="deleteQueued(item)"><Trash2 :size="15" /></button><button v-if="!isColleagueQueued(item)" type="button" class="queue-icon-button" title="更多操作" aria-label="更多操作" :disabled="!!queueActionId" @click="queueMenuId = queueMenuId === item.id ? null : item.id"><Ellipsis :size="16" /></button></div><div v-if="queueMenuId === item.id && !isColleagueQueued(item)" class="queued-followup-menu"><button type="button" :disabled="!!queueActionId" @click="editQueued(item)"><Pencil :size="14" />编辑消息</button></div></div></section>
         <p v-if="desktopMode" class="desktop-hint">{{ capabilities.models ? '模型与推理强度可在右侧选择；权限、审批和暂停请在 Desktop 处理。' : '当前设备未提供可识别的模型目录；模型、权限、审批和暂停请在 Desktop 处理。' }}</p><div v-for="approval in (capabilities.approvals ? pendingApprovals : [])" :key="approval.id" class="approval"><strong>{{ approval.method.includes('commandExecution') ? '命令执行需要确认' : '文件修改需要确认' }}</strong><p v-if="approval.params.reason">{{ approval.params.reason }}</p><pre v-if="approval.params.command">{{ approval.params.command }}</pre><p v-if="approval.params.cwd">工作目录：{{ approval.params.cwd }}</p><p v-if="approval.params.grantRoot">授权目录：{{ approval.params.grantRoot }}</p><details><summary>完整请求信息</summary><pre>{{ JSON.stringify(approval.params, null, 2) }}</pre></details><p v-if="approval.method.includes('fileChange')">请先在上方工具调用中查看文件变更，再决定是否允许。</p><div class="approval-actions"><button @click="decide(approval, 'decline')">拒绝</button><button @click="decide(approval, 'accept')">允许本次</button></div></div>
+        <section v-for="request in pendingUserInputs" :key="request.id" class="user-input-request" aria-live="polite"><div v-for="question in request.params.questions" :key="question.id" class="user-input-question"><div class="user-input-header"><strong>{{ question.header }}</strong><span>{{ question.isSecret ? '敏感信息' : '需要你的选择' }}</span></div><p>{{ question.question }}</p><div v-if="question.options?.length" class="user-input-options"><button v-for="option in question.options" :key="option.label" type="button" :class="{ selected: chosenUserInput(request.id, question.id) === option.label }" @click="chooseUserInput(request.id, question.id, option.label)"><strong>{{ option.label }}</strong><small>{{ option.description }}</small></button><button v-if="question.isOther" type="button" :class="{ selected: chosenUserInput(request.id, question.id) === '__other__' }" @click="chooseUserInput(request.id, question.id, '__other__')"><strong>其他</strong><small>输入自定义回答</small></button></div><textarea v-if="question.isOther && chosenUserInput(request.id, question.id) === '__other__'" v-model="userInputOther[`${request.id}:${question.id}`]" class="user-input-other" rows="2" :placeholder="question.isSecret ? '输入敏感回答' : '输入你的回答'"></textarea></div><div class="user-input-actions"><button type="button" class="cancel-button" :disabled="answeringUserInput === request.id" @click="answerUserInput(request, true)">跳过</button><button type="button" class="create-button" :disabled="answeringUserInput === request.id" @click="answerUserInput(request)">{{ answeringUserInput === request.id ? '提交中…' : '提交回答' }}</button></div></section>
         <form class="composer" @submit.prevent="send()">
           <div v-if="selectedAttachments.length" class="composer-attachments" aria-label="待发送附件">
             <div v-for="(file, index) in selectedAttachments" :key="`${file.name}-${file.lastModified}-${index}`" class="composer-attachment">
