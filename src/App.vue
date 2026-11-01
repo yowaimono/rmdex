@@ -5,7 +5,7 @@ import { App as NativeApp } from '@capacitor/app'
 import { LocalNotifications } from '@capacitor/local-notifications'
 import { CapacitorBarcodeScanner, CapacitorBarcodeScannerTypeHint } from '@capacitor/barcode-scanner'
 import MarkdownIt from 'markdown-it'
-import { Archive, ArrowLeft, ArrowUp, Bot, ChevronDown, ChevronRight, CircleAlert, CircleCheck, CornerDownRight, Ellipsis, ExternalLink, Eye, EyeOff, Folder, FolderPlus, GitFork, LoaderCircle, LogOut, Menu, MessageSquare, Monitor, PanelLeftClose, Paperclip, Pencil, Pin, Plus, RefreshCw, RotateCcw, Search, Square, Users, Wrench, X, QrCode, Copy, Smartphone, Trash2, ShieldAlert } from 'lucide-vue-next'
+import { Archive, ArrowLeft, ArrowUp, Bot, ChevronDown, ChevronRight, CircleAlert, CircleCheck, CornerDownRight, Ellipsis, ExternalLink, Eye, EyeOff, Folder, FolderPlus, GitFork, LoaderCircle, LogOut, Menu, MessageSquare, Monitor, MonitorCog, Moon, PanelLeftClose, Paperclip, Pencil, Pin, Plus, RefreshCw, RotateCcw, Search, Settings, ShieldAlert, Smartphone, Square, Sun, Trash2, Users, Wrench, X, QrCode, Copy } from 'lucide-vue-next'
 import QRCode from 'qrcode'
 import logoUrl from './assets/rmdex-logo.jpg'
 import ToolEvent from './components/ToolEvent.vue'
@@ -63,7 +63,26 @@ const pcDeviceName = ref(props.pcDeviceName || 'Codex 电脑')
 const loginError = ref('')
 const loginLoading = ref(false)
 const authReady = ref(false)
-const activePage = ref<'workspace' | 'users'>('workspace')
+const activePage = ref<'workspace' | 'users' | 'settings'>('workspace')
+type ThemePreference = 'system' | 'light' | 'dark'
+const themePreference = ref<ThemePreference>((localStorage.getItem('rmdex-theme-preference') as ThemePreference | null) || 'system')
+const themeMediaQuery = typeof window !== 'undefined' ? window.matchMedia('(prefers-color-scheme: dark)') : null
+const systemThemeDark = ref(themeMediaQuery?.matches ?? false)
+const effectiveTheme = computed(() => themePreference.value === 'system' ? (systemThemeDark.value ? 'dark' : 'light') : themePreference.value)
+function applyTheme() {
+  document.documentElement.dataset.theme = effectiveTheme.value
+  document.documentElement.style.colorScheme = effectiveTheme.value
+}
+function setThemePreference(value: ThemePreference) {
+  themePreference.value = value
+  localStorage.setItem('rmdex-theme-preference', value)
+  applyTheme()
+}
+function handleSystemThemeChange(event: MediaQueryListEvent) {
+  systemThemeDark.value = event.matches
+  if (themePreference.value === 'system') applyTheme()
+}
+applyTheme()
 const showCreateUser = ref(false)
 const creatingUser = ref(false)
 const showUserPassword = ref(false)
@@ -2005,6 +2024,7 @@ async function handleAppUrl(rawUrl: string) {
   if (thread) await openThread(thread)
 }
 onMounted(async () => {
+  themeMediaQuery?.addEventListener('change', handleSystemThemeChange)
   removeInAppLinks = installInAppLinks(message => { error.value = message })
   window.addEventListener('keydown', handlePreviewKey)
   const desktopOpenThreadId = new URLSearchParams(location.search).get('openThread')?.trim() || ''
@@ -2042,7 +2062,7 @@ onMounted(async () => {
   authReady.value = true
   poll = setInterval(() => { void updateThread(); void refreshThreadIndicators(); if (adminToken.value && showDevices.value) void loadDevices() }, 2000)
 })
-onUnmounted(() => { removeInAppLinks?.(); window.removeEventListener('keydown', handlePreviewKey); if (poll) clearInterval(poll); clearThreadLongPress(); void appUrlListener?.remove(); void appStateListener?.remove(); void notificationListener?.remove() })
+onUnmounted(() => { themeMediaQuery?.removeEventListener('change', handleSystemThemeChange); removeInAppLinks?.(); window.removeEventListener('keydown', handlePreviewKey); if (poll) clearInterval(poll); clearThreadLongPress(); void appUrlListener?.remove(); void appStateListener?.remove(); void notificationListener?.remove() })
 </script>
 
 <template>
@@ -2067,8 +2087,26 @@ onUnmounted(() => { removeInAppLinks?.(); window.removeEventListener('keydown', 
       <p class="auth-help">{{ props.pcLogin ? '登录后会自动注册这台电脑并启动本地服务。' : '账号由系统管理员创建。如无法登录，请联系管理员。' }}</p>
     </section>
   </main>
+  <main v-else-if="activePage === 'settings'" class="settings-page">
+    <header class="settings-topbar"><button class="admin-brand" type="button" @click="activePage = 'workspace'"><img :src="logoUrl" alt="" /><span>rmdex</span></button><button class="admin-nav-button" type="button" @click="activePage = 'workspace'"><ArrowLeft :size="16" />返回工作区</button></header>
+    <section class="settings-content" aria-labelledby="settings-title">
+      <div class="settings-heading"><p class="eyebrow">偏好设置</p><h1 id="settings-title">设置</h1><p>调整界面外观和账号操作。</p></div>
+      <section class="settings-card" aria-labelledby="appearance-title">
+        <div class="settings-card-heading"><span class="settings-card-icon"><MonitorCog :size="18" /></span><div><h2 id="appearance-title">外观</h2><p>默认跟随系统，也可以手动固定亮色或暗色。</p></div></div>
+        <div class="theme-options" role="radiogroup" aria-label="主题模式">
+          <button type="button" class="theme-option" :class="{ selected: themePreference === 'system' }" role="radio" :aria-checked="themePreference === 'system'" @click="setThemePreference('system')"><span class="theme-option-icon"><MonitorCog :size="17" /></span><span><strong>跟随系统</strong><small>当前系统：{{ systemThemeDark ? '暗色' : '亮色' }}</small></span><CircleCheck v-if="themePreference === 'system'" :size="17" class="theme-check" /></button>
+          <button type="button" class="theme-option" :class="{ selected: themePreference === 'light' }" role="radio" :aria-checked="themePreference === 'light'" @click="setThemePreference('light')"><span class="theme-option-icon"><Sun :size="17" /></span><span><strong>亮色</strong><small>使用明亮的界面配色</small></span><CircleCheck v-if="themePreference === 'light'" :size="17" class="theme-check" /></button>
+          <button type="button" class="theme-option" :class="{ selected: themePreference === 'dark' }" role="radio" :aria-checked="themePreference === 'dark'" @click="setThemePreference('dark')"><span class="theme-option-icon"><Moon :size="17" /></span><span><strong>暗色</strong><small>降低夜间使用时的亮度</small></span><CircleCheck v-if="themePreference === 'dark'" :size="17" class="theme-check" /></button>
+        </div>
+      </section>
+      <section class="settings-card settings-account-card" aria-labelledby="account-title">
+        <div class="settings-card-heading"><span class="settings-card-icon"><Users :size="18" /></span><div><h2 id="account-title">账号</h2><p>退出后需要重新登录才能访问工作区。</p></div></div>
+        <button class="settings-logout-button" type="button" @click="logout"><LogOut :size="16" />退出登录</button>
+      </section>
+    </section>
+  </main>
   <main v-else-if="activePage === 'users' && isPlatformAdmin" class="admin-page">
-    <header class="admin-topbar"><button class="admin-brand" type="button" @click="activePage = 'workspace'"><img :src="logoUrl" alt="" /><span>rmdex</span></button><div class="admin-top-actions"><button class="admin-nav-button" type="button" @click="activePage = 'workspace'"><ArrowLeft :size="16" />工作区</button><button class="admin-icon-button" type="button" title="退出登录" aria-label="退出登录" @click="logout"><LogOut :size="17" /></button></div></header>
+    <header class="admin-topbar"><button class="admin-brand" type="button" @click="activePage = 'workspace'"><img :src="logoUrl" alt="" /><span>rmdex</span></button><div class="admin-top-actions"><button class="admin-nav-button" type="button" @click="activePage = 'workspace'"><ArrowLeft :size="16" />工作区</button><button class="admin-icon-button" type="button" title="设置" aria-label="设置" @click="activePage = 'settings'"><Settings :size="17" /></button></div></header>
     <section class="users-page-content" aria-labelledby="users-title">
       <div class="users-heading"><div><p class="eyebrow">账号与访问</p><h1 id="users-title">用户管理</h1><p>创建账号并管理每位用户的 Codex 设备。</p></div><button class="auth-submit users-create-button" type="button" @click="openUserCreate"><Plus :size="17" />创建用户</button></div>
       <div class="users-table-wrap"><table class="users-table"><thead><tr><th>用户</th><th>设备</th><th>在线设备</th><th>账号类型</th></tr></thead><tbody><tr v-for="user in users" :key="user.id"><td><strong>{{ user.username }}</strong><small>{{ user.id }}</small></td><td>{{ user.deviceCount ?? 0 }}</td><td>{{ onlineDeviceCounts[user.id] ?? 0 }}</td><td><span class="role-label">{{ user.role === 'admin' ? '管理员' : '用户' }}</span></td></tr><tr v-if="!users.length"><td colspan="4" class="users-empty">暂无用户</td></tr></tbody></table></div>
@@ -2142,7 +2180,7 @@ onUnmounted(() => { removeInAppLinks?.(); window.removeEventListener('keydown', 
          <div v-if="!filtered.length && !projects.length && !loading" class="empty-list">{{ showArchivedThreads ? '暂无已归档会话' : '暂无会话或 Project' }}</div>
       </div>
       </div>
-      <footer class="side-footer"><span class="online" :class="{ offline: !connected }"></span> {{ remoteMode ? '远程设备' : '本机模式' }} <span class="footer-label">{{ connected ? '已连接' : '未连接' }}</span><span class="side-account-actions"><button v-if="isPlatformAdmin" type="button" @click="activePage = 'users'" title="用户管理"><Users :size="15" /><span>用户</span></button><button v-if="adminToken" type="button" @click="logout" title="退出登录"><LogOut :size="15" /><span>退出</span></button></span></footer>
+      <footer class="side-footer"><span class="online" :class="{ offline: !connected }"></span> {{ remoteMode ? '远程设备' : '本机模式' }} <span class="footer-label">{{ connected ? '已连接' : '未连接' }}</span><span class="side-account-actions"><button v-if="isPlatformAdmin" type="button" @click="activePage = 'users'" title="用户管理"><Users :size="15" /><span>用户</span></button><button v-if="adminToken || clientToken" type="button" @click="activePage = 'settings'" title="设置"><Settings :size="15" /><span>设置</span></button></span></footer>
     </aside>
     <SidebarResize v-if="sidebarOpen" v-model="sidebarWidth" @change="saveSidebarWidth" @resizing="resizingSidebar = $event" />
     <main class="main" :class="{ hiddenMobile: !mobileDetail }">
