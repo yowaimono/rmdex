@@ -685,6 +685,18 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .theme-option small { color: #8c9aa8; font-size: 11px; }
 .theme-check { flex: none; margin-left: auto; color: #0879f9; }
 .settings-account-card { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.automation-card { position: relative; }
+.automation-add-button { margin-left: auto; flex: none; }
+.automation-state { padding: 20px 0 4px; color: #8c9aa8; font-size: 13px; }
+.automation-list { display: grid; gap: 8px; margin-top: 18px; }
+.automation-item { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; padding: 13px 14px; border: 1px solid #e4eaf0; border-radius: 7px; background: #fbfcfd; }
+.automation-item strong, .automation-item small, .automation-item p { display: block; }
+.automation-item strong { color: #344252; font-size: 13px; }
+.automation-item small { margin-top: 4px; color: #8e9ca9; font-size: 11px; }
+.automation-item p { margin: 8px 0 0; color: #596b7b; font-size: 12px; line-height: 1.5; white-space: pre-wrap; }
+.automation-dialog { width: min(100%, 560px); }
+.automation-dialog textarea { width: 100%; min-height: 110px; resize: vertical; padding: 9px 10px; border: 1px solid #dfe6ed; border-radius: 5px; outline: 0; color: #263545; background: #fff; font: inherit; font-size: 13px; line-height: 1.5; }
+.automation-dialog textarea:focus { border-color: #8dbcf0; box-shadow: 0 0 0 2px rgba(8, 121, 249, .1); }
 .settings-logout-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; flex: none; min-height: 36px; padding: 0 12px; border: 1px solid #e5c8c4; border-radius: 6px; color: #b05248; background: #fffafa; font-size: 12px; }
 .settings-logout-button:hover { border-color: #d99a93; color: #a4433a; background: #fff3f1; }
 
@@ -699,6 +711,10 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 :root[data-theme='dark'] .auth-loading .working-spinner { border-color: #29445f; border-top-color: #68aaf7; }
 :root[data-theme='dark'] .auth-page, :root[data-theme='dark'] .admin-page, :root[data-theme='dark'] .settings-page { color: #e7edf4; background: #111923; }
 :root[data-theme='dark'] .auth-panel, :root[data-theme='dark'] .settings-card, :root[data-theme='dark'] .users-table-wrap, :root[data-theme='dark'] .create-dialog { border-color: #2a394a; background: #192432; box-shadow: 0 18px 50px rgba(0, 0, 0, .24); }
+:root[data-theme='dark'] .automation-item { border-color: #304154; background: #17222e; }
+:root[data-theme='dark'] .automation-item strong { color: #d5e0eb; }
+:root[data-theme='dark'] .automation-item p { color: #aebdca; }
+:root[data-theme='dark'] .automation-dialog textarea { border-color: #344659; color: #e5edf5; background: #121c27; }
 :root[data-theme='dark'] .auth-brand, :root[data-theme='dark'] .admin-brand, :root[data-theme='dark'] .brand { color: #eef4fb; }
 :root[data-theme='dark'] .auth-panel h1, :root[data-theme='dark'] .users-heading h1, :root[data-theme='dark'] .settings-heading h1 { color: #edf3f9; }
 :root[data-theme='dark'] .auth-subtitle, :root[data-theme='dark'] .users-heading p:not(.eyebrow), :root[data-theme='dark'] .settings-heading p:not(.eyebrow), :root[data-theme='dark'] .auth-help { color: #93a3b5; }
@@ -710,6 +726,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 :root[data-theme='dark'] .admin-nav-button:hover, :root[data-theme='dark'] .admin-icon-button:hover { color: #72b2ff; background: #21354b; }
 :root[data-theme='dark'] .thread-panel { background: #151f2b; border-color: #2a394a; }
 :root[data-theme='dark'] .thread-row-content { background: #151f2b; }
+:root[data-theme='dark'] .skeleton-line { background: linear-gradient(90deg, #263747 25%, #34495b 50%, #263747 75%); background-size: 200% 100%; }
 :root[data-theme='dark'] .main { background: #111923; }
 :root[data-theme='dark'] .main-head { border-color: #273544; }
 :root[data-theme='dark'] .heading strong, :root[data-theme='dark'] .welcome h2 { color: #e8eef5; }

@@ -140,7 +140,12 @@ const server = createServer(async (req, res) => {
     }
     const desktop = await adapter()
     let result: any
-    if (req.method === 'GET' && url.pathname === '/api/projects') result = { data: await projectStore.list(await desktop.projects()) }
+    if (req.method === 'GET' && url.pathname === '/api/automations') result = await desktop.automationUpdate({ mode: 'view' })
+    else if (req.method === 'POST' && url.pathname === '/api/automations/update') {
+      if (!data || typeof data.mode !== 'string' || !['create', 'update', 'delete', 'view', 'suggested_create'].includes(data.mode)) throw new Error('无效的计划操作')
+      result = await desktop.automationUpdate(data)
+    }
+    else if (req.method === 'GET' && url.pathname === '/api/projects') result = { data: await projectStore.list(await desktop.projects()) }
     else if (req.method === 'GET' && url.pathname === '/api/models') result = await desktop.models()
     else if (req.method === 'GET' && url.pathname === '/api/threads') result = await desktop.list()
     else if (req.method === 'GET' && match && !match[2]) { result = await desktop.read(match[1]!); registerImages(result); await registerArtifacts(result, match[1]!) }

@@ -80,7 +80,7 @@ export class DesktopMcp {
   }
   get disconnected() { return this.failure }
   async call(name: string, args: Record<string, unknown>, write = false): Promise<any> {
-    const allowed = ['list_threads', 'read_thread', 'list_projects', 'send_message_to_thread', 'create_thread']
+    const allowed = ['list_threads', 'read_thread', 'list_projects', 'send_message_to_thread', 'create_thread', 'automation_update']
     if (!allowed.includes(name) || !(await this.tools()).some(tool => tool.name === name)) throw new DesktopError('当前 Desktop 不提供此功能')
     const result = await this.request('tools/call', {
       name, arguments: args,

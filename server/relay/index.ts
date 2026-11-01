@@ -6,15 +6,15 @@ import { promisify } from 'node:util'
 import { WebSocket, WebSocketServer } from 'ws'
 
 type Device = { id: string; userId: string; name: string; tokenHash: string; createdAt: number; revoked?: boolean }
-type Client = { tokenHash: string; deviceId: string; name: string; createdAt: number; lastSeenAt?: number; revoked?: boolean }
+type Client = { tokenHash: string; deviceId: string; name: string; platform?: string; manufacturer?: string; model?: string; createdAt: number; lastSeenAt?: number; revoked?: boolean }
 type User = { id: string; username: string; passwordHash: string; role: 'admin' | 'user'; createdAt: number; disabled?: boolean }
-type AuthSession = { id: string; familyId: string; userId: string; deviceId?: string; name?: string; accessHash: string; accessExpiresAt: number; refreshHash: string; refreshExpiresAt: number; usedRefreshHashes?: string[]; createdAt: number; lastSeenAt?: number; revoked?: boolean }
-type PushToken = { tokenHash: string; deviceId: string; installationId: string; platform: 'android' | 'windows'; clientName?: string; createdAt: number; lastSeenAt: number }
+type AuthSession = { id: string; familyId: string; userId: string; deviceId?: string; name?: string; platform?: string; manufacturer?: string; model?: string; accessHash: string; accessExpiresAt: number; refreshHash: string; refreshExpiresAt: number; usedRefreshHashes?: string[]; createdAt: number; lastSeenAt?: number; revoked?: boolean }
+type PushToken = { tokenHash: string; deviceId: string; installationId: string; platform: 'android' | 'ios' | 'windows'; clientName?: string; manufacturer?: string; model?: string; createdAt: number; lastSeenAt: number }
 type NotificationEvent = { id: string; deviceId: string; threadId: string; turnId: string; status: string; title: string; body: string; createdAt: number }
 type NotificationWatch = { deviceId: string; threadId: string; turnId: string; name: string; createdAt: number }
 type Employee = { id: string; userId: string; name: string; role: string; instructions: string; legacyMemory?: string; deviceId: string; projectPath: string; threadId?: string; initializedThreadId?: string; assetContextVersion?: number; createdAt: number; updatedAt: number; archived?: boolean }
 type Pairing = { codeHash: string; deviceId: string; userId: string; expiresAt: number }
-type PairRequest = { id: string; deviceId: string; userId: string; name: string; createdAt: number; expiresAt: number; status: 'pending' | 'approved' | 'denied'; token?: string }
+type PairRequest = { id: string; deviceId: string; userId: string; name: string; platform?: string; manufacturer?: string; model?: string; createdAt: number; expiresAt: number; status: 'pending' | 'approved' | 'denied'; token?: string }
 type MessageReceipt = { messageId: string; senderId: string; recipientId: string; fingerprint: string; threadId: string; deviceId: string; status: 'dispatching' | 'queued' | 'uncertain'; createdAt: number }
 type State = { devices: Device[]; clients: Client[]; pairings: Pairing[]; pairRequests: PairRequest[]; users: User[]; sessions: AuthSession[]; pushTokens: PushToken[]; notifications: NotificationEvent[]; notificationWatches: NotificationWatch[]; employees: Employee[]; employeeMessages: MessageReceipt[] }
 type Credentials = { accessToken: string; refreshToken: string; expiresIn: number; user: { id: string; username: string; role?: User['role'] }; token?: string; clientToken?: string; deviceId?: string }
@@ -82,10 +82,17 @@ function sessionCredentials(session: AuthSession, accessToken: string, refreshTo
   if (!user) throw new Error('用户不存在')
   return { accessToken, refreshToken, expiresIn: Math.max(1, Math.floor((session.accessExpiresAt - Date.now()) / 1000)), user: { id: user.id, username: user.username, role: user.role }, token: accessToken, ...(session.deviceId ? { clientToken: accessToken, deviceId: session.deviceId } : {}) }
 }
-async function createSession(userId: string, deviceId?: string, name?: string): Promise<Credentials> {
+type DeviceClientMetadata = { platform?: string; manufacturer?: string; model?: string }
+function metadataFrom(data: Record<string, unknown>): DeviceClientMetadata {
+  const platform = typeof data.platform === 'string' ? data.platform.trim().slice(0, 20) : ''
+  const manufacturer = typeof data.manufacturer === 'string' ? data.manufacturer.trim().slice(0, 80) : ''
+  const model = typeof data.model === 'string' ? data.model.trim().slice(0, 120) : ''
+  return { ...(platform ? { platform } : {}), ...(manufacturer ? { manufacturer } : {}), ...(model ? { model } : {}) }
+}
+async function createSession(userId: string, deviceId?: string, name?: string, metadata: DeviceClientMetadata = {}): Promise<Credentials> {
   const accessToken = randomToken()
   const refreshToken = randomToken()
-  const session: AuthSession = { id: randomToken(12), familyId: randomToken(12), userId, ...(deviceId ? { deviceId } : {}), ...(name ? { name } : {}), accessHash: hash(accessToken), accessExpiresAt: Date.now() + ACCESS_TTL, refreshHash: hash(refreshToken), refreshExpiresAt: Date.now() + REFRESH_TTL, createdAt: Date.now() }
+  const session: AuthSession = { id: randomToken(12), familyId: randomToken(12), userId, ...(deviceId ? { deviceId } : {}), ...(name ? { name } : {}), ...metadata, accessHash: hash(accessToken), accessExpiresAt: Date.now() + ACCESS_TTL, refreshHash: hash(refreshToken), refreshExpiresAt: Date.now() + REFRESH_TTL, createdAt: Date.now() }
   state.sessions.push(session)
   await persist()
   return sessionCredentials(session, accessToken, refreshToken)
@@ -143,7 +150,7 @@ async function load() {
     state.clients = Array.isArray(saved.clients) ? saved.clients : []
     state.sessions = Array.isArray(saved.sessions) ? saved.sessions : []
     state.pushTokens = Array.isArray(saved.pushTokens) ? saved.pushTokens.flatMap(item => {
-      if (typeof item.tokenHash === 'string') return [{ ...item, platform: item.platform === 'windows' ? 'windows' as const : 'android' as const }]
+      if (typeof item.tokenHash === 'string') return [{ ...item, platform: item.platform === 'windows' ? 'windows' as const : item.platform === 'ios' ? 'ios' as const : 'android' as const }]
       if (typeof (item as { token?: string }).token === 'string') return [{ tokenHash: hash((item as { token: string }).token), deviceId: item.deviceId, installationId: `legacy-${item.deviceId}`, platform: 'android' as const, clientName: item.clientName, createdAt: item.createdAt, lastSeenAt: item.lastSeenAt }]
       return []
     }) : []
@@ -154,7 +161,7 @@ async function load() {
       id: item.id, userId: item.userId, name: item.name, role: typeof item.role === 'string' ? item.role : '', instructions: typeof item.instructions === 'string' ? item.instructions : '', ...(typeof item.legacyMemory === 'string' && item.legacyMemory.trim() ? { legacyMemory: item.legacyMemory } : typeof item.memory === 'string' && item.memory.trim() ? { legacyMemory: item.memory } : {}), deviceId: item.deviceId, projectPath: item.projectPath, ...(typeof item.threadId === 'string' ? { threadId: item.threadId } : {}), ...(Number.isInteger(item.assetContextVersion) && typeof item.initializedThreadId === 'string' ? { initializedThreadId: item.initializedThreadId, assetContextVersion: item.assetContextVersion } : {}), createdAt: Number(item.createdAt) || Date.now(), updatedAt: Number(item.updatedAt) || Date.now(), ...(item.archived ? { archived: true } : {}),
     })) : []
     state.pairings = Array.isArray(saved.pairings) ? saved.pairings.filter(pair => pair && pair.expiresAt > Date.now() && typeof pair.codeHash === 'string' && typeof pair.deviceId === 'string' && typeof pair.userId === 'string' && state.users.some(user => user.id === pair.userId)).map(pair => ({ codeHash: pair.codeHash, deviceId: pair.deviceId, userId: pair.userId, expiresAt: pair.expiresAt })) : []
-    state.pairRequests = Array.isArray(saved.pairRequests) ? saved.pairRequests.filter(pair => pair && pair.expiresAt > Date.now() && pair.status === 'pending' && typeof pair.id === 'string' && typeof pair.deviceId === 'string' && typeof pair.userId === 'string' && typeof pair.name === 'string' && state.users.some(user => user.id === pair.userId)).map(pair => ({ id: pair.id, deviceId: pair.deviceId, userId: pair.userId, name: pair.name, createdAt: pair.createdAt, expiresAt: pair.expiresAt, status: pair.status })) : []
+    state.pairRequests = Array.isArray(saved.pairRequests) ? saved.pairRequests.filter(pair => pair && pair.expiresAt > Date.now() && pair.status === 'pending' && typeof pair.id === 'string' && typeof pair.deviceId === 'string' && typeof pair.userId === 'string' && typeof pair.name === 'string' && state.users.some(user => user.id === pair.userId)).map(pair => ({ id: pair.id, deviceId: pair.deviceId, userId: pair.userId, name: pair.name, ...(typeof pair.platform === 'string' ? { platform: pair.platform } : {}), ...(typeof pair.manufacturer === 'string' ? { manufacturer: pair.manufacturer } : {}), ...(typeof pair.model === 'string' ? { model: pair.model } : {}), createdAt: pair.createdAt, expiresAt: pair.expiresAt, status: pair.status })) : []
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
   }
@@ -185,7 +192,7 @@ async function body(req: import('node:http').IncomingMessage) {
 function clientFor(req: import('node:http').IncomingMessage) {
   const token = bearer(req)
   const session = accessSession(token)
-  if (session?.deviceId && userForId(session.userId) && state.devices.some(device => !device.revoked && device.id === session.deviceId && device.userId === session.userId)) return { tokenHash: session.accessHash, deviceId: session.deviceId, name: session.name || '已登录设备', createdAt: session.createdAt, lastSeenAt: session.lastSeenAt } satisfies Client
+  if (session?.deviceId && userForId(session.userId) && state.devices.some(device => !device.revoked && device.id === session.deviceId && device.userId === session.userId)) return { tokenHash: session.accessHash, deviceId: session.deviceId, name: session.name || '已登录设备', ...(session.platform ? { platform: session.platform } : {}), ...(session.manufacturer ? { manufacturer: session.manufacturer } : {}), ...(session.model ? { model: session.model } : {}), createdAt: session.createdAt, lastSeenAt: session.lastSeenAt } satisfies Client
   const client = token ? state.clients.find(item => !item.revoked && equalHash(token, item.tokenHash)) : undefined
   if (client) client.lastSeenAt = Date.now()
   return client
@@ -237,6 +244,20 @@ async function communicate(req: import('node:http').IncomingMessage, res: import
   if (!sender) { json(res, 401, { error: '员工通信凭证已失效，请在员工当前会话中发送一条消息以刷新' }); return }
   if (req.method === 'GET' && pathname === '/api/employee-communication/colleagues') {
     json(res, 200, { data: state.employees.filter(item => !item.archived && item.userId === sender.userId && item.id !== sender.id).map(item => ({ id: item.id, name: item.name, role: item.role, hasCurrentThread: Boolean(item.threadId), online: deviceSockets.get(item.deviceId)?.readyState === WebSocket.OPEN })) }); return
+  }
+  if (req.method === 'POST' && pathname === '/api/employee-communication/employees') {
+    const data = await body(req)
+    if (Object.keys(data).some(key => !['name', 'role', 'instructions'].includes(key))) { json(res, 400, { error: '只能提供员工名称、职位和职责指令' }); return }
+    const name = typeof data.name === 'string' ? data.name.trim().slice(0, 80) : ''
+    const role = typeof data.role === 'string' ? data.role.trim().slice(0, 120) : ''
+    const instructions = typeof data.instructions === 'string' ? data.instructions.trim().slice(0, 12_000) : ''
+    if (!name || !instructions) { json(res, 400, { error: '需要填写员工名称和职责指令' }); return }
+    if (state.employees.some(item => !item.archived && item.userId === sender.userId && item.name.toLowerCase() === name.toLowerCase())) { json(res, 409, { error: '员工名称已存在' }); return }
+    const now = Date.now()
+    const employee: Employee = { id: randomToken(12), userId: sender.userId, name, role, instructions, deviceId: sender.deviceId, projectPath: sender.projectPath, createdAt: now, updatedAt: now }
+    state.employees.push(employee)
+    await persist()
+    json(res, 201, { employee: employeeView(employee), createdBy: sender.id }); return
   }
   if (req.method !== 'POST' || pathname !== '/api/employee-communication/messages') { json(res, 404, { error: 'Not found' }); return }
   const data = await body(req)
@@ -480,7 +501,8 @@ const server = createServer(async (req, res) => {
       if (index < 0) { json(res, 400, { error: '配对码无效或已过期' }); return }
       const [pairing] = state.pairings.splice(index, 1)
       const id = randomToken()
-      const request: PairRequest = { id, deviceId: pairing!.deviceId, userId: pairing!.userId, name: typeof data.name === 'string' ? data.name.slice(0, 80) : '手机', createdAt: Date.now(), expiresAt: Date.now() + 5 * 60_000, status: 'pending' }
+      const metadata = metadataFrom(data)
+      const request: PairRequest = { id, deviceId: pairing!.deviceId, userId: pairing!.userId, name: typeof data.name === 'string' ? data.name.slice(0, 80) : (metadata.model || '手机'), ...metadata, createdAt: Date.now(), expiresAt: Date.now() + 5 * 60_000, status: 'pending' }
       state.pairRequests.push(request)
       await persist()
       json(res, 202, { requestId: id, status: 'pending' }); return
@@ -564,7 +586,7 @@ const server = createServer(async (req, res) => {
       if (!request || !canManageUser(admin, request.userId) || !['approve', 'deny'].includes(String(data.decision))) { json(res, 404, { error: '配对请求不存在或已过期' }); return }
       request.status = data.decision === 'approve' ? 'approved' : 'denied'
       if (request.status === 'approved') {
-        approvedPairTokens.set(request.id, await createSession(request.userId, request.deviceId, request.name))
+        approvedPairTokens.set(request.id, await createSession(request.userId, request.deviceId, request.name, { platform: request.platform, manufacturer: request.manufacturer, model: request.model }))
       }
       await persist()
       json(res, 200, { ok: true }); return
@@ -609,9 +631,13 @@ const server = createServer(async (req, res) => {
       if (!client) { json(res, 401, { error: '请重新配对' }); return }
       const device = state.devices.find(item => item.id === client.deviceId && !item.revoked)
       if (!device) { json(res, 401, { error: '设备已撤销' }); return }
-      const phones = state.clients
-        .filter(item => !item.revoked && item.deviceId === device.id && item !== client)
-        .map(item => ({ name: item.name, lastSeenAt: item.lastSeenAt, online: Boolean(item.lastSeenAt && Date.now() - item.lastSeenAt < 90_000) }))
+      const currentSession = accessSession(bearer(req))
+      const phones = state.sessions
+        .filter(item => !item.revoked && item.deviceId === device.id && item.id !== currentSession?.id && ['android', 'ios'].includes(item.platform || ''))
+        .map(item => ({ id: item.id, name: item.name || item.model || '手机', model: item.model, platform: item.platform, lastSeenAt: item.lastSeenAt, online: Boolean(item.lastSeenAt && Date.now() - item.lastSeenAt < 90_000) }))
+        .concat(state.clients
+          .filter(item => !item.revoked && item.deviceId === device.id && item.tokenHash !== client.tokenHash && ['android', 'ios'].includes(item.platform || ''))
+          .map(item => ({ id: item.tokenHash.slice(-16), name: item.name || item.model || '手机', model: item.model, platform: item.platform, lastSeenAt: item.lastSeenAt, online: Boolean(item.lastSeenAt && Date.now() - item.lastSeenAt < 90_000) })))
       json(res, 200, { device: { id: device.id, name: device.name, online: deviceSockets.get(device.id)?.readyState === WebSocket.OPEN }, phones }); return
     }
     if (req.method === 'POST' && (url.pathname === '/api/push/register' || url.pathname === '/api/push/unregister')) {
@@ -629,8 +655,15 @@ const server = createServer(async (req, res) => {
       }
       const pushToken = randomToken()
       state.pushTokens = state.pushTokens.filter(item => !(item.deviceId === device.id && item.installationId === installationId))
-      const platform = data.platform === 'windows' ? 'windows' : 'android'
-      state.pushTokens.push({ tokenHash: hash(pushToken), deviceId: device.id, installationId, platform, clientName: typeof data.clientName === 'string' ? data.clientName.slice(0, 80) : client.name, createdAt: Date.now(), lastSeenAt: Date.now() })
+      const platform = data.platform === 'windows' ? 'windows' : data.platform === 'ios' ? 'ios' : 'android'
+      const metadata = metadataFrom(data)
+      const clientSession = accessSession(bearer(req))
+      if (clientSession) {
+        Object.assign(clientSession, metadata)
+        if (typeof data.clientName === 'string' && data.clientName.trim()) clientSession.name = data.clientName.slice(0, 80)
+        clientSession.lastSeenAt = Date.now()
+      }
+      state.pushTokens.push({ tokenHash: hash(pushToken), deviceId: device.id, installationId, platform, clientName: typeof data.clientName === 'string' ? data.clientName.slice(0, 80) : client.name, ...(metadata.manufacturer ? { manufacturer: metadata.manufacturer } : {}), ...(metadata.model ? { model: metadata.model } : {}), createdAt: Date.now(), lastSeenAt: Date.now() })
       await persist()
       json(res, 200, { pushToken, cursor: notificationCursor(device.id) }); return
     }
@@ -730,8 +763,8 @@ const server = createServer(async (req, res) => {
     }
     if (!['GET', 'POST', 'DELETE'].includes(req.method || '')) { json(res, 405, { error: 'Method not allowed' }); return }
     const allowed = req.method === 'GET'
-      ? /^\/api\/(?:models|projects|settings|threads(?:\/[a-zA-Z0-9-]+(?:\/(?:status|incremental|queue|artifacts\/[a-zA-Z0-9-]+\/(?:content|preview)))?)?|images\/[a-f0-9-]+)$/.test(url.pathname)
-      : /^\/api\/(?:settings|threads|threads\/[a-zA-Z0-9-]+\/(?:send|retry|stop|history|name|fork|archive|unarchive|delete|queue|steer)|threads\/[a-zA-Z0-9-]+\/queue\/[^/]+(?:\/(?:steer|delete))?|approvals\/[a-zA-Z0-9-]+|user-input\/[a-zA-Z0-9-]+)$/.test(url.pathname)
+      ? /^\/api\/(?:models|projects|settings|automations|threads(?:\/[a-zA-Z0-9-]+(?:\/(?:status|incremental|queue|artifacts\/[a-zA-Z0-9-]+\/(?:content|preview)))?)?|images\/[a-f0-9-]+)$/.test(url.pathname)
+      : /^\/api\/(?:settings|automations\/update|threads|threads\/[a-zA-Z0-9-]+\/(?:send|retry|stop|history|name|fork|archive|unarchive|delete|queue|steer)|threads\/[a-zA-Z0-9-]+\/queue\/[^/]+(?:\/(?:steer|delete))?|approvals\/[a-zA-Z0-9-]+|user-input\/[a-zA-Z0-9-]+)$/.test(url.pathname)
     const projectMutation = req.method === 'POST' && /^\/api\/projects(?:\/[a-zA-Z0-9-]+\/(?:update|delete))?$/.test(url.pathname)
     if ((!allowed && !(req.method === 'POST' && url.pathname === '/api/attachments') && !projectMutation) || url.search) { json(res, 404, { error: 'Not found' }); return }
     let requestData = req.method === 'POST' ? await body(req) : undefined

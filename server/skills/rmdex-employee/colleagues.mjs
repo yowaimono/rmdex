@@ -6,7 +6,7 @@ try {
   const config = JSON.parse(await readFile(new URL('./communication.json', import.meta.url), 'utf8'))
   const [command, ...args] = process.argv.slice(2)
   const option = name => args[args.indexOf(name) + 1]
-  if (!['list', 'send'].includes(command)) throw new Error('Usage: colleagues.mjs list | send --to EMPLOYEE_ID --file UTF8_FILE --id MESSAGE_UUID')
+  if (!['list', 'send', 'create-employee'].includes(command)) throw new Error('Usage: colleagues.mjs list | send --to EMPLOYEE_ID --file UTF8_FILE --id MESSAGE_UUID | create-employee --name NAME --role ROLE --instructions-file UTF8_FILE')
   let body
   if (command === 'send') {
     if (!args.includes('--to') || !args.includes('--file')) throw new Error('--to and --file are required')
@@ -14,8 +14,12 @@ try {
     // Print before dispatch so an uncertain result can be checked using the same ID.
     console.error(`messageId: ${id}`)
     body = { recipientId: option('--to'), text: await readFile(option('--file'), 'utf8'), messageId: id }
+  } else if (command === 'create-employee') {
+    if (!args.includes('--name') || !args.includes('--instructions-file')) throw new Error('--name and --instructions-file are required')
+    body = { name: option('--name'), role: args.includes('--role') ? option('--role') : '', instructions: await readFile(option('--instructions-file'), 'utf8') }
   }
-  const response = await fetch(`${config.origin}/api/employee-communication/${command === 'list' ? 'colleagues' : 'messages'}`, {
+  const path = command === 'list' ? 'colleagues' : command === 'send' ? 'messages' : 'employees'
+  const response = await fetch(`${config.origin}/api/employee-communication/${path}`, {
     method: body ? 'POST' : 'GET', headers: { Authorization: `Bearer ${config.token}`, 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(45000), redirect: 'error',
   })

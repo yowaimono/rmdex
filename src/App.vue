@@ -5,7 +5,7 @@ import { App as NativeApp } from '@capacitor/app'
 import { LocalNotifications } from '@capacitor/local-notifications'
 import { CapacitorBarcodeScanner, CapacitorBarcodeScannerTypeHint } from '@capacitor/barcode-scanner'
 import MarkdownIt from 'markdown-it'
-import { Archive, ArrowLeft, ArrowUp, Bot, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, CircleCheck, CircleHelp, CornerDownRight, Ellipsis, ExternalLink, Eye, EyeOff, Folder, FolderPlus, GitFork, LoaderCircle, LogOut, Menu, MessageSquare, Monitor, MonitorCog, Moon, PanelLeftClose, Paperclip, Pencil, Pin, Plus, RefreshCw, RotateCcw, Search, Settings, ShieldAlert, Smartphone, Square, Sun, Trash2, Users, Wrench, X, QrCode, Copy } from 'lucide-vue-next'
+import { Archive, ArrowLeft, ArrowUp, Bot, CalendarClock, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, CircleCheck, CircleHelp, CornerDownRight, Ellipsis, ExternalLink, Eye, EyeOff, Folder, FolderPlus, GitFork, LoaderCircle, LogOut, Menu, MessageSquare, Monitor, MonitorCog, Moon, PanelLeftClose, Paperclip, Pencil, Pin, Plus, RefreshCw, RotateCcw, Search, Settings, ShieldAlert, Smartphone, Square, Sun, Trash2, Users, Wrench, X, QrCode, Copy } from 'lucide-vue-next'
 import QRCode from 'qrcode'
 import logoUrl from './assets/rmdex-logo.jpg'
 import ToolEvent from './components/ToolEvent.vue'
@@ -29,9 +29,11 @@ const emit = defineEmits<{ 'pc-authenticated': [] }>()
 type Thread = { id: string; name?: string | null; preview?: string; cwd?: string; updatedAt?: number; status?: { type: string }; turns?: Turn[]; employeeId?: string; desktopDraft?: { projectId: string | null; deviceKey: string; preparing?: boolean } }
 type Project = { id: string; name: string; path: string; source: 'local' | 'desktop'; nativeProjectId?: string }
 type Employee = { id: string; name: string; role: string; instructions: string; deviceId: string; projectPath: string; threadId?: string; initializedThreadId?: string; createdAt: number; updatedAt: number }
+type Automation = { id: string; name: string; kind?: string; status?: string; rrule?: string; prompt?: string; model?: string; reasoningEffort?: string; executionEnvironment?: string; cwds?: string[]; targetThreadId?: string }
 const apiBase = Capacitor.isNativePlatform() ? 'https://code.kyeai.xyz' : ''
 const apiUrl = (path: string) => path.startsWith('http://') || path.startsWith('https://') ? path : `${apiBase}${path}`
 const RmdexBackgroundService = registerPlugin<{ start(options: { relayUrl: string; pushToken: string; cursor?: number }): Promise<void>; stop(): Promise<void> }>('RmdexBackgroundService')
+const RmdexDeviceInfo = registerPlugin<{ getInfo(): Promise<{ platform?: string; manufacturer?: string; model?: string }> }>('RmdexDeviceInfo')
 let appUrlListener: { remove: () => Promise<void> } | undefined
 const threads = ref<Thread[]>([])
 const employees = ref<Employee[]>([])
@@ -64,7 +66,17 @@ const pcDeviceName = ref(props.pcDeviceName || 'Codex 电脑')
 const loginError = ref('')
 const loginLoading = ref(false)
 const authReady = ref(false)
-const activePage = ref<'workspace' | 'users' | 'settings'>('workspace')
+const activePage = ref<'workspace' | 'users' | 'settings' | 'automations'>('workspace')
+const automations = ref<Automation[]>([])
+const automationsLoading = ref(false)
+const automationsError = ref('')
+const automationEditor = ref(false)
+const automationSaving = ref(false)
+const automationName = ref('')
+const automationPrompt = ref('')
+const automationRrule = ref('')
+const automationCwd = ref('')
+const automationTargetThreadId = ref('')
 type ThemePreference = 'system' | 'light' | 'dark'
 const themePreference = ref<ThemePreference>((localStorage.getItem('rmdex-theme-preference') as ThemePreference | null) || 'system')
 const themeMediaQuery = typeof window !== 'undefined' ? window.matchMedia('(prefers-color-scheme: dark)') : null
@@ -173,7 +185,7 @@ const projectError = ref('')
 const projectSaving = ref(false)
 const deleteProjectTarget = ref<Project | null>(null)
 const desktopProjects = ref<Array<{ id: string; name: string; path: string }>>([])
-const defaultCapabilities = { mode: 'app-server', models: true, permissions: true, stop: true, approvals: true, create: true, send: true, retry: true, queue: true, steer: true, rename: true, fork: true, archive: true, delete: true, history: false, createRequiresPrompt: false }
+const defaultCapabilities = { mode: 'app-server', automations: false, models: true, permissions: true, stop: true, approvals: true, create: true, send: true, retry: true, queue: true, steer: true, rename: true, fork: true, archive: true, delete: true, history: false, createRequiresPrompt: false }
 const capabilities = ref({ ...defaultCapabilities })
 const desktopMode = computed(() => capabilities.value.mode === 'desktop')
 const historyCursor = ref<string | null>(null)
@@ -446,6 +458,17 @@ function installationId() {
   }
   return value
 }
+type NativeDeviceInfo = { platform?: string; manufacturer?: string; model?: string }
+async function nativeDeviceInfo(): Promise<NativeDeviceInfo> {
+  if (!Capacitor.isNativePlatform()) return {}
+  try { return await RmdexDeviceInfo.getInfo() } catch { return { platform: Capacitor.getPlatform() } }
+}
+function deviceDisplayName(info: NativeDeviceInfo) {
+  const model = info.model?.trim()
+  if (model) return model
+  if (info.manufacturer?.trim()) return `${info.manufacturer.trim()} 设备`
+  return info.platform === 'ios' ? 'iPhone' : 'Android 设备'
+}
 async function setupBackgroundNotifications() {
   if (!Capacitor.isNativePlatform() || !clientToken.value) return
   if (backgroundNotificationSetupPromise) return backgroundNotificationSetupPromise
@@ -466,7 +489,8 @@ async function setupBackgroundNotifications() {
       }
       if (sessionToken !== clientToken.value) return
       if (!pushToken) {
-        const result = await post('/api/push/register', { installationId: installationId(), clientName: 'rmdex Android' }) as { pushToken: string; cursor?: number }
+        const info = await nativeDeviceInfo()
+        const result = await post('/api/push/register', { installationId: installationId(), clientName: deviceDisplayName(info), ...info }) as { pushToken: string; cursor?: number }
         pushToken = result.pushToken
         cursor = Number.isFinite(result.cursor) ? result.cursor : undefined
         if (sessionToken !== clientToken.value) return
@@ -1554,6 +1578,30 @@ async function post(path: string, body: unknown) {
   if (!response.ok) throw new Error(result?.error || '请求失败')
   return result
 }
+async function loadAutomations() {
+  if (!clientToken.value) return
+  automationsLoading.value = true; automationsError.value = ''
+  try { const result = await get<{ data?: Automation[] }>('/api/automations'); automations.value = result.data || [] }
+  catch (e) { automationsError.value = e instanceof Error ? e.message : String(e) }
+  finally { automationsLoading.value = false }
+}
+function openAutomationEditor() {
+  automationName.value = ''; automationPrompt.value = ''; automationRrule.value = ''; automationCwd.value = selected.value?.cwd || ''; automationTargetThreadId.value = ''; automationEditor.value = true
+}
+async function saveAutomation() {
+  if (automationSaving.value) return
+  automationSaving.value = true; automationsError.value = ''
+  try {
+    await post('/api/automations/update', { mode: 'create', name: automationName.value.trim(), prompt: automationPrompt.value.trim(), rrule: automationRrule.value.trim(), cwds: automationCwd.value.trim() ? [automationCwd.value.trim()] : [], ...(automationTargetThreadId.value.trim() ? { target_thread_id: automationTargetThreadId.value.trim() } : {}) })
+    automationEditor.value = false; await loadAutomations()
+  } catch (e) { automationsError.value = e instanceof Error ? e.message : String(e) }
+  finally { automationSaving.value = false }
+}
+async function deleteAutomation(automation: Automation) {
+  if (!window.confirm(`删除计划“${automation.name}”？`)) return
+  try { await post('/api/automations/update', { mode: 'delete', id: automation.id }); await loadAutomations() }
+  catch (e) { automationsError.value = e instanceof Error ? e.message : String(e) }
+}
 async function adminFetch<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
   const headers: Record<string, string> = {}
   if (body !== undefined) headers['Content-Type'] = 'application/json'
@@ -1727,7 +1775,8 @@ async function claimPair(code = pairInput.value) {
   pairError.value = ''
   mobilePairing.value = true
   try {
-    const response = await fetch(apiUrl('/api/pair/claim'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) })
+    const info = await nativeDeviceInfo()
+    const response = await fetch(apiUrl('/api/pair/claim'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code, name: deviceDisplayName(info), ...info }) })
     const result = await response.json()
     if (response.status !== 202) throw new Error(result.error || '配对失败')
     history.replaceState({}, '', location.pathname)
@@ -2240,6 +2289,7 @@ onMounted(async () => {
       await refresh()
     }
   }
+  if (clientToken.value) void loadAutomations()
   authReady.value = true
   poll = setInterval(() => { void updateThread(); void refreshThreadIndicators(); if (adminToken.value && showDevices.value) void loadDevices() }, 2000)
 })
@@ -2285,6 +2335,20 @@ onUnmounted(() => { themeMediaQuery?.removeEventListener('change', handleSystemT
         <button class="settings-logout-button" type="button" @click="logout"><LogOut :size="16" />退出登录</button>
       </section>
     </section>
+  </main>
+  <main v-else-if="activePage === 'automations'" class="settings-page">
+    <header class="settings-topbar"><button class="admin-brand" type="button" @click="activePage = 'workspace'"><img :src="logoUrl" alt="" /><span>rmdex</span></button><button class="admin-nav-button" type="button" @click="activePage = 'workspace'"><ArrowLeft :size="16" />返回工作区</button></header>
+    <section class="settings-content" aria-labelledby="automations-title">
+      <div class="settings-heading"><p class="eyebrow">绑定设备</p><h1 id="automations-title">计划任务</h1><p>计划由当前绑定的 Codex Desktop 保存、触发和执行。</p></div>
+      <section class="settings-card automation-card" aria-labelledby="automation-list-title">
+        <div class="settings-card-heading"><span class="settings-card-icon"><CalendarClock :size="18" /></span><div><h2 id="automation-list-title">设备上的计划</h2><p>rmdex 只提供入口，计划数据来自 Codex Desktop。</p></div><button class="create-button automation-add-button" type="button" @click="openAutomationEditor"><Plus :size="15" />新建计划</button></div>
+        <p v-if="automationsError" class="create-error" role="alert">{{ automationsError }}</p>
+        <div v-if="automationsLoading" class="automation-state">正在读取绑定设备的计划…</div>
+        <div v-else-if="!automations.length" class="automation-state">当前设备还没有计划。</div>
+        <div v-else class="automation-list"><article v-for="automation in automations" :key="automation.id" class="automation-item"><div><strong>{{ automation.name }}</strong><small>{{ automation.rrule || automation.kind || '计划' }} · {{ automation.status || '未知状态' }}</small><p>{{ automation.prompt || '未提供任务内容' }}</p></div><button class="icon-button" type="button" title="删除计划" aria-label="删除计划" @click="deleteAutomation(automation)"><Trash2 :size="15" /></button></article></div>
+      </section>
+    </section>
+    <div v-if="automationEditor" class="modal-backdrop" @click.self="!automationSaving && (automationEditor = false)"><section class="create-dialog automation-dialog" role="dialog" aria-modal="true" aria-labelledby="automation-create-title"><header><div><h2 id="automation-create-title">新建计划</h2><p>由绑定设备上的 Codex Desktop 创建。</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="automationEditor = false"><X :size="18" /></button></header><form @submit.prevent="saveAutomation"><label for="automation-name">名称</label><input id="automation-name" v-model="automationName" required maxlength="120" placeholder="例如：每天检查项目状态" /><label for="automation-prompt">任务内容</label><textarea id="automation-prompt" v-model="automationPrompt" required rows="5" maxlength="20000" placeholder="描述 Codex 到时间后要执行的任务"></textarea><label for="automation-rrule">重复规则</label><input id="automation-rrule" v-model="automationRrule" required placeholder="按 Codex Desktop 支持的规则填写" /><label for="automation-cwd">工作目录</label><input id="automation-cwd" v-model="automationCwd" placeholder="例如：D:\WorkSpace\rmdex" /><label for="automation-thread">继续已有会话（可选）</label><input id="automation-thread" v-model="automationTargetThreadId" placeholder="Thread ID" /><p v-if="automationsError" class="create-error" role="alert">{{ automationsError }}</p><div class="dialog-actions"><button type="button" class="cancel-button" @click="automationEditor = false">取消</button><button type="submit" class="create-button" :disabled="automationSaving || !automationName.trim() || !automationPrompt.trim() || !automationRrule.trim()">{{ automationSaving ? '创建中…' : '创建计划' }}</button></div></form></section></div>
   </main>
   <main v-else-if="activePage === 'users' && isPlatformAdmin" class="admin-page">
     <header class="admin-topbar"><button class="admin-brand" type="button" @click="activePage = 'workspace'"><img :src="logoUrl" alt="" /><span>rmdex</span></button><div class="admin-top-actions"><button class="admin-nav-button" type="button" @click="activePage = 'workspace'"><ArrowLeft :size="16" />工作区</button><button class="admin-icon-button" type="button" title="设置" aria-label="设置" @click="activePage = 'settings'"><Settings :size="17" /></button></div></header>
@@ -2363,7 +2427,7 @@ onUnmounted(() => { themeMediaQuery?.removeEventListener('change', handleSystemT
          <div v-if="!filtered.length && !projects.length && !loading" class="empty-list">{{ showArchivedThreads ? '暂无已归档会话' : '暂无会话或 Project' }}</div>
       </div>
       </div>
-      <footer class="side-footer"><span class="online" :class="{ offline: !connected }"></span> {{ remoteMode ? '远程设备' : '本机模式' }} <span class="footer-label">{{ connected ? '已连接' : '未连接' }}</span><span class="side-account-actions"><button v-if="isPlatformAdmin" type="button" @click="activePage = 'users'" title="用户管理"><Users :size="15" /><span>用户</span></button><button v-if="adminToken || clientToken" type="button" @click="activePage = 'settings'" title="设置"><Settings :size="15" /><span>设置</span></button></span></footer>
+      <footer class="side-footer"><span class="online" :class="{ offline: !connected }"></span> {{ remoteMode ? '远程设备' : '本机模式' }} <span class="footer-label">{{ connected ? '已连接' : '未连接' }}</span><span class="side-account-actions"><button v-if="clientToken && capabilities.automations" type="button" @click="activePage = 'automations'; void loadAutomations()" title="计划任务"><CalendarClock :size="15" /><span>计划</span></button><button v-if="isPlatformAdmin" type="button" @click="activePage = 'users'" title="用户管理"><Users :size="15" /><span>用户</span></button><button v-if="adminToken || clientToken" type="button" @click="activePage = 'settings'" title="设置"><Settings :size="15" /><span>设置</span></button></span></footer>
     </aside>
     <SidebarResize v-if="sidebarOpen" v-model="sidebarWidth" @change="saveSidebarWidth" @resizing="resizingSidebar = $event" />
     <main class="main" :class="{ hiddenMobile: !mobileDetail }">

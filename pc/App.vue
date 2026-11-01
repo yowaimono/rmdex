@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { AlertTriangle, Check, CircleStop, Clipboard, LoaderCircle, Monitor, Power, RefreshCw, Server, Settings2, X } from 'lucide-vue-next'
+import { AlertTriangle, CircleStop, Clipboard, LoaderCircle, Monitor, Power, RefreshCw, Server, Settings2, Smartphone, X } from 'lucide-vue-next'
 import ChatApp from '../src/App.vue'
 
 type PermissionMode = 'ask' | 'auto' | 'full'
@@ -18,6 +18,14 @@ type PcClientSession = {
   refreshToken: string
   device: { id: string; name: string; online: boolean }
 }
+type PeerPhone = {
+  id: string
+  name: string
+  model?: string
+  platform?: string
+  online: boolean
+  lastSeenAt?: number
+}
 
 const status = ref<PcStatus | null>(null)
 const error = ref('')
@@ -30,6 +38,8 @@ const deviceName = ref(localStorage.getItem('rmdex-pc-device-name') || 'Codex �
 const showControls = ref(false)
 const logs = ref<{ agent: string; desktop: string } | null>(null)
 const copied = ref(false)
+const phones = ref<PeerPhone[]>([])
+const peersLoading = ref(false)
 let timer: ReturnType<typeof setInterval> | undefined
 
 const chatReady = computed(() => status.value?.enrolled && status.value.phase === 'running')
@@ -71,6 +81,7 @@ async function bootstrapClientSession() {
       localStorage.setItem('rmdex-client-refresh-token', session.refreshToken)
       needsLogin.value = false
       sessionReady.value = true
+      void loadPeers()
     } catch (caught) {
       sessionReady.value = false
       sessionError.value = caught instanceof Error ? caught.message : String(caught)
@@ -81,6 +92,20 @@ async function bootstrapClientSession() {
   })()
   sessionRequest = requestPromise
   return requestPromise
+}
+
+async function loadPeers() {
+  const token = localStorage.getItem('rmdex-client-access-token') || localStorage.getItem('rmdex-client-token') || ''
+  if (!token) return
+  peersLoading.value = true
+  try {
+    const result = await request<{ phones?: PeerPhone[] }>('/api/client/peers', { headers: { Authorization: `Bearer ${token}` } })
+    phones.value = result.phones || []
+  } catch {
+    // Keep the last successful list visible while the PC service or relay reconnects.
+  } finally {
+    peersLoading.value = false
+  }
 }
 
 async function completePcLogin(username: string, password: string, name: string): Promise<PcClientSession> {
@@ -156,6 +181,7 @@ watch(chatReady, ready => {
   void bootstrapClientSession()
 }, { immediate: true })
 onUnmounted(() => { if (timer) clearInterval(timer) })
+watch(showControls, opened => { if (opened) void loadPeers() })
 </script>
 
 <template>
@@ -182,7 +208,8 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
       <header><div><span>rmdex PC</span><strong>本机控制</strong></div><button type="button" title="关闭" aria-label="关闭本机控制" @click="showControls = false"><X :size="17" /></button></header>
       <p v-if="error" class="pc-control-error" role="alert"><AlertTriangle :size="15" />{{ error }}</p>
       <section class="pc-control-section"><h2>服务状态</h2><div class="pc-control-status"><span><i :class="{ online: status.phase === 'running' }"></i>rmdex agent</span><strong>{{ phaseLabel }}</strong></div><div class="pc-control-status"><span><Monitor :size="15" />Codex Desktop</span><strong>{{ status.codexDesktop.state === 'running' ? '运行中' : status.codexDesktop.state === 'starting' ? '启动中' : '已停止' }}</strong></div><div class="pc-control-status"><span><Server :size="15" />共享 app-server</span><strong>{{ status.appServer.connectionState === 'ready' ? '已连接' : status.appServer.connectionState || '未知' }}</strong></div><div class="pc-control-actions"><button type="button" :disabled="busy || status.phase === 'running'" @click="control('start')"><Power :size="14" />启动</button><button type="button" :disabled="busy || status.phase !== 'running'" @click="control('restart')"><RefreshCw :size="14" />重启</button><button type="button" :disabled="busy || status.phase !== 'running'" @click="control('stop')"><CircleStop :size="14" />暂停</button></div></section>
-      <section class="pc-control-section"><h2><Settings2 :size="15" />默认审批模式</h2><div class="pc-mode-options"><button v-for="mode in (['ask', 'auto', 'full'] as PermissionMode[])" :key="mode" type="button" :class="{ selected: status.permissionMode === mode }" :disabled="busy" @click="setPermissionMode(mode)"><span>{{ mode === 'ask' ? '请求审批' : mode === 'auto' ? '自动审批' : '完全访问' }}</span><Check v-if="status.permissionMode === mode" :size="15" /></button></div></section>
+      <section class="pc-control-section"><h2><Settings2 :size="15" />默认审批模式</h2><select class="pc-permission-select" :value="status.permissionMode" :disabled="busy" aria-label="默认审批模式" @change="setPermissionMode(($event.target as HTMLSelectElement).value as PermissionMode)"><option value="ask">请求审批</option><option value="auto">自动审批</option><option value="full">完全访问</option></select></section>
+      <section class="pc-control-section pc-mobile-devices"><div class="pc-section-heading"><h2><Smartphone :size="15" />已连接的手机</h2><button type="button" :disabled="peersLoading" @click="loadPeers"><RefreshCw :size="14" :class="{ 'pc-spin': peersLoading }" />刷新</button></div><div v-if="peersLoading && !phones.length" class="pc-peer-state">正在读取…</div><div v-else-if="!phones.length" class="pc-peer-state">暂无已连接手机</div><div v-else class="pc-peer-list"><div v-for="phone in phones" :key="phone.id" class="pc-peer-row"><Smartphone :size="15" /><div><strong>{{ phone.name }}</strong><small>{{ phone.online ? '在线' : '离线' }}</small></div><i :class="{ online: phone.online }"></i></div></div></section>
       <section class="pc-control-section pc-control-logs"><div><h2>运行日志</h2><button type="button" @click="loadLogs"><RefreshCw :size="14" />读取</button></div><pre>{{ logs ? `Agent\n${logs.agent}\n\nDesktop launcher\n${logs.desktop}` : '尚未读取日志' }}</pre><button v-if="logs" class="pc-copy-logs" type="button" @click="copyLogs"><Clipboard :size="14" />{{ copied ? '已复制' : '复制日志' }}</button></section>
     </aside>
   </div>
