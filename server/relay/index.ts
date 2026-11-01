@@ -16,7 +16,10 @@ type Employee = { id: string; userId: string; name: string; role: string; instru
 type Pairing = { codeHash: string; deviceId: string; userId: string; expiresAt: number }
 type PairRequest = { id: string; deviceId: string; userId: string; name: string; platform?: string; manufacturer?: string; model?: string; createdAt: number; expiresAt: number; status: 'pending' | 'approved' | 'denied'; token?: string }
 type MessageReceipt = { messageId: string; senderId: string; recipientId: string; fingerprint: string; threadId: string; deviceId: string; status: 'dispatching' | 'queued' | 'uncertain'; createdAt: number }
-type State = { devices: Device[]; clients: Client[]; pairings: Pairing[]; pairRequests: PairRequest[]; users: User[]; sessions: AuthSession[]; pushTokens: PushToken[]; notifications: NotificationEvent[]; notificationWatches: NotificationWatch[]; employees: Employee[]; employeeMessages: MessageReceipt[] }
+type PlanTrigger = { type: 'once' | 'interval'; at?: number; intervalMinutes?: number }
+type Plan = { id: string; userId: string; deviceId: string; name: string; prompt: string; employeeId?: string; cwd: string; trigger: PlanTrigger; overlap: 'skip' | 'queue' | 'parallel'; enabled: boolean; nextRunAt: number; createdAt: number; updatedAt: number }
+type PlanRun = { id: string; planId: string; userId: string; deviceId: string; employeeId?: string; threadId?: string; turnId?: string; status: 'pending' | 'running' | 'completed' | 'skipped' | 'failed' | 'cancelled'; triggeredAt: number; startedAt?: number; finishedAt?: number; summary?: string; error?: string }
+type State = { devices: Device[]; clients: Client[]; pairings: Pairing[]; pairRequests: PairRequest[]; users: User[]; sessions: AuthSession[]; pushTokens: PushToken[]; notifications: NotificationEvent[]; notificationWatches: NotificationWatch[]; employees: Employee[]; employeeMessages: MessageReceipt[]; plans: Plan[]; planRuns: PlanRun[] }
 type Credentials = { accessToken: string; refreshToken: string; expiresIn: number; user: { id: string; username: string; role?: User['role'] }; token?: string; clientToken?: string; deviceId?: string }
 type Pending = { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
 type StreamPending = { response: import('node:http').ServerResponse; timer: NodeJS.Timeout }
@@ -29,7 +32,7 @@ const adminPassword = process.env.RMDEX_ADMIN_PASSWORD || ''
 const statePath = process.env.RMDEX_STATE || '/data/state.json'
 const webRoot = process.env.RMDEX_WEB_ROOT || '/app/web'
 const employeeSkill = await readFile(process.env.RMDEX_EMPLOYEE_SKILL || join(process.cwd(), 'server', 'skills', 'rmdex-employee', 'SKILL.md'), 'utf8')
-const state: State = { devices: [], clients: [], pairings: [], pairRequests: [], users: [], sessions: [], pushTokens: [], notifications: [], notificationWatches: [], employees: [], employeeMessages: [] }
+const state: State = { devices: [], clients: [], pairings: [], pairRequests: [], users: [], sessions: [], pushTokens: [], notifications: [], notificationWatches: [], employees: [], employeeMessages: [], plans: [], planRuns: [] }
 const employeeDeliveries = new Set<string>()
 const messageDeliveries = new Set<string>()
 const ASSET_CONTEXT_VERSION = 2
@@ -39,6 +42,8 @@ const devicePending = new Map<string, Map<string, Pending>>()
 const deviceStreams = new Map<string, Map<string, StreamPending>>()
 const authAttempts = new Map<string, { count: number; until: number }>()
 const notificationWaiters = new Map<string, Set<{ after: number; resolve: () => void; timer: NodeJS.Timeout }>>()
+const planRunsInFlight = new Set<string>()
+let planScheduler: NodeJS.Timeout | undefined
 const scryptAsync = promisify(scrypt)
 const ACCESS_TTL = 15 * 60_000
 const REFRESH_TTL = 30 * 24 * 60 * 60_000
@@ -157,6 +162,8 @@ async function load() {
     state.notifications = Array.isArray(saved.notifications) ? saved.notifications.filter(item => item && typeof item.deviceId === 'string' && typeof item.threadId === 'string') : []
     state.notificationWatches = Array.isArray(saved.notificationWatches) ? saved.notificationWatches.filter(item => item && typeof item.deviceId === 'string' && typeof item.threadId === 'string' && typeof item.turnId === 'string').map(item => ({ deviceId: item.deviceId, threadId: item.threadId, turnId: item.turnId, name: typeof item.name === 'string' ? item.name : 'Codex 会话', createdAt: Number(item.createdAt) || Date.now() })) : []
     state.employeeMessages = Array.isArray(saved.employeeMessages) ? saved.employeeMessages.map(item => ({ ...item, status: item.status === 'dispatching' ? 'uncertain' : item.status })) : []
+    state.plans = Array.isArray(saved.plans) ? saved.plans.filter(item => item && typeof item.id === 'string' && typeof item.userId === 'string' && typeof item.deviceId === 'string' && typeof item.name === 'string' && typeof item.prompt === 'string' && item.trigger && (item.trigger.type === 'once' || item.trigger.type === 'interval') && state.users.some(user => user.id === item.userId) && state.devices.some(device => !device.revoked && device.id === item.deviceId && device.userId === item.userId)).map(item => ({ id: item.id, userId: item.userId, deviceId: item.deviceId, name: item.name, prompt: item.prompt, ...(typeof item.employeeId === 'string' ? { employeeId: item.employeeId } : {}), cwd: typeof item.cwd === 'string' ? item.cwd : '', trigger: item.trigger.type === 'once' ? { type: 'once', at: Number(item.trigger.at) || Date.now() } : { type: 'interval', intervalMinutes: Math.max(1, Number(item.trigger.intervalMinutes) || 60) }, overlap: ['skip', 'queue', 'parallel'].includes(item.overlap) ? item.overlap : 'skip', enabled: item.enabled !== false, nextRunAt: Number(item.nextRunAt) || Date.now(), createdAt: Number(item.createdAt) || Date.now(), updatedAt: Number(item.updatedAt) || Date.now() })) : []
+    state.planRuns = Array.isArray(saved.planRuns) ? saved.planRuns.filter(item => item && typeof item.id === 'string' && typeof item.planId === 'string' && typeof item.userId === 'string' && typeof item.deviceId === 'string' && state.users.some(user => user.id === item.userId) && state.plans.some(plan => plan.id === item.planId)).map(item => ({ ...item, status: ['pending', 'running', 'completed', 'skipped', 'failed', 'cancelled'].includes(item.status) ? item.status : 'failed' })) : []
     state.employees = Array.isArray(saved.employees) ? saved.employees.filter(item => item && typeof item.id === 'string' && typeof item.userId === 'string' && typeof item.name === 'string' && typeof item.deviceId === 'string' && typeof item.projectPath === 'string' && state.users.some(user => user.id === item.userId)).map(item => ({
       id: item.id, userId: item.userId, name: item.name, role: typeof item.role === 'string' ? item.role : '', instructions: typeof item.instructions === 'string' ? item.instructions : '', ...(typeof item.legacyMemory === 'string' && item.legacyMemory.trim() ? { legacyMemory: item.legacyMemory } : typeof item.memory === 'string' && item.memory.trim() ? { legacyMemory: item.memory } : {}), deviceId: item.deviceId, projectPath: item.projectPath, ...(typeof item.threadId === 'string' ? { threadId: item.threadId } : {}), ...(Number.isInteger(item.assetContextVersion) && typeof item.initializedThreadId === 'string' ? { initializedThreadId: item.initializedThreadId, assetContextVersion: item.assetContextVersion } : {}), createdAt: Number(item.createdAt) || Date.now(), updatedAt: Number(item.updatedAt) || Date.now(), ...(item.archived ? { archived: true } : {}),
     })) : []
@@ -259,6 +266,23 @@ async function communicate(req: import('node:http').IncomingMessage, res: import
     await persist()
     json(res, 201, { employee: employeeView(employee), createdBy: sender.id }); return
   }
+  if (req.method === 'POST' && pathname === '/api/employee-communication/plans') {
+    const data = await body(req)
+    if (Object.keys(data).some(key => !['name', 'prompt', 'cwd', 'triggerType', 'at', 'intervalMinutes', 'overlap'].includes(key))) { json(res, 400, { error: '只能提供计划名称、任务内容、工作目录、触发方式和并发策略' }); return }
+    const name = typeof data.name === 'string' ? data.name.trim().slice(0, 120) : ''
+    const prompt = typeof data.prompt === 'string' ? data.prompt.trim().slice(0, 20_000) : ''
+    const cwd = typeof data.cwd === 'string' && data.cwd.trim() ? data.cwd.trim().slice(0, 1000) : sender.projectPath
+    const triggerType = data.triggerType === 'once' ? 'once' : 'interval'
+    const at = Number(data.at)
+    const intervalMinutes = Math.max(1, Math.min(60 * 24 * 365, Number(data.intervalMinutes) || 60))
+    if (!name || !prompt || !cwd) { json(res, 400, { error: '需要填写计划名称和任务内容' }); return }
+    if (triggerType === 'once' && (!Number.isFinite(at) || at < Date.now() - 60_000)) { json(res, 400, { error: '一次性计划时间无效' }); return }
+    const now = Date.now()
+    const plan: Plan = { id: randomToken(12), userId: sender.userId, deviceId: sender.deviceId, name, prompt, employeeId: sender.id, cwd, trigger: triggerType === 'once' ? { type: 'once', at } : { type: 'interval', intervalMinutes }, overlap: ['skip', 'queue', 'parallel'].includes(String(data.overlap)) ? data.overlap as Plan['overlap'] : 'skip', enabled: true, nextRunAt: triggerType === 'once' ? at : now + intervalMinutes * 60_000, createdAt: now, updatedAt: now }
+    state.plans.push(plan)
+    await persist()
+    json(res, 201, { plan: planView(plan), createdBy: sender.id }); return
+  }
   if (req.method !== 'POST' || pathname !== '/api/employee-communication/messages') { json(res, 404, { error: 'Not found' }); return }
   const data = await body(req)
   if (Object.keys(data).some(key => !['recipientId', 'text', 'messageId'].includes(key)) || typeof data.recipientId !== 'string' || typeof data.text !== 'string' || !data.text.trim() || data.text.length > 16000 || typeof data.messageId !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(data.messageId)) {
@@ -313,6 +337,106 @@ function employeeContext(employee: Employee, assets: { assetPath: string; skillP
     '</rmdex_employee_context>',
     '<rmdex_user_request>',
   ].join('\n')
+}
+function planView(plan: Plan) {
+  const employee = plan.employeeId ? state.employees.find(item => item.id === plan.employeeId && !item.archived) : undefined
+  return { ...plan, ...(employee ? { employee: { id: employee.id, name: employee.name, threadId: employee.threadId || null } } : {}) }
+}
+function planRunView(run: PlanRun) {
+  const plan = state.plans.find(item => item.id === run.planId)
+  const employee = run.employeeId ? state.employees.find(item => item.id === run.employeeId && !item.archived) : undefined
+  return { ...run, planName: plan?.name || '已删除计划', ...(employee ? { employeeName: employee.name } : {}) }
+}
+function activeRunsFor(planId: string) {
+  return state.planRuns.filter(run => run.planId === planId && ['pending', 'running'].includes(run.status))
+}
+function advancePlan(plan: Plan, now = Date.now()) {
+  if (plan.trigger.type === 'once') { plan.enabled = false; plan.nextRunAt = 0; return }
+  const interval = Math.max(1, plan.trigger.intervalMinutes || 60) * 60_000
+  do { plan.nextRunAt += interval } while (plan.nextRunAt <= now)
+}
+async function finishPlanRun(run: PlanRun, status: PlanRun['status'], summary?: string, error?: string) {
+  run.status = status
+  run.finishedAt = Date.now()
+  if (summary) run.summary = summary.slice(0, 2000)
+  if (error) run.error = error.slice(0, 2000)
+  await persist()
+}
+async function monitorPlanRun(run: PlanRun, previousLastTurnId?: string) {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < 24 * 60 * 60_000) {
+    try {
+      const result = await rpc(run.deviceId, `/api/threads/${run.threadId}/status`, 'GET') as { activeTurnId?: string | null; lastTurn?: { id?: string; status?: string; error?: { message?: string } } | null }
+      if (!run.turnId && result.activeTurnId && result.activeTurnId !== previousLastTurnId) { run.turnId = result.activeTurnId; await persist() }
+      const last = result.lastTurn
+      if (run.turnId && last?.id === run.turnId && terminalTurnStatuses.has(last.status || '') && !result.activeTurnId) {
+        await finishPlanRun(run, last.status === 'completed' ? 'completed' : 'failed', last.status === 'completed' ? '计划执行完成' : `执行${last.status || '结束'}`, last.error?.message)
+        return
+      }
+      if (!run.turnId && last?.id && last.id !== previousLastTurnId && terminalTurnStatuses.has(last.status || '') && !result.activeTurnId) {
+        await finishPlanRun(run, last.status === 'completed' ? 'completed' : 'failed', last.status === 'completed' ? '计划执行完成' : `执行${last.status || '结束'}`, last.error?.message)
+        return
+      }
+    } catch { /* device reconnects are expected; keep the run visible and retry */ }
+    await new Promise(resolve => setTimeout(resolve, 3000))
+  }
+  await finishPlanRun(run, 'failed', undefined, '计划执行超过 24 小时未完成')
+}
+async function startPlanRun(run: PlanRun) {
+  if (planRunsInFlight.has(run.id)) return
+  planRunsInFlight.add(run.id)
+  try {
+    const plan = state.plans.find(item => item.id === run.planId)
+    const device = state.devices.find(item => item.id === run.deviceId && !item.revoked)
+    if (!plan || !device) { await finishPlanRun(run, 'failed', undefined, '计划或设备不存在'); return }
+    const employee = plan.employeeId ? employeeFor(plan.employeeId, run.userId) : undefined
+    if (plan.employeeId && (!employee || employee.deviceId !== run.deviceId)) { await finishPlanRun(run, 'failed', undefined, '计划绑定的员工不在当前设备'); return }
+    if (!deviceSockets.get(run.deviceId) || deviceSockets.get(run.deviceId)?.readyState !== WebSocket.OPEN) { run.status = 'pending'; await persist(); return }
+    run.status = 'running'; run.startedAt = Date.now(); await persist()
+    let threadId = employee?.threadId
+    let previousLastTurnId: string | undefined
+    if (threadId) {
+      const before = await rpc(run.deviceId, `/api/threads/${threadId}/status`, 'GET') as { activeTurnId?: string | null; lastTurn?: { id?: string } | null }
+      previousLastTurnId = before.activeTurnId || before.lastTurn?.id || undefined
+    } else {
+      const started = await rpc(run.deviceId, '/api/threads', 'POST', { cwd: plan.cwd, hidden: true, planRunId: run.id, name: `计划：${plan.name}` }) as { thread?: { id?: string } }
+      threadId = started.thread?.id
+    }
+    if (!threadId) throw new Error('无法创建计划执行 Thread')
+    run.threadId = threadId
+    const assets = employee ? await employeeAssets(employee) : undefined
+    const envelope = `<rmdex_plan_execution>\n${JSON.stringify({ planId: plan.id, planRunId: run.id, planName: plan.name, employeeId: employee?.id || null })}\n</rmdex_plan_execution>`
+    const text = employee && assets && needsEmployeeContext(employee) ? `${employeeContext(employee, assets)}\n${envelope}\n${plan.prompt}\n</rmdex_user_request>` : `${envelope}\n${plan.prompt}`
+    const queued = await rpc(run.deviceId, `/api/threads/${threadId}/queue`, 'POST', { text, clientUserMessageId: run.id }) as { turn?: { id?: string }; activeTurnId?: string | null }
+    run.turnId = queued.turn?.id && queued.turn.id !== previousLastTurnId ? queued.turn.id : (queued.activeTurnId && queued.activeTurnId !== previousLastTurnId ? queued.activeTurnId : run.turnId)
+    if (employee) { employee.initializedThreadId = threadId; employee.assetContextVersion = ASSET_CONTEXT_VERSION }
+    await persist()
+    void monitorPlanRun(run, previousLastTurnId)
+  } catch (error) {
+    await finishPlanRun(run, 'failed', undefined, error instanceof Error ? error.message : '计划执行失败')
+  } finally { planRunsInFlight.delete(run.id) }
+}
+async function schedulePlans() {
+  const now = Date.now()
+  let changed = false
+  for (const plan of state.plans) {
+    if (!plan.enabled || !plan.nextRunAt || plan.nextRunAt > now) continue
+    const active = activeRunsFor(plan.id)
+    if (active.length && plan.overlap === 'skip') {
+      state.planRuns.push({ id: randomToken(12), planId: plan.id, userId: plan.userId, deviceId: plan.deviceId, ...(plan.employeeId ? { employeeId: plan.employeeId } : {}), status: 'skipped', triggeredAt: now, finishedAt: now, summary: '上一次执行尚未完成，按计划策略跳过' })
+    } else {
+      state.planRuns.push({ id: randomToken(12), planId: plan.id, userId: plan.userId, deviceId: plan.deviceId, ...(plan.employeeId ? { employeeId: plan.employeeId } : {}), status: 'pending', triggeredAt: now })
+    }
+    advancePlan(plan, now)
+    changed = true
+  }
+  if (changed) await persist()
+  for (const run of state.planRuns.filter(item => item.status === 'pending')) {
+    const plan = state.plans.find(item => item.id === run.planId)
+    if (!plan) { await finishPlanRun(run, 'failed', undefined, '计划不存在'); continue }
+    if (plan.overlap !== 'parallel' && activeRunsFor(plan.id).some(item => item.id !== run.id && item.status === 'running')) continue
+    void startPlanRun(run)
+  }
 }
 function rpc(deviceId: string, path: string, method: string, data?: unknown): Promise<unknown> {
   const socket = deviceSockets.get(deviceId)
@@ -703,7 +827,55 @@ const server = createServer(async (req, res) => {
     if (!device) { json(res, 401, { error: '设备已撤销' }); return }
     const userId = device.userId
     if (req.method === 'GET' && url.pathname === '/api/employees') {
-      json(res, 200, { data: state.employees.filter(item => !item.archived && item.userId === userId).map(employeeView) }); return
+      json(res, 200, { data: state.employees.filter(item => !item.archived && item.userId === userId && item.deviceId === device.id).map(employeeView) }); return
+    }
+    if (req.method === 'GET' && url.pathname === '/api/plans') {
+      json(res, 200, { data: state.plans.filter(plan => plan.userId === userId && plan.deviceId === device.id).map(planView) }); return
+    }
+    if (req.method === 'GET' && url.pathname === '/api/plan-runs') {
+      const planId = url.searchParams.get('planId') || ''
+      const runs = state.planRuns.filter(run => run.userId === userId && run.deviceId === device.id && (!planId || run.planId === planId)).slice(-200).reverse()
+      json(res, 200, { data: runs.map(planRunView) }); return
+    }
+    if (req.method === 'POST' && url.pathname === '/api/plans/update') {
+      const data = await body(req)
+      const mode = typeof data.mode === 'string' ? data.mode : ''
+      const planId = typeof data.id === 'string' ? data.id : ''
+      const plan = planId ? state.plans.find(item => item.id === planId && item.userId === userId && item.deviceId === device.id) : undefined
+      if (mode === 'create') {
+        const name = typeof data.name === 'string' ? data.name.trim().slice(0, 120) : ''
+        const prompt = typeof data.prompt === 'string' ? data.prompt.trim().slice(0, 20_000) : ''
+        const cwd = typeof data.cwd === 'string' ? data.cwd.trim().slice(0, 1000) : ''
+        const triggerType = data.triggerType === 'once' ? 'once' : 'interval'
+        const at = Number(data.at)
+        const intervalMinutes = Math.max(1, Math.min(60 * 24 * 365, Number(data.intervalMinutes) || 60))
+        const employeeId = typeof data.employeeId === 'string' && data.employeeId ? data.employeeId : undefined
+        const employee = employeeId ? employeeFor(employeeId, userId) : undefined
+        if (!name || !prompt || !cwd || (employeeId && (!employee || employee.deviceId !== device.id))) { json(res, 400, { error: '计划名称、任务内容、工作目录或员工绑定无效' }); return }
+        if (triggerType === 'once' && (!Number.isFinite(at) || at < Date.now() - 60_000)) { json(res, 400, { error: '一次性计划时间无效' }); return }
+        const now = Date.now()
+        const created: Plan = { id: randomToken(12), userId, deviceId: device.id, name, prompt, ...(employeeId ? { employeeId } : {}), cwd, trigger: triggerType === 'once' ? { type: 'once', at } : { type: 'interval', intervalMinutes }, overlap: ['skip', 'queue', 'parallel'].includes(String(data.overlap)) ? data.overlap as Plan['overlap'] : 'skip', enabled: true, nextRunAt: triggerType === 'once' ? at : now + intervalMinutes * 60_000, createdAt: now, updatedAt: now }
+        state.plans.push(created); await persist(); json(res, 201, { plan: planView(created) }); return
+      }
+      if (!plan) { json(res, 404, { error: '计划不存在' }); return }
+      if (mode === 'delete') { state.plans = state.plans.filter(item => item.id !== plan.id); await persist(); json(res, 200, { ok: true }); return }
+      if (mode === 'pause' || mode === 'resume') {
+        plan.enabled = mode === 'resume'; plan.updatedAt = Date.now()
+        if (plan.enabled && !plan.nextRunAt) plan.nextRunAt = plan.trigger.type === 'once' ? (plan.trigger.at || Date.now()) : Date.now() + (plan.trigger.intervalMinutes || 60) * 60_000
+        await persist(); json(res, 200, { plan: planView(plan) }); return
+      }
+      if (mode === 'run') {
+        const run: PlanRun = { id: randomToken(12), planId: plan.id, userId, deviceId: device.id, ...(plan.employeeId ? { employeeId: plan.employeeId } : {}), status: 'pending', triggeredAt: Date.now() }
+        state.planRuns.push(run); await persist(); void startPlanRun(run); json(res, 202, { run: planRunView(run) }); return
+      }
+      json(res, 400, { error: '无效的计划操作' }); return
+    }
+    const planRunMatch = url.pathname.match(/^\/api\/plan-runs\/([A-Za-z0-9_-]+)\/cancel$/)
+    if (req.method === 'POST' && planRunMatch) {
+      const run = state.planRuns.find(item => item.id === planRunMatch[1] && item.userId === userId && item.deviceId === device.id)
+      if (!run) { json(res, 404, { error: '执行记录不存在' }); return }
+      if (['completed', 'skipped', 'failed', 'cancelled'].includes(run.status)) { json(res, 200, { run: planRunView(run) }); return }
+      run.status = 'cancelled'; run.finishedAt = Date.now(); await persist(); json(res, 200, { run: planRunView(run) }); return
     }
     if (req.method === 'POST' && url.pathname === '/api/employees') {
       const data = await body(req)
@@ -763,8 +935,8 @@ const server = createServer(async (req, res) => {
     }
     if (!['GET', 'POST', 'DELETE'].includes(req.method || '')) { json(res, 405, { error: 'Method not allowed' }); return }
     const allowed = req.method === 'GET'
-      ? /^\/api\/(?:models|projects|settings|automations|threads(?:\/[a-zA-Z0-9-]+(?:\/(?:status|incremental|queue|artifacts\/[a-zA-Z0-9-]+\/(?:content|preview)))?)?|images\/[a-f0-9-]+)$/.test(url.pathname)
-      : /^\/api\/(?:settings|automations\/update|threads|threads\/[a-zA-Z0-9-]+\/(?:send|retry|stop|history|name|fork|archive|unarchive|delete|queue|steer)|threads\/[a-zA-Z0-9-]+\/queue\/[^/]+(?:\/(?:steer|delete))?|approvals\/[a-zA-Z0-9-]+|user-input\/[a-zA-Z0-9-]+)$/.test(url.pathname)
+      ? /^\/api\/(?:models|projects|settings|threads(?:\/[a-zA-Z0-9-]+(?:\/(?:status|incremental|queue|artifacts\/[a-zA-Z0-9-]+\/(?:content|preview)))?)?|images\/[a-f0-9-]+)$/.test(url.pathname)
+      : /^\/api\/(?:settings|threads|threads\/[a-zA-Z0-9-]+\/(?:send|retry|stop|history|name|fork|archive|unarchive|delete|queue|steer)|threads\/[a-zA-Z0-9-]+\/queue\/[^/]+(?:\/(?:steer|delete))?|approvals\/[a-zA-Z0-9-]+|user-input\/[a-zA-Z0-9-]+)$/.test(url.pathname)
     const projectMutation = req.method === 'POST' && /^\/api\/projects(?:\/[a-zA-Z0-9-]+\/(?:update|delete))?$/.test(url.pathname)
     if ((!allowed && !(req.method === 'POST' && url.pathname === '/api/attachments') && !projectMutation) || url.search) { json(res, 404, { error: 'Not found' }); return }
     let requestData = req.method === 'POST' ? await body(req) : undefined
@@ -883,4 +1055,6 @@ sockets.on('connection', ws => {
 await load()
 await ensureAdminUser()
 for (const watch of state.notificationWatches) void watchTask(watch.deviceId, watch.threadId, watch.turnId, watch.name).catch(() => {})
+void schedulePlans().catch(error => console.error('[rmdex] plan scheduler failed:', error instanceof Error ? error.message : error))
+planScheduler = setInterval(() => { void schedulePlans().catch(error => console.error('[rmdex] plan scheduler failed:', error instanceof Error ? error.message : error)) }, 5000)
 server.listen(port, '0.0.0.0', () => console.log(`rmdex relay listening on ${port}`))

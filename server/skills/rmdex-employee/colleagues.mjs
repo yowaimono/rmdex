@@ -6,7 +6,7 @@ try {
   const config = JSON.parse(await readFile(new URL('./communication.json', import.meta.url), 'utf8'))
   const [command, ...args] = process.argv.slice(2)
   const option = name => args[args.indexOf(name) + 1]
-  if (!['list', 'send', 'create-employee'].includes(command)) throw new Error('Usage: colleagues.mjs list | send --to EMPLOYEE_ID --file UTF8_FILE --id MESSAGE_UUID | create-employee --name NAME --role ROLE --instructions-file UTF8_FILE')
+  if (!['list', 'send', 'create-employee', 'create-plan'].includes(command)) throw new Error('Usage: colleagues.mjs list | send --to EMPLOYEE_ID --file UTF8_FILE --id MESSAGE_UUID | create-employee --name NAME --role ROLE --instructions-file UTF8_FILE | create-plan --name NAME --prompt-file UTF8_FILE')
   let body
   if (command === 'send') {
     if (!args.includes('--to') || !args.includes('--file')) throw new Error('--to and --file are required')
@@ -17,8 +17,11 @@ try {
   } else if (command === 'create-employee') {
     if (!args.includes('--name') || !args.includes('--instructions-file')) throw new Error('--name and --instructions-file are required')
     body = { name: option('--name'), role: args.includes('--role') ? option('--role') : '', instructions: await readFile(option('--instructions-file'), 'utf8') }
+  } else if (command === 'create-plan') {
+    if (!args.includes('--name') || !args.includes('--prompt-file')) throw new Error('--name and --prompt-file are required')
+    body = { name: option('--name'), prompt: await readFile(option('--prompt-file'), 'utf8'), ...(args.includes('--cwd') ? { cwd: option('--cwd') } : {}), ...(args.includes('--trigger-type') ? { triggerType: option('--trigger-type') } : {}), ...(args.includes('--at') ? { at: Number(option('--at')) } : {}), ...(args.includes('--interval-minutes') ? { intervalMinutes: Number(option('--interval-minutes')) } : {}), ...(args.includes('--overlap') ? { overlap: option('--overlap') } : {}) }
   }
-  const path = command === 'list' ? 'colleagues' : command === 'send' ? 'messages' : 'employees'
+  const path = command === 'list' ? 'colleagues' : command === 'send' ? 'messages' : command === 'create-employee' ? 'employees' : 'plans'
   const response = await fetch(`${config.origin}/api/employee-communication/${path}`, {
     method: body ? 'POST' : 'GET', headers: { Authorization: `Bearer ${config.token}`, 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(45000), redirect: 'error',

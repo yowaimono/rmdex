@@ -29,7 +29,8 @@ const emit = defineEmits<{ 'pc-authenticated': [] }>()
 type Thread = { id: string; name?: string | null; preview?: string; cwd?: string; updatedAt?: number; status?: { type: string }; turns?: Turn[]; employeeId?: string; desktopDraft?: { projectId: string | null; deviceKey: string; preparing?: boolean } }
 type Project = { id: string; name: string; path: string; source: 'local' | 'desktop'; nativeProjectId?: string }
 type Employee = { id: string; name: string; role: string; instructions: string; deviceId: string; projectPath: string; threadId?: string; initializedThreadId?: string; createdAt: number; updatedAt: number }
-type Automation = { id: string; name: string; kind?: string; status?: string; rrule?: string; prompt?: string; model?: string; reasoningEffort?: string; executionEnvironment?: string; cwds?: string[]; targetThreadId?: string }
+type Plan = { id: string; name: string; prompt: string; employeeId?: string; employee?: { id: string; name: string; threadId?: string | null }; cwd: string; trigger: { type: 'once' | 'interval'; at?: number; intervalMinutes?: number }; overlap: 'skip' | 'queue' | 'parallel'; enabled: boolean; nextRunAt: number; createdAt: number; updatedAt: number }
+type PlanRun = { id: string; planId: string; planName: string; employeeId?: string; employeeName?: string; threadId?: string; turnId?: string; status: 'pending' | 'running' | 'completed' | 'skipped' | 'failed' | 'cancelled'; triggeredAt: number; startedAt?: number; finishedAt?: number; summary?: string; error?: string }
 const apiBase = Capacitor.isNativePlatform() ? 'https://code.kyeai.xyz' : ''
 const apiUrl = (path: string) => path.startsWith('http://') || path.startsWith('https://') ? path : `${apiBase}${path}`
 const RmdexBackgroundService = registerPlugin<{ start(options: { relayUrl: string; pushToken: string; cursor?: number }): Promise<void>; stop(): Promise<void> }>('RmdexBackgroundService')
@@ -66,17 +67,22 @@ const pcDeviceName = ref(props.pcDeviceName || 'Codex 电脑')
 const loginError = ref('')
 const loginLoading = ref(false)
 const authReady = ref(false)
-const activePage = ref<'workspace' | 'users' | 'settings' | 'automations'>('workspace')
-const automations = ref<Automation[]>([])
-const automationsLoading = ref(false)
-const automationsError = ref('')
-const automationEditor = ref(false)
-const automationSaving = ref(false)
-const automationName = ref('')
-const automationPrompt = ref('')
-const automationRrule = ref('')
-const automationCwd = ref('')
-const automationTargetThreadId = ref('')
+const activePage = ref<'workspace' | 'users' | 'settings' | 'plans'>('workspace')
+const plans = ref<Plan[]>([])
+const planRuns = ref<PlanRun[]>([])
+const plansLoading = ref(false)
+const plansError = ref('')
+const planTab = ref<'plans' | 'runs'>('plans')
+const planEditor = ref(false)
+const planSaving = ref(false)
+const planName = ref('')
+const planPrompt = ref('')
+const planEmployeeId = ref('')
+const planCwd = ref('')
+const planTriggerType = ref<'once' | 'interval'>('interval')
+const planAt = ref('')
+const planIntervalMinutes = ref('60')
+const planOverlap = ref<'skip' | 'queue' | 'parallel'>('skip')
 type ThemePreference = 'system' | 'light' | 'dark'
 const themePreference = ref<ThemePreference>((localStorage.getItem('rmdex-theme-preference') as ThemePreference | null) || 'system')
 const themeMediaQuery = typeof window !== 'undefined' ? window.matchMedia('(prefers-color-scheme: dark)') : null
@@ -109,6 +115,7 @@ const clientRefreshToken = ref(localStorage.getItem('rmdex-client-refresh-token'
 const devices = ref<Array<{ id: string; name: string; online: boolean }>>([])
 const connectingDeviceId = ref('')
 const revokingDeviceId = ref('')
+const deviceSwitchTarget = ref<{ id: string; name: string } | null>(null)
 const users = ref<Array<{ id: string; username: string; role?: string; deviceCount?: number }>>([])
 const onlineDeviceCounts = ref<Record<string, number>>({})
 const selectedUserId = ref('')
@@ -185,7 +192,7 @@ const projectError = ref('')
 const projectSaving = ref(false)
 const deleteProjectTarget = ref<Project | null>(null)
 const desktopProjects = ref<Array<{ id: string; name: string; path: string }>>([])
-const defaultCapabilities = { mode: 'app-server', automations: false, models: true, permissions: true, stop: true, approvals: true, create: true, send: true, retry: true, queue: true, steer: true, rename: true, fork: true, archive: true, delete: true, history: false, createRequiresPrompt: false }
+const defaultCapabilities = { mode: 'app-server', models: true, permissions: true, stop: true, approvals: true, create: true, send: true, retry: true, queue: true, steer: true, rename: true, fork: true, archive: true, delete: true, history: false, createRequiresPrompt: false }
 const capabilities = ref({ ...defaultCapabilities })
 const desktopMode = computed(() => capabilities.value.mode === 'desktop')
 const historyCursor = ref<string | null>(null)
@@ -1379,6 +1386,7 @@ async function refresh(force = true) {
       loadModels(),
       loadProjects(),
       loadEmployees(),
+      ...(force ? [loadPlans()] : []),
     ])
     if (!projects.value.length && desktopProjects.value.length) {
       projects.value = desktopProjects.value.map(project => ({ ...project, source: 'desktop', nativeProjectId: project.id }))
@@ -1578,29 +1586,43 @@ async function post(path: string, body: unknown) {
   if (!response.ok) throw new Error(result?.error || '请求失败')
   return result
 }
-async function loadAutomations() {
+async function loadPlans() {
   if (!clientToken.value) return
-  automationsLoading.value = true; automationsError.value = ''
-  try { const result = await get<{ data?: Automation[] }>('/api/automations'); automations.value = result.data || [] }
-  catch (e) { automationsError.value = e instanceof Error ? e.message : String(e) }
-  finally { automationsLoading.value = false }
-}
-function openAutomationEditor() {
-  automationName.value = ''; automationPrompt.value = ''; automationRrule.value = ''; automationCwd.value = selected.value?.cwd || ''; automationTargetThreadId.value = ''; automationEditor.value = true
-}
-async function saveAutomation() {
-  if (automationSaving.value) return
-  automationSaving.value = true; automationsError.value = ''
+  plansLoading.value = true; plansError.value = ''
   try {
-    await post('/api/automations/update', { mode: 'create', name: automationName.value.trim(), prompt: automationPrompt.value.trim(), rrule: automationRrule.value.trim(), cwds: automationCwd.value.trim() ? [automationCwd.value.trim()] : [], ...(automationTargetThreadId.value.trim() ? { target_thread_id: automationTargetThreadId.value.trim() } : {}) })
-    automationEditor.value = false; await loadAutomations()
-  } catch (e) { automationsError.value = e instanceof Error ? e.message : String(e) }
-  finally { automationSaving.value = false }
+    const [planResult, runResult] = await Promise.all([get<{ data?: Plan[] }>('/api/plans'), get<{ data?: PlanRun[] }>('/api/plan-runs')])
+    plans.value = planResult.data || []
+    planRuns.value = runResult.data || []
+  } catch (e) { plansError.value = e instanceof Error ? e.message : String(e) }
+  finally { plansLoading.value = false }
 }
-async function deleteAutomation(automation: Automation) {
-  if (!window.confirm(`删除计划“${automation.name}”？`)) return
-  try { await post('/api/automations/update', { mode: 'delete', id: automation.id }); await loadAutomations() }
-  catch (e) { automationsError.value = e instanceof Error ? e.message : String(e) }
+function openPlanEditor() {
+  planName.value = ''; planPrompt.value = ''; planEmployeeId.value = ''; planCwd.value = selected.value?.cwd || projects.value[0]?.path || ''; planTriggerType.value = 'interval'; planAt.value = ''; planIntervalMinutes.value = '60'; planOverlap.value = 'skip'; planEditor.value = true
+}
+function formatPlanTrigger(plan: Plan) {
+  return plan.trigger.type === 'once' ? `一次性 · ${new Date(plan.trigger.at || 0).toLocaleString()}` : `每 ${plan.trigger.intervalMinutes || 60} 分钟`
+}
+function formatPlanRunStatus(status: PlanRun['status']) {
+  return ({ pending: '等待中', running: '执行中', completed: '已完成', skipped: '已跳过', failed: '失败', cancelled: '已取消' } as Record<string, string>)[status] || status
+}
+async function savePlan() {
+  if (planSaving.value) return
+  planSaving.value = true; plansError.value = ''
+  try {
+    const payload = { mode: 'create', name: planName.value.trim(), prompt: planPrompt.value.trim(), cwd: planCwd.value.trim(), ...(planEmployeeId.value ? { employeeId: planEmployeeId.value } : {}), triggerType: planTriggerType.value, ...(planTriggerType.value === 'once' ? { at: new Date(planAt.value).getTime() } : { intervalMinutes: Number(planIntervalMinutes.value) }), overlap: planOverlap.value }
+    await post('/api/plans/update', payload)
+    planEditor.value = false; await loadPlans()
+  } catch (e) { plansError.value = e instanceof Error ? e.message : String(e) }
+  finally { planSaving.value = false }
+}
+async function updatePlan(plan: Plan, mode: 'pause' | 'resume' | 'run' | 'delete') {
+  if (mode === 'delete' && !window.confirm(`删除计划“${plan.name}”？`)) return
+  try { await post('/api/plans/update', { mode, id: plan.id }); await loadPlans() }
+  catch (e) { plansError.value = e instanceof Error ? e.message : String(e) }
+}
+async function cancelPlanRun(run: PlanRun) {
+  try { await post(`/api/plan-runs/${run.id}/cancel`, {}); await loadPlans() }
+  catch (e) { plansError.value = e instanceof Error ? e.message : String(e) }
 }
 async function adminFetch<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
   const headers: Record<string, string> = {}
@@ -1728,17 +1750,49 @@ function logout() {
   authReady.value = true
 }
 async function selectUser() { await loadDevices() }
-async function connectDevice(deviceId: string) {
-  if (connectingDeviceId.value) return
+function resetDeviceScopedState() {
+  selectionVersion++
+  selected.value = null
+  activeEmployeeId.value = null
+  activeTurnId.value = null
+  pendingApprovals.value = []
+  pendingUserInputs.value = []
+  lastTurn.value = null
+  queuedSubmissions.value = []
+  failedMessages.value = {}
+  pendingMessages.value = {}
+  threadIndicators.value = {}
+  localDraftThreads.value = []
+  historyCursor.value = null
+  mobileDetail.value = false
+  error.value = ''
+  modelsLoadedKey = ''
+  plans.value = []
+  planRuns.value = []
+  plansError.value = ''
+}
+function requestDeviceSwitch(device: { id: string; name: string; online: boolean }) {
+  if (!device.online || remoteDevice.value?.id === device.id || connectingDeviceId.value) return
+  deviceSwitchTarget.value = { id: device.id, name: device.name }
+}
+async function confirmDeviceSwitch() {
+  const target = deviceSwitchTarget.value
+  if (!target) return
+  if (await connectDevice(target.id)) deviceSwitchTarget.value = null
+}
+async function connectDevice(deviceId: string): Promise<boolean> {
+  if (connectingDeviceId.value) return false
   pairError.value = ''
   connectingDeviceId.value = deviceId
   try {
     const result = await adminFetch<{ accessToken?: string; refreshToken?: string; clientToken: string; device: { id: string; name: string; online: boolean } }>(`/api/devices/${deviceId}/web-client`, 'POST', {})
+    resetDeviceScopedState()
     storeSession('client', result)
     remoteDevice.value = result.device
     showDevices.value = false
     await refresh()
-  } catch (e) { pairError.value = e instanceof Error ? e.message : String(e) }
+    return true
+  } catch (e) { pairError.value = e instanceof Error ? e.message : String(e); return false }
   finally { connectingDeviceId.value = '' }
 }
 async function registerDevice() {
@@ -2289,7 +2343,7 @@ onMounted(async () => {
       await refresh()
     }
   }
-  if (clientToken.value) void loadAutomations()
+  if (clientToken.value) void loadPlans()
   authReady.value = true
   poll = setInterval(() => { void updateThread(); void refreshThreadIndicators(); if (adminToken.value && showDevices.value) void loadDevices() }, 2000)
 })
@@ -2336,19 +2390,20 @@ onUnmounted(() => { themeMediaQuery?.removeEventListener('change', handleSystemT
       </section>
     </section>
   </main>
-  <main v-else-if="activePage === 'automations'" class="settings-page">
+  <main v-else-if="activePage === 'plans'" class="settings-page">
     <header class="settings-topbar"><button class="admin-brand" type="button" @click="activePage = 'workspace'"><img :src="logoUrl" alt="" /><span>rmdex</span></button><button class="admin-nav-button" type="button" @click="activePage = 'workspace'"><ArrowLeft :size="16" />返回工作区</button></header>
-    <section class="settings-content" aria-labelledby="automations-title">
-      <div class="settings-heading"><p class="eyebrow">绑定设备</p><h1 id="automations-title">计划任务</h1><p>计划由当前绑定的 Codex Desktop 保存、触发和执行。</p></div>
-      <section class="settings-card automation-card" aria-labelledby="automation-list-title">
-        <div class="settings-card-heading"><span class="settings-card-icon"><CalendarClock :size="18" /></span><div><h2 id="automation-list-title">设备上的计划</h2><p>rmdex 只提供入口，计划数据来自 Codex Desktop。</p></div><button class="create-button automation-add-button" type="button" @click="openAutomationEditor"><Plus :size="15" />新建计划</button></div>
-        <p v-if="automationsError" class="create-error" role="alert">{{ automationsError }}</p>
-        <div v-if="automationsLoading" class="automation-state">正在读取绑定设备的计划…</div>
-        <div v-else-if="!automations.length" class="automation-state">当前设备还没有计划。</div>
-        <div v-else class="automation-list"><article v-for="automation in automations" :key="automation.id" class="automation-item"><div><strong>{{ automation.name }}</strong><small>{{ automation.rrule || automation.kind || '计划' }} · {{ automation.status || '未知状态' }}</small><p>{{ automation.prompt || '未提供任务内容' }}</p></div><button class="icon-button" type="button" title="删除计划" aria-label="删除计划" @click="deleteAutomation(automation)"><Trash2 :size="15" /></button></article></div>
+    <section class="settings-content" aria-labelledby="plans-title">
+      <div class="settings-heading"><p class="eyebrow">当前设备：{{ remoteDevice?.name || '本机设备' }}</p><h1 id="plans-title">计划任务</h1><p>计划属于当前设备，可绑定员工，也可以作为独立任务执行。</p></div>
+      <section class="settings-card plan-card" aria-labelledby="plan-list-title">
+        <div class="settings-card-heading"><span class="settings-card-icon"><CalendarClock :size="18" /></span><div><h2 id="plan-list-title">设备计划</h2><p>未绑定员工的执行线程会隐藏在普通会话列表之外。</p></div><button class="create-button automation-add-button" type="button" @click="openPlanEditor"><Plus :size="15" />新建计划</button></div>
+        <div class="plan-tabs" role="tablist"><button type="button" :class="{ selected: planTab === 'plans' }" @click="planTab = 'plans'">计划</button><button type="button" :class="{ selected: planTab === 'runs' }" @click="planTab = 'runs'">执行记录</button></div>
+        <p v-if="plansError" class="create-error" role="alert">{{ plansError }}</p>
+        <div v-if="plansLoading" class="automation-state">正在加载当前设备的计划…</div>
+        <template v-else-if="planTab === 'plans'"><div v-if="!plans.length" class="automation-state">当前设备还没有计划。</div><div v-else class="automation-list"><article v-for="plan in plans" :key="plan.id" class="automation-item"><div><strong>{{ plan.name }}</strong><small>{{ plan.employee?.name || '独立计划' }} · {{ formatPlanTrigger(plan) }} · {{ plan.enabled ? '运行中' : '已暂停' }}</small><p>{{ plan.prompt }}</p></div><div class="plan-item-actions"><button type="button" @click="updatePlan(plan, 'run')">立即执行</button><button type="button" @click="updatePlan(plan, plan.enabled ? 'pause' : 'resume')">{{ plan.enabled ? '暂停' : '恢复' }}</button><button class="icon-button" type="button" title="删除计划" aria-label="删除计划" @click="updatePlan(plan, 'delete')"><Trash2 :size="15" /></button></div></article></div></template>
+        <template v-else><div v-if="!planRuns.length" class="automation-state">当前设备还没有执行记录。</div><div v-else class="automation-list"><article v-for="run in planRuns" :key="run.id" class="automation-item"><div><strong>{{ run.planName }}</strong><small>{{ run.employeeName || '独立执行' }} · {{ formatPlanRunStatus(run.status) }} · {{ new Date(run.triggeredAt).toLocaleString() }}</small><p>{{ run.error || run.summary || '等待执行结果' }}</p></div><button v-if="['pending', 'running'].includes(run.status)" type="button" @click="cancelPlanRun(run)">停止</button></article></div></template>
       </section>
     </section>
-    <div v-if="automationEditor" class="modal-backdrop" @click.self="!automationSaving && (automationEditor = false)"><section class="create-dialog automation-dialog" role="dialog" aria-modal="true" aria-labelledby="automation-create-title"><header><div><h2 id="automation-create-title">新建计划</h2><p>由绑定设备上的 Codex Desktop 创建。</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="automationEditor = false"><X :size="18" /></button></header><form @submit.prevent="saveAutomation"><label for="automation-name">名称</label><input id="automation-name" v-model="automationName" required maxlength="120" placeholder="例如：每天检查项目状态" /><label for="automation-prompt">任务内容</label><textarea id="automation-prompt" v-model="automationPrompt" required rows="5" maxlength="20000" placeholder="描述 Codex 到时间后要执行的任务"></textarea><label for="automation-rrule">重复规则</label><input id="automation-rrule" v-model="automationRrule" required placeholder="按 Codex Desktop 支持的规则填写" /><label for="automation-cwd">工作目录</label><input id="automation-cwd" v-model="automationCwd" placeholder="例如：D:\WorkSpace\rmdex" /><label for="automation-thread">继续已有会话（可选）</label><input id="automation-thread" v-model="automationTargetThreadId" placeholder="Thread ID" /><p v-if="automationsError" class="create-error" role="alert">{{ automationsError }}</p><div class="dialog-actions"><button type="button" class="cancel-button" @click="automationEditor = false">取消</button><button type="submit" class="create-button" :disabled="automationSaving || !automationName.trim() || !automationPrompt.trim() || !automationRrule.trim()">{{ automationSaving ? '创建中…' : '创建计划' }}</button></div></form></section></div>
+    <div v-if="planEditor" class="modal-backdrop" @click.self="!planSaving && (planEditor = false)"><section class="create-dialog automation-dialog" role="dialog" aria-modal="true" aria-labelledby="plan-create-title"><header><div><h2 id="plan-create-title">新建计划</h2><p>计划保存在当前设备，由 rmdex server 调度。</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="planEditor = false"><X :size="18" /></button></header><form @submit.prevent="savePlan"><label for="plan-name">名称</label><input id="plan-name" v-model="planName" required maxlength="120" placeholder="例如：每天检查项目状态" /><label for="plan-employee">绑定员工（可选）</label><select id="plan-employee" v-model="planEmployeeId"><option value="">不绑定员工，创建独立执行线程</option><option v-for="employee in employees" :key="employee.id" :value="employee.id">{{ employee.name }}</option></select><label for="plan-prompt">任务内容</label><textarea id="plan-prompt" v-model="planPrompt" required rows="5" maxlength="20000" placeholder="描述员工或独立任务需要完成的工作"></textarea><label for="plan-cwd">工作目录</label><input id="plan-cwd" v-model="planCwd" required placeholder="例如：D:\WorkSpace\rmdex" /><label for="plan-trigger">触发方式</label><select id="plan-trigger" v-model="planTriggerType"><option value="interval">按间隔执行</option><option value="once">一次性执行</option></select><input v-if="planTriggerType === 'interval'" v-model="planIntervalMinutes" type="number" min="1" max="525600" required placeholder="间隔分钟数" /><input v-else v-model="planAt" type="datetime-local" required /><label for="plan-overlap">上次未完成时</label><select id="plan-overlap" v-model="planOverlap"><option value="skip">跳过本次</option><option value="queue">排队等待</option><option value="parallel">允许并行</option></select><p v-if="plansError" class="create-error" role="alert">{{ plansError }}</p><div class="dialog-actions"><button type="button" class="cancel-button" @click="planEditor = false">取消</button><button type="submit" class="create-button" :disabled="planSaving || !planName.trim() || !planPrompt.trim() || !planCwd.trim()">{{ planSaving ? '创建中…' : '创建计划' }}</button></div></form></section></div>
   </main>
   <main v-else-if="activePage === 'users' && isPlatformAdmin" class="admin-page">
     <header class="admin-topbar"><button class="admin-brand" type="button" @click="activePage = 'workspace'"><img :src="logoUrl" alt="" /><span>rmdex</span></button><div class="admin-top-actions"><button class="admin-nav-button" type="button" @click="activePage = 'workspace'"><ArrowLeft :size="16" />工作区</button><button class="admin-icon-button" type="button" title="设置" aria-label="设置" @click="activePage = 'settings'"><Settings :size="17" /></button></div></header>
@@ -2382,6 +2437,7 @@ onUnmounted(() => { themeMediaQuery?.removeEventListener('change', handleSystemT
             <div class="employee-swipe-actions" aria-label="AI 员工快捷操作"><button type="button" title="编辑员工" aria-label="编辑员工" @click.stop="openEmployeeEditor(employee)"><Pencil :size="15" /></button><button type="button" title="换绑 Thread" aria-label="换绑 Thread" :disabled="employeeResetting === employee.id" @click.stop="requestEmployeeThreadReset(employee)"><RotateCcw :size="15" :class="{ spin: employeeResetting === employee.id }" /></button></div>
           </div>
           <p v-if="!employees.length" class="employee-empty">创建一个有固定身份和长期记忆的 Codex 员工。</p>
+          <button v-if="clientToken" class="employee-plan-entry" type="button" @click="activePage = 'plans'; void loadPlans()"><CalendarClock :size="15" /><span>计划任务</span><ChevronRight :size="14" /></button>
         </div>
         <div class="section-label"><span>会话与 Projects <span class="count">{{ filtered.length }}</span></span><div class="section-actions"><button class="archive-toggle" type="button" :class="{ active: showArchivedThreads }" :title="showArchivedThreads ? '隐藏已归档' : '显示已归档'" @click="showArchivedThreads = !showArchivedThreads"><Archive :size="14" /><span v-if="archivedThreads.length">{{ archivedThreads.length }}</span></button><button class="icon-button" title="新建 Project" aria-label="新建 Project" @click="openProjectEditor()"><FolderPlus :size="15" /></button><button class="icon-button" title="刷新会话" aria-label="刷新会话" :disabled="loading" @click="retryConnection"><RefreshCw :size="15" /></button></div></div>
       <div v-if="threadActionError" class="sidebar-error">{{ threadActionError }}</div>
@@ -2427,7 +2483,7 @@ onUnmounted(() => { themeMediaQuery?.removeEventListener('change', handleSystemT
          <div v-if="!filtered.length && !projects.length && !loading" class="empty-list">{{ showArchivedThreads ? '暂无已归档会话' : '暂无会话或 Project' }}</div>
       </div>
       </div>
-      <footer class="side-footer"><span class="online" :class="{ offline: !connected }"></span> {{ remoteMode ? '远程设备' : '本机模式' }} <span class="footer-label">{{ connected ? '已连接' : '未连接' }}</span><span class="side-account-actions"><button v-if="clientToken && capabilities.automations" type="button" @click="activePage = 'automations'; void loadAutomations()" title="计划任务"><CalendarClock :size="15" /><span>计划</span></button><button v-if="isPlatformAdmin" type="button" @click="activePage = 'users'" title="用户管理"><Users :size="15" /><span>用户</span></button><button v-if="adminToken || clientToken" type="button" @click="activePage = 'settings'" title="设置"><Settings :size="15" /><span>设置</span></button></span></footer>
+      <footer class="side-footer"><span class="online" :class="{ offline: !connected }"></span> {{ remoteMode ? '远程设备' : '本机模式' }} <span class="footer-label">{{ connected ? '已连接' : '未连接' }}</span><span class="side-account-actions"><button v-if="isPlatformAdmin" type="button" @click="activePage = 'users'" title="用户管理"><Users :size="15" /><span>用户</span></button><button v-if="adminToken || clientToken" type="button" @click="activePage = 'settings'" title="设置"><Settings :size="15" /><span>设置</span></button></span></footer>
     </aside>
     <SidebarResize v-if="sidebarOpen" v-model="sidebarWidth" @change="saveSidebarWidth" @resizing="resizingSidebar = $event" />
     <main class="main" :class="{ hiddenMobile: !mobileDetail }">
@@ -2520,14 +2576,14 @@ onUnmounted(() => { themeMediaQuery?.removeEventListener('change', handleSystemT
         <div class="device-dialog-toolbar"><div><strong>我的 Codex 电脑</strong><small>{{ devices.length ? `${devices.length} 台已注册设备` : '还没有注册设备' }}</small></div><button class="create-button" type="button" @click="openRegisterDeviceDialog"><Plus :size="15" />添加电脑</button></div>
         <div v-if="pairRequests.length" class="pair-requests"><strong>待处理的手机配对</strong><div v-for="request in pairRequests" :key="request.id" class="pair-request"><span>{{ request.name }}</span><button type="button" @click="decidePair(request.id, 'deny')">拒绝</button><button type="button" class="approve-pair" @click="decidePair(request.id, 'approve')">允许</button></div></div>
         <div class="device-list">
-          <article v-for="device in devices" :key="device.id" class="device-row" :class="{ 'is-current': remoteDevice?.id === device.id }">
+          <article v-for="device in devices" :key="device.id" class="device-row" :class="{ 'is-current': remoteDevice?.id === device.id, 'is-switchable': device.online && remoteDevice?.id !== device.id }" @click="requestDeviceSwitch(device)">
             <span class="device-icon"><Monitor :size="17" /></span>
             <div class="device-copy"><strong>{{ device.name }}</strong><small>{{ device.online ? '可连接到这台电脑' : '当前离线，暂时无法连接' }}</small></div>
             <span class="device-status" :class="device.online ? 'is-online' : 'is-offline'">{{ remoteDevice?.id === device.id ? '当前设备' : device.online ? '在线' : '离线' }}</span>
             <div class="device-row-actions">
-              <button class="device-connect-button" type="button" :disabled="!device.online || !!connectingDeviceId || remoteDevice?.id === device.id" @click="connectDevice(device.id)"><LoaderCircle v-if="connectingDeviceId === device.id" :size="14" class="working-spinner" /><MessageSquare v-else :size="14" />{{ remoteDevice?.id === device.id ? '当前使用' : connectingDeviceId === device.id ? '正在连接' : device.online ? '连接' : '离线' }}</button>
-              <button class="device-action-button" type="button" title="生成手机配对码" :disabled="!!connectingDeviceId || !!revokingDeviceId" @click="openPairDialog(device.id)"><Smartphone :size="14" /><span>手机配对</span></button>
-              <button class="device-action-button revoke-button" type="button" title="撤销设备" :disabled="!!connectingDeviceId || !!revokingDeviceId" @click="revokeDevice(device.id)"><LoaderCircle v-if="revokingDeviceId === device.id" :size="14" class="working-spinner" /><Trash2 v-else :size="14" /><span>{{ revokingDeviceId === device.id ? '撤销中' : '撤销' }}</span></button>
+              <button class="device-connect-button" type="button" :disabled="!device.online || !!connectingDeviceId || remoteDevice?.id === device.id" @click.stop="connectDevice(device.id)"><LoaderCircle v-if="connectingDeviceId === device.id" :size="14" class="working-spinner" /><MessageSquare v-else :size="14" />{{ remoteDevice?.id === device.id ? '当前使用' : connectingDeviceId === device.id ? '正在连接' : device.online ? '连接' : '离线' }}</button>
+              <button class="device-action-button" type="button" title="生成手机配对码" :disabled="!!connectingDeviceId || !!revokingDeviceId" @click.stop="openPairDialog(device.id)"><Smartphone :size="14" /><span>手机配对</span></button>
+              <button class="device-action-button revoke-button" type="button" title="撤销设备" :disabled="!!connectingDeviceId || !!revokingDeviceId" @click.stop="revokeDevice(device.id)"><LoaderCircle v-if="revokingDeviceId === device.id" :size="14" class="working-spinner" /><Trash2 v-else :size="14" /><span>{{ revokingDeviceId === device.id ? '撤销中' : '撤销' }}</span></button>
             </div>
           </article>
           <p v-if="!devices.length" class="device-empty"><Monitor :size="18" /><strong>还没有连接电脑</strong><span>在新电脑上登录 rmdex PC，或添加手动配置的 agent。</span></p>
@@ -2539,5 +2595,6 @@ onUnmounted(() => { themeMediaQuery?.removeEventListener('change', handleSystemT
     </section></div>
     <div v-if="showRegisterDevice" class="modal-backdrop device-submodal" @click.self="showRegisterDevice = false"><section class="create-dialog register-device-dialog" role="dialog" aria-modal="true" aria-labelledby="register-device-title" @keydown.esc="showRegisterDevice = false"><header><div><h2 id="register-device-title">添加 Codex 电脑</h2><p>{{ newDeviceToken ? '注册码已生成，请在新电脑上完成连接。' : registerDeviceMode === 'guide' ? '推荐使用 rmdex-pc 登录账号自动注册。' : '仅在手动配置 agent 时生成注册码。' }}</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="showRegisterDevice = false"><X :size="18" /></button></header><template v-if="!newDeviceToken && registerDeviceMode === 'guide'"><div class="device-guide device-guide-primary"><strong>推荐方式：在新电脑上登录</strong><ol><li>在新电脑安装并打开 rmdex-pc。</li><li>输入要绑定的用户账号、密码和电脑名称。</li><li>点击“连接账号并启动”，设备会自动注册并上线。</li></ol><p>注册完成后，这台电脑会自动出现在当前设备列表中，不需要先在这里创建空设备。</p></div><div class="dialog-actions"><button type="button" class="cancel-button" @click="showRegisterDevice = false">关闭</button><button type="button" class="create-button" @click="registerDeviceMode = 'manual'"><Wrench :size="15" />手动配置注册码</button></div></template><template v-else-if="!newDeviceToken"><label class="user-select-label">设备所属用户</label><UserMenu v-model="selectedUserId" :users="users" :disabled="!isPlatformAdmin || users.length < 2" @update:model-value="selectUser" /><label for="new-device-name">电脑名称</label><input id="new-device-name" v-model="deviceName" maxlength="80" autocomplete="off" placeholder="例如：办公室电脑" /><div class="device-guide"><strong>手动配置适用于已有 agent 的电脑</strong><p>生成后复制注册码，并将它配置到电脑端的 <code>RMDEX_DEVICE_TOKEN</code>。普通的新电脑请返回上一步，直接使用 rmdex-pc 登录。</p></div><p v-if="pairError" class="create-error" role="alert">{{ pairError }}</p><div class="dialog-actions"><button type="button" class="cancel-button" @click="registerDeviceMode = 'guide'">返回</button><button type="button" class="create-button" :disabled="!selectedUserId || !deviceName.trim()" @click="registerDevice"><Plus :size="15" />生成注册码</button></div></template><div v-else class="device-secret"><strong>注册码已生成</strong><p>将它配置到手动 agent 后，设备会出现在设备列表。普通新电脑不需要使用注册码，直接在 rmdex-pc 登录即可。</p><code>{{ newDeviceToken }}</code><button class="copy-button" type="button" @click="copyValue(newDeviceToken, '已复制设备注册码')"><Copy :size="15" />复制注册码</button><small>手动配置：RMDEX_RELAY_URL=wss://code.kyeai.xyz/agent<br />RMDEX_DEVICE_TOKEN={{ newDeviceToken }}</small><div class="dialog-actions"><button type="button" class="create-button" @click="showRegisterDevice = false">完成</button></div></div></section></div>
     <div v-if="showPairDialog" class="modal-backdrop device-submodal" @click.self="showPairDialog = false"><section class="create-dialog pair-dialog" role="dialog" aria-modal="true" aria-labelledby="pair-dialog-title" @keydown.esc="showPairDialog = false"><header><div><h2 id="pair-dialog-title">手机扫码配对</h2><p>二维码和配对码 3 分钟内有效，只能使用一次。</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="showPairDialog = false"><X :size="18" /></button></header><div v-if="pairQr" class="pair-result"><img :src="pairQr" alt="手机扫码配对二维码" /><div><strong>使用手机扫描二维码</strong><code>{{ pairCode }}</code><button class="copy-button" type="button" @click="copyValue(pairUrl, '已复制配对链接')"><Copy :size="15" />复制配对链接</button></div></div><div v-else class="pair-loading"><LoaderCircle :size="18" class="working-spinner" />正在生成配对码…</div><p v-if="pairError" class="create-error" role="alert">{{ pairError }}</p></section></div>
+    <div v-if="deviceSwitchTarget" class="modal-backdrop device-submodal" @click.self="deviceSwitchTarget = null"><section class="create-dialog device-switch-dialog" role="dialog" aria-modal="true" aria-labelledby="device-switch-title" @keydown.esc="deviceSwitchTarget = null"><header><div><h2 id="device-switch-title">切换当前设备</h2><p>切换后会重新加载这台设备的会话、AI 员工、计划任务和执行记录。</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="deviceSwitchTarget = null"><X :size="18" /></button></header><p class="device-switch-copy">确定切换到“{{ deviceSwitchTarget.name }}”吗？</p><div class="dialog-actions"><button type="button" class="cancel-button" @click="deviceSwitchTarget = null">取消</button><button type="button" class="create-button" :disabled="!!connectingDeviceId" @click="confirmDeviceSwitch">{{ connectingDeviceId ? '切换中…' : '确认切换' }}</button></div></section></div>
   </div>
 </template>

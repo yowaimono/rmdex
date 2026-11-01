@@ -12,8 +12,6 @@ import { AttachmentStore, attachmentInput } from './attachments.ts'
 import { ProjectStore } from './project-store.ts'
 import { installEmployeeSkill } from './employee-assets.ts'
 import { OperationJournal } from './desktop-adapter.ts'
-import { DesktopMcp } from './desktop-mcp.ts'
-import { readDesktopContext } from './desktop-context.ts'
 import { MessageRetryService } from './message-retry.ts'
 import { ArtifactRegistry } from './artifacts.ts'
 import './remote-agent.ts'
@@ -33,21 +31,12 @@ const codexHome = process.env.CODEX_HOME || join(homedir(), '.codex')
 const sharedSocket = process.env.RMDEX_CODEX_SOCKET || join(codexHome, 'app-server-control', 'app-server-control.sock')
 const sharedMode = ['shared', 'proxy'].includes(requestedMode)
 const threadNamesPath = join(codexHome, 'rmdex-thread-names.json')
+const hiddenThreadsPath = join(codexHome, 'rmdex-hidden-threads.json')
 const projectStore = new ProjectStore(codexHome)
-async function desktopAutomationCall(data: Record<string, unknown>) {
-  const context = await readDesktopContext()
-  const client = new DesktopMcp(context)
-  try {
-    await client.ready
-    if (!(await client.tools()).some(tool => tool.name === 'automation_update')) throw new Error('当前 Codex Desktop 未提供计划能力')
-    return await client.call('automation_update', data, true)
-  } finally { client.close() }
-}
-async function desktopAutomationAvailable() {
-  try { await desktopAutomationCall({ mode: 'view' }); return true } catch { return false }
-}
 let threadNames: Record<string, string> = {}
+const hiddenThreadIds = new Set<string>()
 const threadNamesReady = readFile(threadNamesPath, 'utf8').then(raw => { threadNames = JSON.parse(raw) }).catch(error => { if (error.code !== 'ENOENT') console.warn(`[rmdex] Thread names could not be loaded: ${error.message}`) })
+const hiddenThreadsReady = readFile(hiddenThreadsPath, 'utf8').then(raw => { const values = JSON.parse(raw); if (Array.isArray(values)) for (const value of values) if (typeof value === 'string') hiddenThreadIds.add(value) }).catch(error => { if (error.code !== 'ENOENT') console.warn(`[rmdex] Hidden plan threads could not be loaded: ${error.message}`) })
 let threadListCache: { expiresAt: number; data: Array<Record<string, unknown>> } | undefined
 let threadListRequest: Promise<Array<Record<string, unknown>>> | undefined
 const codexArgs = sharedMode ? ['app-server', 'proxy', '--sock', sharedSocket] : ['app-server']
@@ -134,13 +123,19 @@ function applyThreadName(thread: Record<string, unknown>) {
 async function persistThreadNames() {
   await writeFile(threadNamesPath, JSON.stringify(threadNames, null, 2), { mode: 0o600 })
 }
+async function persistHiddenThreads() {
+  await writeFile(hiddenThreadsPath, JSON.stringify([...hiddenThreadIds], null, 2), { mode: 0o600 })
+}
+function isHiddenThread(thread: Record<string, unknown>) {
+  return typeof thread.id === 'string' && hiddenThreadIds.has(thread.id)
+}
 async function listThreads() {
-  await threadNamesReady
+  await Promise.all([threadNamesReady, hiddenThreadsReady])
   if (threadListCache && threadListCache.expiresAt > Date.now()) return threadListCache.data
   if (threadListRequest) return threadListRequest
   threadListRequest = rpc('thread/list', { limit: 100, sortKey: 'updated_at' }).then(raw => {
     const list = raw as { data?: Array<Record<string, unknown>> }
-    const data = (list.data || []).map(applyThreadName)
+    const data = (list.data || []).filter(thread => !isHiddenThread(thread)).map(applyThreadName)
     threadListCache = { expiresAt: Date.now() + 3000, data }
     return data
   }).finally(() => { threadListRequest = undefined })
@@ -627,6 +622,7 @@ const server = createServer(async (req, res) => {
         const started = await rpc('thread/start', { cwd }) as { thread?: Record<string, unknown> }
         if (typeof started.thread?.id !== 'string') throw new Error('Codex 未返回会话 ID')
         newThreads.set(started.thread.id, started.thread)
+        if (data.hidden === true && typeof data.planRunId === 'string' && data.planRunId) { hiddenThreadIds.add(started.thread.id); await Promise.all([hiddenThreadsReady, persistHiddenThreads()]) }
         threadCwds.set(started.thread.id, cwd)
         threadListCache = undefined
         result = { thread: started.thread }
@@ -822,10 +818,6 @@ const server = createServer(async (req, res) => {
       const threadId = url.pathname.split('/')[3]!
       if (sharedMode && !newThreads.has(threadId)) await subscribeToThread(threadId)
       result = await rpc('thread/queue/list', { threadId, limit: 100 })
-    } else if (url.pathname === '/api/automations') {
-      result = await desktopAutomationCall({ mode: 'view' })
-    } else if (url.pathname === '/api/automations/update') {
-      result = await desktopAutomationCall(requestData || {})
     } else if (url.pathname === '/api/projects') {
       result = { data: await projectStore.list() }
     } else if (url.pathname === '/api/models') {
@@ -833,7 +825,6 @@ const server = createServer(async (req, res) => {
         data: await listModels(),
         capabilities: {
           mode: 'app-server',
-          automations: await desktopAutomationAvailable(),
           models: true,
           permissions: true,
           stop: true,
@@ -854,7 +845,7 @@ const server = createServer(async (req, res) => {
     } else if (url.pathname === '/api/threads') {
       const data = await listThreads()
       const listed = new Set(data.map(thread => String(thread.id)))
-      result = { data: [...[...newThreads.values()].filter(thread => !listed.has(String(thread.id))).map(applyThreadName), ...data] }
+      result = { data: [...[...newThreads.values()].filter(thread => !listed.has(String(thread.id)) && !isHiddenThread(thread)).map(applyThreadName), ...data] }
     } else if (/^\/api\/threads\/[a-zA-Z0-9-]+\/incremental$/.test(url.pathname)) {
       const threadId = url.pathname.split('/')[3]!
       if (sharedMode && !newThreads.has(threadId)) await subscribeToThread(threadId)

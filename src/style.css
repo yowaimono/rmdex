@@ -103,6 +103,9 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .search input::placeholder { color: #a5b0bb; }
 .section-label { display: flex; align-items: center; justify-content: space-between; margin: 21px 17px 5px 20px; color: #778594; font-size: 12px; font-weight: 600; }
 .employee-section { margin-top: 2px; padding-bottom: 5px; border-bottom: 1px solid #e8edf2; }
+.employee-plan-entry { width: 100%; display: flex; align-items: center; gap: 8px; margin-top: 6px; padding: 8px 10px; border: 0; border-radius: 6px; color: #708399; background: transparent; font-size: 11px; text-align: left; }
+.employee-plan-entry span { flex: 1; }
+.employee-plan-entry:hover { color: #1675e8; background: #f5f8fb; }
 .employee-section .section-label { margin-top: 8px; }
 .employee-row { position: relative; display: flex; align-items: stretch; min-height: 43px; margin: 0 10px; overflow: hidden; border-radius: 6px; color: #445465; }
 .employee-row:hover, .employee-row.selected { background: #eef5fd; }
@@ -513,6 +516,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .claim-pair { padding-top: 18px; margin-top: 18px; border-top: 1px solid #edf1f5; }
 .device-list { display: grid; gap: 9px; margin-top: 13px; }
 .device-dialog .device-row { display: flex; align-items: center; gap: 11px; min-width: 0; min-height: 0; padding: 12px; border: 1px solid #e5ebf1; border-radius: 8px; background: #fff; transition: border-color .16s ease, background .16s ease; }
+.device-dialog .device-row.is-switchable { cursor: pointer; }
+.device-dialog .device-row.is-switchable:hover { border-color: #9fc6ef; background: #f7fbff; }
 .device-dialog .device-row.is-current { border-color: #b8d6f5; background: #f6faff; }
 .device-dialog .device-row > .device-icon { width: 36px; height: 36px; display: grid; place-items: center; flex: none; border-radius: 8px; color: #1476d4; background: #eaf4ff; }
 .device-dialog .device-row .device-copy { min-width: 0; flex: 1; }
@@ -553,6 +558,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .pair-result { display: flex; align-items: center; gap: 14px; }
 .pair-result img { width: 132px; height: 132px; flex: none; }
 .pair-result > div { min-width: 0; }
+.device-switch-dialog { width: min(100%, 460px); }
+.device-switch-copy { margin-top: 18px; color: #526b83; font-size: 13px; line-height: 1.6; }
 @media (max-width: 420px) { .pair-result { align-items: flex-start; flex-direction: column; } }
 @media (max-width: 560px) {
   .device-dialog { padding: 18px; }
@@ -694,6 +701,12 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .automation-item strong { color: #344252; font-size: 13px; }
 .automation-item small { margin-top: 4px; color: #8e9ca9; font-size: 11px; }
 .automation-item p { margin: 8px 0 0; color: #596b7b; font-size: 12px; line-height: 1.5; white-space: pre-wrap; }
+.plan-tabs { display: flex; gap: 6px; margin: 18px 0 4px; border-bottom: 1px solid #e4eaf0; }
+.plan-tabs button { padding: 8px 10px; border: 0; border-bottom: 2px solid transparent; color: #7b8b99; background: transparent; font-size: 12px; }
+.plan-tabs button.selected { border-bottom-color: #0879f9; color: #0879f9; font-weight: 650; }
+.plan-item-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+.plan-item-actions button { min-height: 29px; padding: 0 8px; border: 1px solid #dce5ed; border-radius: 5px; color: #526d86; background: #fff; font-size: 10px; }
+.plan-item-actions button:hover { border-color: #a8c4e2; color: #0879f9; }
 .automation-dialog { width: min(100%, 560px); }
 .automation-dialog textarea { width: 100%; min-height: 110px; resize: vertical; padding: 9px 10px; border: 1px solid #dfe6ed; border-radius: 5px; outline: 0; color: #263545; background: #fff; font: inherit; font-size: 13px; line-height: 1.5; }
 .automation-dialog textarea:focus { border-color: #8dbcf0; box-shadow: 0 0 0 2px rgba(8, 121, 249, .1); }
@@ -714,6 +727,11 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 :root[data-theme='dark'] .automation-item { border-color: #304154; background: #17222e; }
 :root[data-theme='dark'] .automation-item strong { color: #d5e0eb; }
 :root[data-theme='dark'] .automation-item p { color: #aebdca; }
+:root[data-theme='dark'] .plan-tabs { border-color: #2c3d4f; }
+:root[data-theme='dark'] .plan-tabs button { color: #91a3b5; }
+:root[data-theme='dark'] .plan-tabs button.selected { border-bottom-color: #72b2ff; color: #72b2ff; }
+:root[data-theme='dark'] .plan-item-actions button { border-color: #34475b; color: #c2cfdd; background: #1b2837; }
+:root[data-theme='dark'] .plan-item-actions button:hover { border-color: #527da8; color: #72b2ff; background: #24394f; }
 :root[data-theme='dark'] .automation-dialog textarea { border-color: #344659; color: #e5edf5; background: #121c27; }
 :root[data-theme='dark'] .auth-brand, :root[data-theme='dark'] .admin-brand, :root[data-theme='dark'] .brand { color: #eef4fb; }
 :root[data-theme='dark'] .auth-panel h1, :root[data-theme='dark'] .users-heading h1, :root[data-theme='dark'] .settings-heading h1 { color: #edf3f9; }
@@ -753,6 +771,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 :root[data-theme='dark'] .side-footer { border-color: #2a394a; color: #8fa1b3; }
 :root[data-theme='dark'] .footer-label, :root[data-theme='dark'] .side-account-actions button { color: #8293a6; }
 :root[data-theme='dark'] .side-account-actions button:hover { color: #72b2ff; background: #21354b; }
+:root[data-theme='dark'] .employee-plan-entry { color: #a8b8c8; }
+:root[data-theme='dark'] .employee-plan-entry:hover { color: #72b2ff; background: #21354b; }
 :root[data-theme='dark'] .thread-menu, :root[data-theme='dark'] .message-action-menu, :root[data-theme='dark'] .model-popup, :root[data-theme='dark'] .permission-popup, :root[data-theme='dark'] .project-popup, :root[data-theme='dark'] .user-menu-popup, :root[data-theme='dark'] .queued-followup-menu { border-color: #34475b; background: #1b2837; box-shadow: 0 12px 30px rgba(0, 0, 0, .32); }
 :root[data-theme='dark'] .thread-menu button, :root[data-theme='dark'] .message-action-option, :root[data-theme='dark'] .model-option, :root[data-theme='dark'] .permission-option, :root[data-theme='dark'] .project-option, :root[data-theme='dark'] .user-menu-option { color: #c2cfdd; }
 :root[data-theme='dark'] .thread-menu button:hover, :root[data-theme='dark'] .message-action-option:hover, :root[data-theme='dark'] .model-option:hover, :root[data-theme='dark'] .model-option.is-selected, :root[data-theme='dark'] .permission-option:hover, :root[data-theme='dark'] .project-option:hover, :root[data-theme='dark'] .user-menu-option:hover, :root[data-theme='dark'] .user-menu-option.is-selected { color: #75b6ff; background: #24394f; }
@@ -813,12 +833,14 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 :root[data-theme='dark'] .device-guide strong, :root[data-theme='dark'] .mobile-pair-intro strong, :root[data-theme='dark'] .client-device-state strong { color: #dbe8f4; }
 :root[data-theme='dark'] .device-dialog .device-row { border-color: #304254; background: #192633; }
 :root[data-theme='dark'] .device-dialog .device-row.is-current { border-color: #4c79a5; background: #1b3047; }
+:root[data-theme='dark'] .device-dialog .device-row.is-switchable:hover { border-color: #527da8; background: #1d3855; }
 :root[data-theme='dark'] .device-status { color: #9aaabd; background: #273442; }
 :root[data-theme='dark'] .device-status.is-online { color: #8dd7b1; background: #1e4234; }
 :root[data-theme='dark'] .device-status.is-offline { color: #9aa6b3; background: #27303a; }
 :root[data-theme='dark'] .device-connect-button, :root[data-theme='dark'] .device-action-button, :root[data-theme='dark'] .dialog-actions button { border-color: #3a4c60; color: #b6c5d3; background: #1b2938; }
 :root[data-theme='dark'] .device-connect-button { border-color: #277fdb; color: #fff; background: #1769b6; }
 :root[data-theme='dark'] .copy-button { border-color: #3c6080; color: #9bc8f4; background: #1d3044; }
+:root[data-theme='dark'] .device-switch-copy { color: #b8c7d5; }
 :root[data-theme='dark'] .users-table th { border-color: #2c3d4f; color: #91a3b5; background: #172331; }
 :root[data-theme='dark'] .users-table td { border-color: #2c3d4f; color: #b8c7d5; }
 :root[data-theme='dark'] .users-table td:first-child { color: #dbe5ef; }

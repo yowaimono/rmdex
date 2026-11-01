@@ -73,14 +73,11 @@ export class DesktopAdapter {
     const names = new Set(tools.map(tool => tool.name))
     const data = sharedDesktopModels(tools)
     const projects = names.has('list_projects') ? await this.projects() : []
-    return { data, capabilities: { mode: 'desktop', automations: names.has('automation_update'), models: data.length > 0, permissions: false, stop: false, approvals: false, create: names.has('create_thread'), send: names.has('send_message_to_thread'), retry: false, queue: false, steer: false, rename: false, fork: false, archive: false, delete: false, history: true, createRequiresPrompt: true }, projects }
+    return { data, capabilities: { mode: 'desktop', models: data.length > 0, permissions: false, stop: false, approvals: false, create: names.has('create_thread'), send: names.has('send_message_to_thread'), retry: false, queue: false, steer: false, rename: false, fork: false, archive: false, delete: false, history: true, createRequiresPrompt: true }, projects }
   }
   async projects() {
     const raw = await this.client.call('list_projects', {})
     return (raw.projects || []).filter((project: any) => project.projectKind !== 'chatgpt' && project.hostId === 'local' && project.path).map((project: any) => ({ id: project.projectId, name: project.label, path: project.path }))
-  }
-  async automationUpdate(data: Record<string, unknown>) {
-    return this.client.call('automation_update', data, true)
   }
   async list() {
     const raw = await this.client.call('list_threads', { limit: 50 })
