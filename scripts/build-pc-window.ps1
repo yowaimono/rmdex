@@ -21,6 +21,6 @@ Copy-Item -LiteralPath $core,$forms,(Join-Path $package 'build\native\x64\WebVie
 $exe = Join-Path $out 'rmdex-pc-3x4.exe'
 $icon = Join-Path $project 'pc\windows\rmdex.ico'
 if (-not (Test-Path -LiteralPath $icon)) { throw 'rmdex PC icon is missing.' }
-& $compiler /nologo /target:winexe /platform:x64 "/out:$exe" "/win32icon:$icon" /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll "/reference:$core" "/reference:$forms" (Join-Path $project 'pc\windows\Dashboard.cs')
+& $compiler /nologo /target:winexe /platform:x64 "/out:$exe" "/win32icon:$icon" /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Web.Extensions.dll "/reference:$core" "/reference:$forms" (Join-Path $project 'pc\windows\Dashboard.cs')
 if ($LASTEXITCODE -ne 0) { throw "WebView2 host build failed (exit $LASTEXITCODE)." }
 Write-Host "Built $exe"

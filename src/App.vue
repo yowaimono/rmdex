@@ -144,7 +144,7 @@ const projectError = ref('')
 const projectSaving = ref(false)
 const deleteProjectTarget = ref<Project | null>(null)
 const desktopProjects = ref<Array<{ id: string; name: string; path: string }>>([])
-const defaultCapabilities = { mode: 'app-server', models: true, permissions: true, stop: true, approvals: true, create: true, send: true, retry: false, queue: true, steer: true, rename: true, fork: true, archive: true, delete: true, history: false, createRequiresPrompt: false }
+const defaultCapabilities = { mode: 'app-server', models: true, permissions: true, stop: true, approvals: true, create: true, send: true, retry: true, queue: true, steer: true, rename: true, fork: true, archive: true, delete: true, history: false, createRequiresPrompt: false }
 const capabilities = ref({ ...defaultCapabilities })
 const desktopMode = computed(() => capabilities.value.mode === 'desktop')
 const historyCursor = ref<string | null>(null)
@@ -1963,6 +1963,7 @@ async function handleAppUrl(rawUrl: string) {
 onMounted(async () => {
   removeInAppLinks = installInAppLinks(message => { error.value = message })
   window.addEventListener('keydown', handlePreviewKey)
+  const desktopOpenThreadId = new URLSearchParams(location.search).get('openThread')?.trim() || ''
   let handledLaunch = false
   for (const task of notificationTasks()) trackedTasks.set(task.threadId, { turnId: task.turnId, text: task.text, name: task.name })
   const notificationsReady = await setupNotifications()
@@ -1977,6 +1978,13 @@ onMounted(async () => {
     if (code) await handleAppUrl(location.href)
     else if (Capacitor.isNativePlatform() && !clientToken.value) { pairLanding.value = true; showDevices.value = true }
     else if (clientToken.value || !remoteMode.value) void refresh()
+  }
+  if (desktopOpenThreadId) {
+    await refresh()
+    const thread = threads.value.find(item => item.id === desktopOpenThreadId)
+    if (thread) await openThread(thread)
+    else error.value = '找不到要打开的会话，可能已被删除或当前设备无权访问'
+    history.replaceState({}, '', `${location.pathname}${location.hash}`)
   }
   if (adminToken.value) {
     await loadDevices()

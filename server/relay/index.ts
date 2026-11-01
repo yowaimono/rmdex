@@ -9,7 +9,7 @@ type Device = { id: string; userId: string; name: string; tokenHash: string; cre
 type Client = { tokenHash: string; deviceId: string; name: string; createdAt: number; lastSeenAt?: number; revoked?: boolean }
 type User = { id: string; username: string; passwordHash: string; role: 'admin' | 'user'; createdAt: number; disabled?: boolean }
 type AuthSession = { id: string; familyId: string; userId: string; deviceId?: string; name?: string; accessHash: string; accessExpiresAt: number; refreshHash: string; refreshExpiresAt: number; usedRefreshHashes?: string[]; createdAt: number; lastSeenAt?: number; revoked?: boolean }
-type PushToken = { tokenHash: string; deviceId: string; installationId: string; platform: 'android'; clientName?: string; createdAt: number; lastSeenAt: number }
+type PushToken = { tokenHash: string; deviceId: string; installationId: string; platform: 'android' | 'windows'; clientName?: string; createdAt: number; lastSeenAt: number }
 type NotificationEvent = { id: string; deviceId: string; threadId: string; turnId: string; status: string; title: string; body: string; createdAt: number }
 type NotificationWatch = { deviceId: string; threadId: string; turnId: string; name: string; createdAt: number }
 type Employee = { id: string; userId: string; name: string; role: string; instructions: string; legacyMemory?: string; deviceId: string; projectPath: string; threadId?: string; initializedThreadId?: string; assetContextVersion?: number; createdAt: number; updatedAt: number; archived?: boolean }
@@ -141,7 +141,7 @@ async function load() {
     state.clients = Array.isArray(saved.clients) ? saved.clients : []
     state.sessions = Array.isArray(saved.sessions) ? saved.sessions : []
     state.pushTokens = Array.isArray(saved.pushTokens) ? saved.pushTokens.flatMap(item => {
-      if (typeof item.tokenHash === 'string') return [item]
+      if (typeof item.tokenHash === 'string') return [{ ...item, platform: item.platform === 'windows' ? 'windows' as const : 'android' as const }]
       if (typeof (item as { token?: string }).token === 'string') return [{ tokenHash: hash((item as { token: string }).token), deviceId: item.deviceId, installationId: `legacy-${item.deviceId}`, platform: 'android' as const, clientName: item.clientName, createdAt: item.createdAt, lastSeenAt: item.lastSeenAt }]
       return []
     }) : []
@@ -411,6 +411,27 @@ const server = createServer(async (req, res) => {
       authAttempts.delete(ip)
       json(res, 200, await createSession(user!.id)); return
     }
+    if (req.method === 'POST' && url.pathname === '/api/auth/device-login') {
+      const ip = req.socket.remoteAddress || 'unknown'
+      const attempts = authAttempts.get(ip)
+      if (attempts && attempts.until > Date.now() && attempts.count >= 8) { json(res, 429, { error: '登录尝试过多，请稍后重试' }); return }
+      const data = await body(req)
+      const username = typeof data.username === 'string' ? data.username.trim() : ''
+      const password = typeof data.password === 'string' ? data.password : ''
+      const deviceToken = typeof data.deviceToken === 'string' ? data.deviceToken : ''
+      const user = state.users.find(item => item.username.toLowerCase() === username.toLowerCase() && !item.disabled)
+      const device = user && deviceToken ? state.devices.find(item => !item.revoked && item.userId === user.id && equalHash(deviceToken, item.tokenHash)) : undefined
+      const valid = Boolean(user && device && password.length <= 256 && await verifyPassword(password, user.passwordHash))
+      if (!valid) {
+        const next = attempts?.until && attempts.until > Date.now() ? attempts : { count: 0, until: Date.now() + 15 * 60_000 }
+        next.count++
+        authAttempts.set(ip, next)
+        json(res, 401, { error: '账号、密码或这台电脑的设备凭据不正确' }); return
+      }
+      authAttempts.delete(ip)
+      const credentials = await createSession(user!.id, device!.id, 'rmdex PC')
+      json(res, 200, { ...credentials, clientToken: credentials.accessToken, device: { id: device!.id, name: device!.name, online: deviceSockets.get(device!.id)?.readyState === WebSocket.OPEN } }); return
+    }
     if (req.method === 'POST' && url.pathname === '/api/auth/refresh') {
       const data = await body(req)
       const refreshToken = typeof data.refreshToken === 'string' ? data.refreshToken : ''
@@ -591,14 +612,15 @@ const server = createServer(async (req, res) => {
       }
       const pushToken = randomToken()
       state.pushTokens = state.pushTokens.filter(item => !(item.deviceId === device.id && item.installationId === installationId))
-      state.pushTokens.push({ tokenHash: hash(pushToken), deviceId: device.id, installationId, platform: 'android', clientName: typeof data.clientName === 'string' ? data.clientName.slice(0, 80) : client.name, createdAt: Date.now(), lastSeenAt: Date.now() })
+      const platform = data.platform === 'windows' ? 'windows' : 'android'
+      state.pushTokens.push({ tokenHash: hash(pushToken), deviceId: device.id, installationId, platform, clientName: typeof data.clientName === 'string' ? data.clientName.slice(0, 80) : client.name, createdAt: Date.now(), lastSeenAt: Date.now() })
       await persist()
       json(res, 200, { pushToken, cursor: notificationCursor(device.id) }); return
     }
     if (req.method === 'GET' && url.pathname === '/api/push/status') {
       const subscription = pushFor(req)
       if (!subscription) { json(res, 401, { error: '后台连接凭证已失效' }); return }
-      json(res, 200, { ok: true, deviceId: subscription.deviceId, cursor: notificationCursor(subscription.deviceId) }); return
+      json(res, 200, { ok: true, deviceId: subscription.deviceId, platform: subscription.platform, cursor: notificationCursor(subscription.deviceId) }); return
     }
     if (req.method === 'GET' && url.pathname === '/api/notifications/poll') {
       const subscription = pushFor(req)

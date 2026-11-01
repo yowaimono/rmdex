@@ -128,31 +128,31 @@ created through rmdex can be opened by Desktop and vice versa. Without the
 shared launcher, the default standalone agent remains intentionally isolated.
 See [docs/control-mcp.md](docs/control-mcp.md) for the complete tool contract.
 
-## rmdex-pc component
+## rmdex PC
 
-`rmdex-pc` is the Windows control component for the shared architecture. It
-owns the local lifecycle of the managed Codex daemon, the shared rmdex agent,
-and the Codex Desktop launcher. It does not create a second app-server: the
-agent uses the same managed socket and the Desktop client connects through the
-same loopback bridge.
+The Windows PC app provides the rmdex conversation workspace in a WebView2
+window, using the same Vue chat experience as Web and Android with a layout
+optimized for desktop. It includes chat history, Projects, employees, model
+selection, approvals, attachments, retry, fork, and queued follow-up actions.
+The local service owns the managed Codex daemon, shared rmdex agent, and Codex
+Desktop launcher; the PC chat proxies API requests over loopback to that agent.
+It does not create a second app-server.
 
-Build and start the local PC dashboard with:
+Build the PC WebView and local service with:
 
 ```powershell
 npm run pc:start
 ```
 
-For the Windows WebView2 desktop window, run `npm run pc:build` followed by
-`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-pc-window.ps1`,
-then launch `work/pc-webview-compact/rmdex-pc-3x4.exe`. The WebView2 Runtime and Node.js
-must be installed. The window starts or reuses the local PC service; closing the
-window does not automatically stop the service or terminate Codex Desktop.
-Before starting the shared components, exit any existing Codex Desktop instance.
-Alternatively open `http://127.0.0.1:18788` after `npm run pc:start`.
-The dashboard shows Desktop, app-server,
-Server HTTP reachability and paired client activity; supports start, stop, restart, recent logs, and the
-default permission modes `ask`, `auto`, and `full`. Explicit per-turn permissions from Web, Android, MCP, or Desktop are not overridden; the setting is not a global Desktop policy. Client activity is inferred from recent HTTP requests, not a live connection guarantee. The equivalent Windows
-launcher is `scripts/start-rmdex-pc.ps1`.
+For a standalone Windows WebView2 window, build the frontend with `npm run
+pc:build`, then compile the host with `powershell -NoProfile -ExecutionPolicy
+Bypass -File scripts/build-pc-window.ps1`. The WebView2 Runtime and Node.js are
+required. The first launch registers the computer to a rmdex account; later
+launches start the local shared services and open the conversation workspace.
+The in-app local control panel shows service status, start/restart/stop actions,
+default permission mode, and recent logs. Closing the window does not terminate
+Codex Desktop or the managed app-server. Per-turn settings from a conversation
+remain independent of the local default permission setting.
 
 Android launcher assets and the Windows application icon are generated from
 `src/assets/rmdex-logo.jpg`. To regenerate them after changing the logo, run
@@ -172,7 +172,7 @@ create chats through app-server mode; legacy Desktop mode requires the Project
 to be created in Desktop first.
 
 The PC service only listens on loopback. On first launch, enter a user account
-and computer name in the local dashboard; rmdex-pc registers the computer to
+and computer name in the connection screen; rmdex PC registers the computer to
 that user, stores its device credentials locally under `work/`, and starts the
 outbound WSS connection. The account password is not stored. Existing
 `.device-token` and `.web-client-token` files and environment variables remain

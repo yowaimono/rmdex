@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import { strict as assert } from 'node:assert'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:http'
@@ -103,6 +103,80 @@ test('PC enrollment rejects incomplete credentials before contacting the relay',
     const manager = new PcManager(root)
     await assert.rejects(manager.enroll(' ', '', ' '), /用户账号/)
   } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('PC relogin refreshes the existing device session without registering another device', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'rmdex-pc-relogin-'))
+  const previousRelay = process.env.RMDEX_RELAY_URL
+  let reloginBody
+  const relay = createServer(async (req, res) => {
+    let raw = ''
+    for await (const chunk of req) raw += String(chunk)
+    res.setHeader('Content-Type', 'application/json')
+    if (req.url === '/api/auth/device-login') {
+      reloginBody = JSON.parse(raw)
+      res.end(JSON.stringify({ accessToken: 'new-access', refreshToken: 'new-refresh' })); return
+    }
+    res.writeHead(404); res.end('{}')
+  })
+  await new Promise(resolve => relay.listen(0, '127.0.0.1', resolve))
+  const address = relay.address()
+  assert.ok(address && typeof address !== 'string')
+  process.env.RMDEX_RELAY_URL = `ws://127.0.0.1:${address.port}/agent`
+  try {
+    await mkdir(join(root, 'work'), { recursive: true })
+    await writeFile(join(root, 'work', '.device-token'), 'existing-device-secret')
+    const manager = new PcManager(root)
+    const result = await manager.relogin('user-account', 'password')
+    assert.equal(result.enrolled, true)
+    assert.deepEqual(reloginBody, { username: 'user-account', password: 'password', deviceToken: 'existing-device-secret' })
+    assert.equal(await readFile(join(root, 'work', '.web-client-token'), 'utf8'), 'new-access')
+    assert.equal(await readFile(join(root, 'work', '.web-client-refresh-token'), 'utf8'), 'new-refresh')
+  } finally {
+    relay.close()
+    if (previousRelay === undefined) delete process.env.RMDEX_RELAY_URL
+    else process.env.RMDEX_RELAY_URL = previousRelay
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('PC client session refreshes stored credentials before bootstrapping the WebView', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'rmdex-pc-session-'))
+  const previousRelay = process.env.RMDEX_RELAY_URL
+  let clientRequests = 0
+  const relay = createServer(async (req, res) => {
+    res.setHeader('Content-Type', 'application/json')
+    if (req.url === '/api/client') {
+      clientRequests += 1
+      if (clientRequests === 1) { res.writeHead(401); res.end(JSON.stringify({ error: 'expired' })); return }
+      assert.equal(req.headers.authorization, 'Bearer refreshed-access')
+      res.end(JSON.stringify({ device: { id: 'device-1', name: 'Office PC', online: true } })); return
+    }
+    if (req.url === '/api/auth/refresh') {
+      res.end(JSON.stringify({ accessToken: 'refreshed-access', refreshToken: 'refreshed-refresh' })); return
+    }
+    res.writeHead(404); res.end('{}')
+  })
+  await new Promise(resolve => relay.listen(0, '127.0.0.1', resolve))
+  const address = relay.address()
+  assert.ok(address && typeof address !== 'string')
+  process.env.RMDEX_RELAY_URL = `ws://127.0.0.1:${address.port}/agent`
+  try {
+    await mkdir(join(root, 'work'), { recursive: true })
+    await writeFile(join(root, 'work', '.web-client-token'), 'expired-access')
+    await writeFile(join(root, 'work', '.web-client-refresh-token'), 'stored-refresh')
+    const manager = new PcManager(root)
+    const session = await manager.clientSession()
+    assert.equal(session.accessToken, 'refreshed-access')
+    assert.equal(session.refreshToken, 'refreshed-refresh')
+    assert.deepEqual(session.device, { id: 'device-1', name: 'Office PC', online: true })
+    assert.equal(await readFile(join(root, 'work', '.web-client-token'), 'utf8'), 'refreshed-access')
+  } finally {
+    relay.close()
+    if (previousRelay === undefined) delete process.env.RMDEX_RELAY_URL
+    else process.env.RMDEX_RELAY_URL = previousRelay
     await rm(root, { recursive: true, force: true })
   }
 })

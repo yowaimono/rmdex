@@ -3,12 +3,16 @@ import { createServer } from 'node:http'
 import { extname, join, normalize } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { PcManager, type PermissionMode } from './manager.ts'
+import { proxyAgentRequest } from './api-proxy.ts'
+import { proxyRelayRequest, relayHttpOrigin } from './relay-proxy.ts'
 
 const root = join(fileURLToPath(new URL('.', import.meta.url)), '..')
 const port = Number(process.env.RMDEX_PC_PORT || 18788)
+const agentPort = Number(process.env.RMDEX_AGENT_PORT || 18787)
 const dist = join(root, 'dist-pc')
 const manager = new PcManager(root)
 await manager.init()
+const relayOrigin = relayHttpOrigin(process.env.RMDEX_RELAY_URL || 'wss://code.kyeai.xyz/agent')
 
 function json(res: import('node:http').ServerResponse, status: number, value: unknown) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' })
@@ -43,6 +47,8 @@ const server = createServer(async (req, res) => {
     if (url.pathname.startsWith('/pc-api/')) {
       if (!['GET', 'POST'].includes(req.method || '')) { json(res, 405, { error: 'Method not allowed' }); return }
       if (req.method === 'GET' && url.pathname === '/pc-api/status') { json(res, 200, await manager.status()); return }
+      if (req.method === 'GET' && url.pathname === '/pc-api/session') { json(res, 200, await manager.clientSession()); return }
+      if (req.method === 'GET' && url.pathname === '/pc-api/notifications') { json(res, 200, { data: await manager.pollNotifications() }); return }
       if (req.method === 'GET' && url.pathname === '/pc-api/logs') { json(res, 200, await manager.logs()); return }
       if (req.method === 'POST' && url.pathname === '/pc-api/start') { json(res, 200, await manager.start()); return }
       if (req.method === 'POST' && url.pathname === '/pc-api/stop') { json(res, 200, await manager.stop()); return }
@@ -53,12 +59,24 @@ const server = createServer(async (req, res) => {
         json(res, 200, result)
         return
       }
+      if (req.method === 'POST' && url.pathname === '/pc-api/relogin') {
+        const data = await body(req)
+        const result = await manager.relogin(String(data.username || ''), String(data.password || ''))
+        json(res, 200, result)
+        return
+      }
       if (req.method === 'POST' && url.pathname === '/pc-api/settings') {
         const data = await body(req)
         json(res, 200, await manager.setPermissionMode(String(data.permissionMode) as PermissionMode))
         return
       }
       json(res, 404, { error: 'Not found' }); return
+    }
+    if (url.pathname.startsWith('/api/')) {
+      const hasClientSession = typeof req.headers.authorization === 'string' || url.pathname.startsWith('/api/auth/')
+      if (hasClientSession) await proxyRelayRequest(req, res, relayOrigin)
+      else await proxyAgentRequest(req, res, agentPort)
+      return
     }
     const file = await staticFile(url.pathname)
     const type = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg' }[extname(file.path).toLowerCase()] || 'application/octet-stream'

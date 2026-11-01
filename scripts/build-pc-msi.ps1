@@ -6,7 +6,9 @@
 
 $ErrorActionPreference = 'Stop'
 $project = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$version = '0.3.2'
+$packageManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $project 'package.json') | ConvertFrom-Json
+$version = [string]$packageManifest.version
+if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid rmdex package version: $version" }
 $work = if ($WorkDirectory) { $WorkDirectory } else { Join-Path $project 'work\pc-msi' }
 $stage = Join-Path $work 'payload'
 $wix = 'D:\WorkSpace\frametell\node_modules\.pnpm\electron-winstaller@5.4.0\node_modules\electron-winstaller\vendor'
@@ -119,7 +121,28 @@ $directoryXml
     </Directory>
     <DirectoryRef Id="ApplicationProgramsFolder"><Component Id="ShortcutComponent" Guid="*"><Shortcut Id="StartMenuShortcut" Name="rmdex PC" Target="[INSTALLFOLDER]rmdex-pc-3x4.exe" WorkingDirectory="INSTALLFOLDER" Icon="RmdexIcon" /><RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" /><RegistryValue Root="HKCU" Key="Software\rmdex\rmdex-pc" Name="installed" Type="integer" Value="1" KeyPath="yes" /></Component></DirectoryRef>
     <DirectoryRef Id="DesktopFolder"><Component Id="DesktopShortcutComponent" Guid="*"><Shortcut Id="DesktopShortcut" Name="rmdex PC" Target="[INSTALLFOLDER]rmdex-pc-3x4.exe" WorkingDirectory="INSTALLFOLDER" Icon="RmdexIcon" /><RegistryValue Root="HKCU" Key="Software\rmdex\rmdex-pc" Name="desktop" Type="integer" Value="1" KeyPath="yes" /></Component></DirectoryRef>
-    <Feature Id="MainFeature" Title="rmdex PC" Level="1"><ComponentGroupRef Id="Files" /><ComponentRef Id="ShortcutComponent" /><ComponentRef Id="DesktopShortcutComponent" /></Feature>
+    <Component Id="DesktopIntegrationComponent" Directory="INSTALLFOLDER" Guid="*">
+      <RegistryValue Root="HKCU" Key="Software\rmdex\desktop-integration" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+      <RegistryKey Root="HKCU" Key="Software\Classes\codex">
+        <RegistryValue Type="string" Value="URL:rmdex Codex Link" />
+        <RegistryValue Name="URL Protocol" Type="string" Value="" />
+        <RegistryKey Key="DefaultIcon"><RegistryValue Type="string" Value="[INSTALLFOLDER]rmdex-pc-3x4.exe,0" /></RegistryKey>
+        <RegistryKey Key="shell\open\command"><RegistryValue Type="string" Value="&quot;[INSTALLFOLDER]rmdex-pc-3x4.exe&quot; &quot;%1&quot;" /></RegistryKey>
+      </RegistryKey>
+      <RegistryKey Root="HKCU" Key="Software\Classes\rmdex">
+        <RegistryValue Type="string" Value="URL:rmdex Link" />
+        <RegistryValue Name="URL Protocol" Type="string" Value="" />
+        <RegistryKey Key="DefaultIcon"><RegistryValue Type="string" Value="[INSTALLFOLDER]rmdex-pc-3x4.exe,0" /></RegistryKey>
+        <RegistryKey Key="shell\open\command"><RegistryValue Type="string" Value="&quot;[INSTALLFOLDER]rmdex-pc-3x4.exe&quot; &quot;%1&quot;" /></RegistryKey>
+      </RegistryKey>
+      <RegistryKey Root="HKCU" Key="Software\Classes\.rmdex"><RegistryValue Type="string" Value="rmdex.rmdex-session" /></RegistryKey>
+      <RegistryKey Root="HKCU" Key="Software\Classes\rmdex.rmdex-session">
+        <RegistryValue Type="string" Value="rmdex 会话文件" />
+        <RegistryKey Key="DefaultIcon"><RegistryValue Type="string" Value="[INSTALLFOLDER]rmdex-pc-3x4.exe,0" /></RegistryKey>
+        <RegistryKey Key="shell\open\command"><RegistryValue Type="string" Value="&quot;[INSTALLFOLDER]rmdex-pc-3x4.exe&quot; &quot;%1&quot;" /></RegistryKey>
+      </RegistryKey>
+    </Component>
+    <Feature Id="MainFeature" Title="rmdex PC" Level="1"><ComponentGroupRef Id="Files" /><ComponentRef Id="ShortcutComponent" /><ComponentRef Id="DesktopShortcutComponent" /><ComponentRef Id="DesktopIntegrationComponent" /></Feature>
   </Product>
   <Fragment><ComponentGroup Id="Files">$components</ComponentGroup></Fragment>
 </Wix>

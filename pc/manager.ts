@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { access, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { createWriteStream, type WriteStream } from 'node:fs'
 import { join } from 'node:path'
@@ -34,6 +35,22 @@ export type PcStatus = {
   phones: Phone[]
   error?: string
   logs: { agent: string; desktop: string }
+}
+
+export type PcClientSession = {
+  accessToken: string
+  refreshToken: string
+  device: { id: string; name: string; online: boolean }
+}
+
+export type PcNotificationEvent = {
+  id: string
+  threadId: string
+  turnId: string
+  status: string
+  title: string
+  body: string
+  createdAt: number
 }
 
 const validModes: PermissionMode[] = ['ask', 'auto', 'full']
@@ -95,6 +112,9 @@ export class PcManager {
   private readonly deviceTokenPath: string
   private readonly clientTokenPath: string
   private readonly clientRefreshTokenPath: string
+  private readonly notificationTokenPath: string
+  private readonly notificationCursorPath: string
+  private readonly notificationInstallationPath: string
   private readonly agentPort: number
   private readonly socketPath: string
   private readonly relayUrl: string
@@ -106,6 +126,7 @@ export class PcManager {
   private error = ''
   private settings: Settings = { permissionMode: 'ask' }
   private relayCache: { at: number; state: PcStatus['relay']; phones: Phone[] } = { at: 0, state: { state: 'unknown' }, phones: [] }
+  private notificationBusy = false
 
   constructor(root: string) {
     this.root = root
@@ -114,6 +135,9 @@ export class PcManager {
     this.deviceTokenPath = join(this.work, '.device-token')
     this.clientTokenPath = join(this.work, '.web-client-token')
     this.clientRefreshTokenPath = join(this.work, '.web-client-refresh-token')
+    this.notificationTokenPath = join(this.work, '.pc-notification-token')
+    this.notificationCursorPath = join(this.work, 'pc-notification-cursor.json')
+    this.notificationInstallationPath = join(this.work, 'pc-installation-id')
     this.agentPort = Number(process.env.RMDEX_AGENT_PORT || 18787)
     const codexHome = process.env.CODEX_HOME || join(process.env.USERPROFILE || '', '.codex')
     this.socketPath = process.env.RMDEX_CODEX_SOCKET || join(codexHome, 'app-server-control', 'app-server-control.sock')
@@ -309,6 +333,119 @@ export class PcManager {
     this.relayCache.at = 0
     await this.stop()
     return this.start()
+  }
+
+  async relogin(username: string, password: string) {
+    const cleanUsername = username.trim()
+    if (!cleanUsername || password.length < 1) throw new Error('请输入用户账号和密码')
+    const deviceToken = (process.env.RMDEX_DEVICE_TOKEN || (await readFile(this.deviceTokenPath, 'utf8').catch(() => '')).trim() || (await readFile(join(this.root, '.device-token'), 'utf8').catch(() => '')).trim()).trim()
+    if (!deviceToken) throw new Error('这台电脑的设备凭据不存在，请重新连接这台电脑')
+    const httpUrl = this.relayUrl.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:').replace(/\/agent\/?$/, '')
+    const response = await fetch(`${httpUrl}/api/auth/device-login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: cleanUsername, password, deviceToken }), signal: AbortSignal.timeout(10_000),
+    })
+    const credentials = await response.json() as { accessToken?: string; refreshToken?: string; error?: string }
+    if (!response.ok || !credentials.accessToken || !credentials.refreshToken) throw new Error(credentials.error || '这台电脑重新登录失败')
+    await mkdir(this.work, { recursive: true })
+    await writeFile(this.clientTokenPath, credentials.accessToken, { mode: 0o600 })
+    await writeFile(this.clientRefreshTokenPath, credentials.refreshToken, { mode: 0o600 })
+    this.relayCache.at = 0
+    return this.status()
+  }
+
+  async clientSession(): Promise<PcClientSession> {
+    let accessToken = (process.env.RMDEX_WEB_CLIENT_TOKEN || (await readFile(this.clientTokenPath, 'utf8').catch(() => '')).trim()).trim()
+    let refreshToken = (await readFile(this.clientRefreshTokenPath, 'utf8').catch(() => '')).trim()
+    if (!accessToken || !refreshToken) throw new Error('PC 客户端登录态不存在，请重新连接这台电脑')
+    const httpUrl = this.relayUrl.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:').replace(/\/agent\/?$/, '')
+    const clientRequest = () => fetch(`${httpUrl}/api/client`, { headers: { Authorization: `Bearer ${accessToken}` }, signal: AbortSignal.timeout(5000) })
+    let response = await clientRequest()
+    if (response.status === 401 && !process.env.RMDEX_WEB_CLIENT_TOKEN) {
+      const refreshed = await fetch(`${httpUrl}/api/auth/refresh`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ refreshToken }), signal: AbortSignal.timeout(5000),
+      })
+      const credentials = await refreshed.json() as { accessToken?: string; refreshToken?: string; error?: string }
+      if (!refreshed.ok || !credentials.accessToken || !credentials.refreshToken) throw new Error(credentials.error || 'PC 客户端登录态已过期，请重新连接这台电脑')
+      accessToken = credentials.accessToken
+      refreshToken = credentials.refreshToken
+      await writeFile(this.clientTokenPath, accessToken, { mode: '0600' })
+      await writeFile(this.clientRefreshTokenPath, refreshToken, { mode: '0600' })
+      response = await clientRequest()
+    }
+    const data = await response.json() as { device?: { id?: string; name?: string; online?: boolean }; error?: string }
+    if (!response.ok || !data.device?.id) throw new Error(data.error || `PC 客户端登录态验证失败（HTTP ${response.status}）`)
+    return {
+      accessToken,
+      refreshToken,
+      device: { id: data.device.id, name: data.device.name || 'Codex 电脑', online: data.device.online !== false },
+    }
+  }
+
+  private async notificationInstallationId() {
+    const current = (await readFile(this.notificationInstallationPath, 'utf8').catch(() => '')).trim()
+    if (/^[A-Za-z0-9_-]{16,128}$/.test(current)) return current
+    const created = randomUUID().replace(/[^A-Za-z0-9_-]/g, '')
+    await writeFile(this.notificationInstallationPath, created, { mode: 0o600 })
+    return created
+  }
+
+  private async notificationCursor() {
+    try {
+      const parsed = JSON.parse(await readFile(this.notificationCursorPath, 'utf8')) as { cursor?: number }
+      return Number.isFinite(parsed.cursor) && Number(parsed.cursor) >= 0 ? Number(parsed.cursor) : 0
+    } catch { return 0 }
+  }
+
+  private async setNotificationCursor(cursor: number) {
+    await writeFile(this.notificationCursorPath, JSON.stringify({ cursor: Math.max(0, Math.floor(cursor)) }) + '\n', { mode: 0o600 })
+  }
+
+  private relayHttpUrl() {
+    return this.relayUrl.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:').replace(/\/agent\/?$/, '')
+  }
+
+  private async ensureNotificationSubscription(accessToken?: string, deviceId?: string) {
+    let pushToken = (await readFile(this.notificationTokenPath, 'utf8').catch(() => '')).trim()
+    if (pushToken) {
+      const status = await fetch(`${this.relayHttpUrl()}/api/push/status`, { headers: { Authorization: `Bearer ${pushToken}` }, signal: AbortSignal.timeout(5000) }).catch(() => undefined)
+      if (status?.ok) {
+        const data = await status.json() as { deviceId?: string; platform?: string }
+        if ((!deviceId || data.deviceId === deviceId) && data.platform === 'windows') return pushToken
+      }
+      pushToken = ''
+    }
+    const session = accessToken && deviceId ? { accessToken, device: { id: deviceId } } : await this.clientSession()
+    const response = await fetch(`${this.relayHttpUrl()}/api/push/register`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${session.accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ installationId: await this.notificationInstallationId(), clientName: 'rmdex Windows', platform: 'windows' }),
+      signal: AbortSignal.timeout(5000),
+    })
+    const data = await response.json() as { pushToken?: string; cursor?: number; error?: string }
+    if (!response.ok || !data.pushToken) throw new Error(data.error || `Windows 通知订阅失败（HTTP ${response.status}）`)
+    await writeFile(this.notificationTokenPath, data.pushToken, { mode: 0o600 })
+    if (!(await readFile(this.notificationCursorPath, 'utf8').catch(() => '')).trim() && Number.isFinite(data.cursor)) await this.setNotificationCursor(Number(data.cursor))
+    return data.pushToken
+  }
+
+  async pollNotifications(): Promise<PcNotificationEvent[]> {
+    if (this.notificationBusy) return []
+    this.notificationBusy = true
+    try {
+      const pushToken = await this.ensureNotificationSubscription()
+      const after = await this.notificationCursor()
+      const response = await fetch(`${this.relayHttpUrl()}/api/notifications/poll?wait=0&after=${encodeURIComponent(String(after))}`, { headers: { Authorization: `Bearer ${pushToken}` }, signal: AbortSignal.timeout(5000) })
+      const data = await response.json() as { data?: PcNotificationEvent[]; cursor?: number; error?: string }
+      if (!response.ok) throw new Error(data.error || `Windows 通知轮询失败（HTTP ${response.status}）`)
+      if (Number.isFinite(data.cursor) && Number(data.cursor) > after) await this.setNotificationCursor(Number(data.cursor))
+      return Array.isArray(data.data) ? data.data.filter(item => item && typeof item.threadId === 'string' && typeof item.title === 'string' && typeof item.body === 'string') : []
+    } catch (error) {
+      // Notification delivery is optional. The chat service must remain usable
+      // when the relay is offline or the account has not been enrolled yet.
+      return []
+    } finally {
+      this.notificationBusy = false
+    }
   }
 
   async setPermissionMode(permissionMode: PermissionMode) {
