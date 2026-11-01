@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { AlertTriangle, Check, CircleStop, Clipboard, LoaderCircle, LogIn, Monitor, Power, RefreshCw, Server, Settings2, X } from 'lucide-vue-next'
+import { AlertTriangle, Check, CircleStop, Clipboard, LoaderCircle, Monitor, Power, RefreshCw, Server, Settings2, X } from 'lucide-vue-next'
 import ChatApp from '../src/App.vue'
 
 type PermissionMode = 'ask' | 'auto' | 'full'
@@ -24,11 +24,9 @@ const error = ref('')
 const sessionError = ref('')
 const sessionReady = ref(false)
 const needsLogin = ref(false)
-const formError = ref('')
 const busy = ref(false)
-const accountName = ref('')
-const accountPassword = ref('')
-const deviceName = ref('')
+const pcLoginInProgress = ref(false)
+const deviceName = ref(localStorage.getItem('rmdex-pc-device-name') || 'Codex 电脑')
 const showControls = ref(false)
 const logs = ref<{ agent: string; desktop: string } | null>(null)
 const copied = ref(false)
@@ -85,38 +83,30 @@ async function bootstrapClientSession() {
   return requestPromise
 }
 
-async function enroll() {
+async function completePcLogin(username: string, password: string, name: string): Promise<PcClientSession> {
+  pcLoginInProgress.value = true
   busy.value = true
-  formError.value = ''
   error.value = ''
   try {
-    status.value = await request<PcStatus>('/pc-api/enroll', { method: 'POST', body: JSON.stringify({ username: accountName.value, password: accountPassword.value, deviceName: deviceName.value }) })
-    accountPassword.value = ''
-    needsLogin.value = false
+    const enrolling = !status.value?.enrolled
+    const path = enrolling ? '/pc-api/enroll' : '/pc-api/relogin'
+    const payload = enrolling ? { username, password, deviceName: name.trim() } : { username, password }
+    status.value = await request<PcStatus>(path, { method: 'POST', body: JSON.stringify(payload) })
+    needsLogin.value = true
+    deviceName.value = name.trim()
+    localStorage.setItem('rmdex-pc-device-name', deviceName.value)
+    sessionError.value = ''
+    return await request<PcClientSession>('/pc-api/session')
   } catch (caught) {
-    formError.value = caught instanceof Error ? caught.message : String(caught)
-    await refresh(false)
+    pcLoginInProgress.value = false
+    throw caught
   } finally { busy.value = false }
 }
 
-async function relogin() {
-  busy.value = true
-  formError.value = ''
-  error.value = ''
-  try {
-    status.value = await request<PcStatus>('/pc-api/relogin', { method: 'POST', body: JSON.stringify({ username: accountName.value, password: accountPassword.value }) })
-    accountPassword.value = ''
-    needsLogin.value = false
-    await bootstrapClientSession()
-  } catch (caught) {
-    formError.value = caught instanceof Error ? caught.message : String(caught)
-    await refresh(false)
-  } finally { busy.value = false }
-}
-
-async function submitConnection() {
-  if (needsLogin.value) return relogin()
-  return enroll()
+function onPcAuthenticated() {
+  pcLoginInProgress.value = false
+  needsLogin.value = false
+  sessionReady.value = true
 }
 
 async function restart() {
@@ -162,6 +152,7 @@ onMounted(() => {
 })
 watch(chatReady, ready => {
   if (!ready) { sessionReady.value = false; return }
+  if (pcLoginInProgress.value || needsLogin.value) return
   void bootstrapClientSession()
 }, { immediate: true })
 onUnmounted(() => { if (timer) clearInterval(timer) })
@@ -173,21 +164,8 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
     <span>正在准备 rmdex PC…</span>
   </main>
 
-  <main v-else-if="!status.enrolled || needsLogin" class="pc-connect-screen">
-    <section class="pc-connect-panel">
-      <div class="pc-connect-brand"><span class="pc-brand-mark">r</span><div><strong>rmdex PC</strong><span>桌面版 Codex 工作区</span></div></div>
-      <div class="pc-connect-content">
-        <div class="pc-connect-intro"><span class="pc-kicker">{{ needsLogin ? '会话已失效' : '首次连接' }}</span><h1>{{ needsLogin ? '重新连接这台电脑' : '连接这台电脑' }}</h1><p>{{ needsLogin ? '这台电脑的登录凭证已失效。重新登录会保留原有设备、员工和本地数据，不会创建重复设备。' : '登录 rmdex 账号后，这台电脑会启动本地 agent，并在桌面端打开完整对话工作区。' }}</p><div class="pc-feature-list"><span><Server :size="16" />本机执行与文件访问</span><span><LogIn :size="16" />与 Web、Android 共用会话</span></div></div>
-        <form class="pc-connect-form" @submit.prevent="submitConnection">
-          <label for="pc-account">账号</label><input id="pc-account" v-model="accountName" autocomplete="username" required placeholder="输入账号" />
-          <label for="pc-password">密码</label><input id="pc-password" v-model="accountPassword" type="password" autocomplete="current-password" required placeholder="输入密码" />
-          <template v-if="!needsLogin"><label for="pc-name">电脑名称</label><input id="pc-name" v-model="deviceName" maxlength="80" required placeholder="例如：办公室电脑" /></template>
-          <p v-if="formError || (needsLogin && sessionError)" class="pc-form-error"><AlertTriangle :size="15" />{{ formError || sessionError }}</p>
-          <button class="pc-primary-button" type="submit" :disabled="busy"><LoaderCircle v-if="busy" :size="16" class="pc-spin" />{{ busy ? '正在连接…' : needsLogin ? '重新登录并继续' : '登录并启动' }}</button>
-          <small>{{ needsLogin ? '只更新这台电脑的登录会话，不会创建新的设备。' : '账号密码只用于注册设备，不会保存在本机。' }}</small>
-        </form>
-      </div>
-    </section>
+  <main v-else-if="!status.enrolled || needsLogin" class="pc-login-shell">
+    <ChatApp :pc-login="completePcLogin" :pc-device-name="deviceName" @pc-authenticated="onPcAuthenticated" />
   </main>
 
   <main v-else-if="!chatReady || !sessionReady" class="pc-boot-screen pc-error-screen" role="status">

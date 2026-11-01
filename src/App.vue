@@ -20,6 +20,10 @@ import { colleagueMessage, messageRequest, timeline, userText, type ContentPart,
 import { loadThreadCache, queueThreadCacheWrite, removeThreadCache } from './thread-cache'
 import { commandSummary } from './command-summary'
 
+type PcLoginSession = { accessToken: string; refreshToken: string; device: { id: string; name: string; online: boolean } }
+const props = defineProps<{ pcLogin?: (username: string, password: string, deviceName: string) => Promise<PcLoginSession>; pcDeviceName?: string }>()
+const emit = defineEmits<{ 'pc-authenticated': [] }>()
+
 type Thread = { id: string; name?: string | null; preview?: string; cwd?: string; updatedAt?: number; status?: { type: string }; turns?: Turn[]; employeeId?: string; desktopDraft?: { projectId: string | null; deviceKey: string; preparing?: boolean } }
 type Project = { id: string; name: string; path: string; source: 'local' | 'desktop'; nativeProjectId?: string }
 type Employee = { id: string; name: string; role: string; instructions: string; deviceId: string; projectPath: string; threadId?: string; initializedThreadId?: string; createdAt: number; updatedAt: number }
@@ -54,6 +58,7 @@ const showPairDialog = ref(false)
 const registerDeviceMode = ref<'guide' | 'manual'>('guide')
 const adminUsername = ref(localStorage.getItem('rmdex-admin-username') || 'admin')
 const adminPassword = ref('')
+const pcDeviceName = ref(props.pcDeviceName || 'Codex 电脑')
 const loginError = ref('')
 const loginLoading = ref(false)
 const authReady = ref(false)
@@ -69,6 +74,8 @@ const isPlatformAdmin = ref(false)
 const clientToken = ref(localStorage.getItem('rmdex-client-token') || localStorage.getItem('rmdex-client-access-token') || '')
 const clientRefreshToken = ref(localStorage.getItem('rmdex-client-refresh-token') || '')
 const devices = ref<Array<{ id: string; name: string; online: boolean }>>([])
+const connectingDeviceId = ref('')
+const revokingDeviceId = ref('')
 const users = ref<Array<{ id: string; username: string; role?: string; deviceCount?: number }>>([])
 const onlineDeviceCounts = ref<Record<string, number>>({})
 const selectedUserId = ref('')
@@ -263,7 +270,7 @@ function threadIndicator(thread: Thread) {
   return threadIndicators.value[thread.id] || null
 }
 const remoteMode = computed(() => Capacitor.isNativePlatform() || !!clientToken.value || (import.meta.env.DEV && new URLSearchParams(location.search).has('authPreview')) || !['localhost', '127.0.0.1'].includes(location.hostname))
-const requiresLogin = computed(() => remoteMode.value && !adminToken.value && !pairLanding.value)
+const requiresLogin = computed(() => props.pcLogin ? !clientToken.value : remoteMode.value && !adminToken.value && !clientToken.value && !pairLanding.value)
 const messages = computed(() => timeline(selected.value?.turns || []))
 const working = computed(() => !!activeTurnId.value || sendingThreadId.value === selected.value?.id || !!selected.value?.desktopDraft?.preparing)
 const workLabel = computed(() => {
@@ -1389,6 +1396,17 @@ async function loginAdmin() {
   loginLoading.value = true
   loginError.value = ''
   try {
+    if (props.pcLogin) {
+      const session = await props.pcLogin(adminUsername.value.trim(), adminPassword.value, pcDeviceName.value.trim())
+      storeSession('client', session)
+      remoteDevice.value = session.device
+      localStorage.setItem('rmdex-admin-username', adminUsername.value.trim())
+      adminPassword.value = ''
+      authReady.value = true
+      emit('pc-authenticated')
+      await refresh()
+      return
+    }
     const response = await fetch(apiUrl('/api/auth/login'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: adminUsername.value, password: adminPassword.value }) })
     const result = await readJsonResponse(response, '登录失败')
     if (!response.ok) throw new Error(result?.error || '登录失败')
@@ -1492,7 +1510,9 @@ function logout() {
 }
 async function selectUser() { await loadDevices() }
 async function connectDevice(deviceId: string) {
+  if (connectingDeviceId.value) return
   pairError.value = ''
+  connectingDeviceId.value = deviceId
   try {
     const result = await adminFetch<{ accessToken?: string; refreshToken?: string; clientToken: string; device: { id: string; name: string; online: boolean } }>(`/api/devices/${deviceId}/web-client`, 'POST', {})
     storeSession('client', result)
@@ -1500,6 +1520,7 @@ async function connectDevice(deviceId: string) {
     showDevices.value = false
     await refresh()
   } catch (e) { pairError.value = e instanceof Error ? e.message : String(e) }
+  finally { connectingDeviceId.value = '' }
 }
 async function registerDevice() {
   pairError.value = ''; newDeviceToken.value = ''; pairCode.value = ''; pairQr.value = ''
@@ -1611,9 +1632,12 @@ async function decidePair(requestId: string, decision: 'approve' | 'deny') {
   catch (e) { pairError.value = e instanceof Error ? e.message : String(e) }
 }
 async function revokeDevice(deviceId: string) {
+  if (revokingDeviceId.value) return
   if (!window.confirm('撤销后此电脑与所有已配对手机都会断开。确定继续？')) return
+  revokingDeviceId.value = deviceId
   try { await adminFetch(`/api/devices/${deviceId}`, 'DELETE'); await loadDevices() }
   catch (e) { pairError.value = e instanceof Error ? e.message : String(e) }
+  finally { revokingDeviceId.value = '' }
 }
 async function copyValue(value: string, feedback = '已复制会话 ID') {
   try {
@@ -2013,10 +2037,14 @@ onUnmounted(() => { removeInAppLinks?.(); window.removeEventListener('keydown', 
         <input id="admin-username" v-model="adminUsername" autocomplete="username" required autofocus placeholder="输入用户名" />
         <label for="admin-password">密码</label>
         <input id="admin-password" v-model="adminPassword" type="password" autocomplete="current-password" required placeholder="输入密码" />
+        <template v-if="props.pcLogin">
+          <label for="pc-device-name">电脑名称</label>
+          <input id="pc-device-name" v-model="pcDeviceName" maxlength="80" required placeholder="例如：办公室电脑" />
+        </template>
         <p v-if="loginError" class="auth-error" role="alert">{{ loginError }}</p>
-        <button class="auth-submit" type="submit" :disabled="loginLoading || !adminUsername.trim() || !adminPassword">{{ loginLoading ? '正在登录…' : '登录' }}</button>
+        <button class="auth-submit" type="submit" :disabled="loginLoading || !adminUsername.trim() || !adminPassword || (props.pcLogin && !pcDeviceName.trim())">{{ loginLoading ? (props.pcLogin ? '正在连接…' : '正在登录…') : props.pcLogin ? '登录并启动' : '登录' }}</button>
       </form>
-      <p class="auth-help">账号由系统管理员创建。如无法登录，请联系管理员。</p>
+      <p class="auth-help">{{ props.pcLogin ? '登录后会自动注册这台电脑并启动本地服务。' : '账号由系统管理员创建。如无法登录，请联系管理员。' }}</p>
     </section>
   </main>
   <main v-else-if="activePage === 'users' && isPlatformAdmin" class="admin-page">
@@ -2040,7 +2068,7 @@ onUnmounted(() => { removeInAppLinks?.(); window.removeEventListener('keydown', 
       </div>
       <button class="new-thread" :disabled="!capabilities.create" @click="openCreate()"><Plus :size="17" /><span>新建对话</span></button>
       <div class="device"><span class="device-icon"><Monitor :size="16" /></span><div class="device-copy"><strong>{{ remoteDevice?.name || (remoteMode ? '未连接 Codex 设备' : '本机设备') }}</strong><small>{{ connected ? '已连接' : (remoteMode ? '等待远程设备' : '未连接') }}</small></div><span class="online" :class="{ offline: !connected }"></span></div>
-      <button class="pair-entry" type="button" @click="showDevices = true"><QrCode :size="16" /><span>连接设备</span><span class="pair-entry-hint">扫码配对</span></button>
+      <button class="pair-entry" type="button" @click="showDevices = true"><QrCode :size="16" /><span>连接设备</span><span class="pair-entry-hint">切换或管理</span></button>
       <label class="search"><Search :size="16" /><input v-model="query" placeholder="搜索会话" aria-label="搜索会话" /></label>
         <div v-if="remoteMode" class="employee-section">
           <div class="section-label"><span>AI 员工 <span class="count">{{ employees.length }}</span></span><button class="icon-button" type="button" title="新建 AI 员工" aria-label="新建 AI 员工" @click="openEmployeeEditor()"><Plus :size="15" /></button></div>
@@ -2106,7 +2134,6 @@ onUnmounted(() => { removeInAppLinks?.(); window.removeEventListener('keydown', 
       <div v-else-if="threadLoadError" class="thread-load-state" role="alert"><CircleAlert :size="20" /><span>加载会话失败：{{ threadLoadError }}</span><button type="button" @click="openThread(selected)">重试</button></div>
       <div v-else ref="conversation" class="conversation"><div class="conversation-inner">
         <button v-if="historyCursor" class="history-button" :disabled="historyLoading" @click="loadOlder"><LoaderCircle v-if="historyLoading" :size="14" class="working-spinner" />{{ historyLoading ? '正在加载…' : '加载更早的消息' }}</button>
-        <div class="conversation-header"><h2>{{ selected.name || selected.preview || '未命名会话' }}</h2></div>
         <div v-if="!messages.length && !pendingMessageVisible(selected) && !failedMessages[selected.id]?.length" class="empty-messages">{{ selected.desktopDraft ? '从下方发送消息，开始新对话。' : '此会话暂无可显示的消息。' }}</div>
         <template v-for="(message, i) in messages" :key="message.role === 'tools' ? `tools-${i}` : `${message.turnId}-${message.item.id || i}`">
           <details v-if="message.role === 'tools'" class="tool-group">
@@ -2166,13 +2193,26 @@ onUnmounted(() => { removeInAppLinks?.(); window.removeEventListener('keydown', 
     <div v-if="renameThread" class="modal-backdrop" @click.self="!renaming && (renameThread = null)"><section class="create-dialog" role="dialog" aria-modal="true" aria-labelledby="rename-title" @keydown.esc="!renaming && (renameThread = null)"><header><div><h2 id="rename-title">重命名会话</h2><p>名称只影响 rmdex 显示，不会修改消息内容。</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" :disabled="renaming" @click="renameThread = null"><X :size="18" /></button></header><form @submit.prevent="submitRename"><label for="thread-name">会话名称</label><input id="thread-name" v-model="renameValue" maxlength="80" autocomplete="off" /><p v-if="renameError" class="create-error" role="alert">{{ renameError }}</p><div class="dialog-actions"><button type="button" class="cancel-button" :disabled="renaming" @click="renameThread = null">取消</button><button type="submit" class="create-button" :disabled="renaming || !renameValue.trim()">{{ renaming ? '保存中…' : '保存名称' }}</button></div></form></section></div>
     <div v-if="deleteThreadTarget" class="modal-backdrop" @click.self="!threadActionId && (deleteThreadTarget = null)"><section class="create-dialog delete-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-title" @keydown.esc="!threadActionId && (deleteThreadTarget = null)"><header><div><h2 id="delete-title">删除会话</h2><p>删除后无法从 rmdex 恢复这条会话。</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" :disabled="!!threadActionId" @click="deleteThreadTarget = null"><X :size="18" /></button></header><p class="delete-copy">确定删除“{{ deleteThreadTarget.name || deleteThreadTarget.preview || '未命名会话' }}”吗？这会同时从 Codex 中删除会话记录。</p><div class="dialog-actions"><button type="button" class="cancel-button" :disabled="!!threadActionId" @click="deleteThreadTarget = null">取消</button><button type="button" class="danger-confirm-button" :disabled="!!threadActionId" @click="confirmDeleteThread">{{ threadActionId ? '删除中…' : '确认删除' }}</button></div></section></div>
     <div v-if="pairApprovalPage" class="pair-status-backdrop"><section class="pair-status-page" role="dialog" aria-modal="true" aria-labelledby="pair-status-title"><button class="icon-button pair-status-close" type="button" title="返回设备连接" aria-label="返回设备连接" @click="returnToPairingEntry"><X :size="18" /></button><div class="pair-status-icon" :class="`is-${pairApprovalState}`"><LoaderCircle v-if="pairApprovalState === 'waiting'" :size="28" class="working-spinner" /><CircleAlert v-else :size="28" /></div><h2 id="pair-status-title">{{ pairApprovalState === 'waiting' ? '等待电脑端确认' : pairApprovalState === 'denied' ? '配对请求未通过' : pairApprovalState === 'expired' ? '配对请求已过期' : '配对暂时没有完成' }}</h2><p class="pair-status-copy">{{ pairApprovalState === 'waiting' ? '配对申请已经发送到电脑端，请在 Codex Desktop 中允许这台手机连接。' : pairError }}</p><div v-if="pairApprovalState === 'waiting'" class="pair-status-waiting"><span class="online"></span><span>正在等待电脑端审批</span></div><div v-else class="pair-status-actions"><button class="create-button" type="button" :disabled="scanningPair" @click="scanPairCode"><QrCode :size="16" />重新扫描二维码</button><button class="cancel-button" type="button" @click="returnToPairingEntry">手动输入配对码</button></div><form v-if="pairApprovalState !== 'waiting'" class="pair-status-manual" @submit.prevent="claimPair()"><label for="pair-status-code">输入 32 位配对码</label><div><input id="pair-status-code" v-model="pairInput" maxlength="32" inputmode="text" autocomplete="off" placeholder="输入配对码" /><button class="create-button" type="submit" :disabled="pairInput.length !== 32 || mobilePairing">继续</button></div></form></section></div>
-    <div v-if="showDevices" class="modal-backdrop" @click.self="showDevices = false"><section class="create-dialog device-dialog" role="dialog" aria-modal="true" aria-labelledby="devices-title" @keydown.esc="showDevices = false"><header><div><h2 id="devices-title">设备连接</h2><p>选择要使用的 Codex 电脑，或添加一台新电脑。</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="showDevices = false"><X :size="18" /></button></header>
+    <div v-if="showDevices" class="modal-backdrop" @click.self="showDevices = false"><section class="create-dialog device-dialog" role="dialog" aria-modal="true" aria-labelledby="devices-title" @keydown.esc="showDevices = false"><header><div><h2 id="devices-title">连接设备</h2><p>切换正在使用的 Codex 电脑，或管理电脑与手机配对。</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="showDevices = false"><X :size="18" /></button></header>
       <template v-if="adminToken"><div class="admin-status"><span class="online"></span><span>{{ isPlatformAdmin ? '平台管理员已验证' : '用户已验证' }}</span></div>
         <div class="device-dialog-toolbar"><div><strong>我的 Codex 电脑</strong><small>{{ devices.length ? `${devices.length} 台已注册设备` : '还没有注册设备' }}</small></div><button class="create-button" type="button" @click="openRegisterDeviceDialog"><Plus :size="15" />添加电脑</button></div>
         <div v-if="pairRequests.length" class="pair-requests"><strong>待处理的手机配对</strong><div v-for="request in pairRequests" :key="request.id" class="pair-request"><span>{{ request.name }}</span><button type="button" @click="decidePair(request.id, 'deny')">拒绝</button><button type="button" class="approve-pair" @click="decidePair(request.id, 'approve')">允许</button></div></div>
-        <div class="device-list"><div v-for="device in devices" :key="device.id" class="device-row"><span class="device-icon"><Monitor :size="16" /></span><div class="device-copy"><strong>{{ device.name }}</strong><small>{{ device.online ? '在线' : '离线' }}</small></div><span class="online" :class="{ offline: !device.online }"></span><button class="icon-button" :class="{ 'connect-device-button': remoteDevice?.id !== device.id }" title="连接此设备" aria-label="连接此设备" :disabled="!device.online" @click="connectDevice(device.id)"><MessageSquare :size="16" /></button><button class="icon-button" title="生成手机配对码" aria-label="生成手机配对码" @click="openPairDialog(device.id)"><Smartphone :size="16" /></button><button class="icon-button revoke-button" title="撤销设备" aria-label="撤销设备" @click="revokeDevice(device.id)"><Trash2 :size="15" /></button></div><p v-if="!devices.length" class="device-empty">尚未注册 Codex 电脑。点击“添加电脑”开始。</p></div>
+        <div class="device-list">
+          <article v-for="device in devices" :key="device.id" class="device-row" :class="{ 'is-current': remoteDevice?.id === device.id }">
+            <span class="device-icon"><Monitor :size="17" /></span>
+            <div class="device-copy"><strong>{{ device.name }}</strong><small>{{ device.online ? '可连接到这台电脑' : '当前离线，暂时无法连接' }}</small></div>
+            <span class="device-status" :class="device.online ? 'is-online' : 'is-offline'">{{ remoteDevice?.id === device.id ? '当前设备' : device.online ? '在线' : '离线' }}</span>
+            <div class="device-row-actions">
+              <button class="device-connect-button" type="button" :disabled="!device.online || !!connectingDeviceId || remoteDevice?.id === device.id" @click="connectDevice(device.id)"><LoaderCircle v-if="connectingDeviceId === device.id" :size="14" class="working-spinner" /><MessageSquare v-else :size="14" />{{ remoteDevice?.id === device.id ? '当前使用' : connectingDeviceId === device.id ? '正在连接' : device.online ? '连接' : '离线' }}</button>
+              <button class="device-action-button" type="button" title="生成手机配对码" :disabled="!!connectingDeviceId || !!revokingDeviceId" @click="openPairDialog(device.id)"><Smartphone :size="14" /><span>手机配对</span></button>
+              <button class="device-action-button revoke-button" type="button" title="撤销设备" :disabled="!!connectingDeviceId || !!revokingDeviceId" @click="revokeDevice(device.id)"><LoaderCircle v-if="revokingDeviceId === device.id" :size="14" class="working-spinner" /><Trash2 v-else :size="14" /><span>{{ revokingDeviceId === device.id ? '撤销中' : '撤销' }}</span></button>
+            </div>
+          </article>
+          <p v-if="!devices.length" class="device-empty"><Monitor :size="18" /><strong>还没有连接电脑</strong><span>在新电脑上登录 rmdex PC，或添加手动配置的 agent。</span></p>
+        </div>
       </template>
       <template v-else-if="pairLanding"><div class="mobile-pair-intro"><Smartphone :size="22" /><div><strong>申请连接 Codex 电脑</strong><p>配对申请会发送到电脑端，等待管理员允许后即可使用。</p></div></div><button class="create-button scan-pair-button" type="button" :disabled="scanningPair || mobilePairing" @click="scanPairCode"><QrCode :size="16" />{{ scanningPair ? '正在打开扫码…' : '扫描电脑二维码' }}</button><form class="claim-pair" @submit.prevent="claimPair()"><label for="pair-code">二维码无法识别时，输入配对码</label><div><input id="pair-code" v-model="pairInput" maxlength="32" placeholder="输入配对码" /><button class="create-button" type="submit" :disabled="pairInput.length !== 32 || mobilePairing">配对</button></div></form><p v-if="mobilePairing && !pairError" class="pair-waiting" role="status"><LoaderCircle :size="15" class="working-spinner" />配对申请已发送，请在电脑端允许此手机连接。</p></template>
+      <div v-else-if="clientToken" class="client-device-state"><span class="device-icon"><Monitor :size="18" /></span><div><strong>{{ remoteDevice?.name || '已连接的电脑' }}</strong><small>当前会话已通过设备凭据连接。登录账号后可切换或管理其他设备。</small></div></div>
       <p v-if="pairError" class="create-error" role="alert">{{ pairError }}</p>
     </section></div>
     <div v-if="showRegisterDevice" class="modal-backdrop device-submodal" @click.self="showRegisterDevice = false"><section class="create-dialog register-device-dialog" role="dialog" aria-modal="true" aria-labelledby="register-device-title" @keydown.esc="showRegisterDevice = false"><header><div><h2 id="register-device-title">添加 Codex 电脑</h2><p>{{ newDeviceToken ? '注册码已生成，请在新电脑上完成连接。' : registerDeviceMode === 'guide' ? '推荐使用 rmdex-pc 登录账号自动注册。' : '仅在手动配置 agent 时生成注册码。' }}</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="showRegisterDevice = false"><X :size="18" /></button></header><template v-if="!newDeviceToken && registerDeviceMode === 'guide'"><div class="device-guide device-guide-primary"><strong>推荐方式：在新电脑上登录</strong><ol><li>在新电脑安装并打开 rmdex-pc。</li><li>输入要绑定的用户账号、密码和电脑名称。</li><li>点击“连接账号并启动”，设备会自动注册并上线。</li></ol><p>注册完成后，这台电脑会自动出现在当前设备列表中，不需要先在这里创建空设备。</p></div><div class="dialog-actions"><button type="button" class="cancel-button" @click="showRegisterDevice = false">关闭</button><button type="button" class="create-button" @click="registerDeviceMode = 'manual'"><Wrench :size="15" />手动配置注册码</button></div></template><template v-else-if="!newDeviceToken"><label class="user-select-label">设备所属用户</label><UserMenu v-model="selectedUserId" :users="users" :disabled="!isPlatformAdmin || users.length < 2" @update:model-value="selectUser" /><label for="new-device-name">电脑名称</label><input id="new-device-name" v-model="deviceName" maxlength="80" autocomplete="off" placeholder="例如：办公室电脑" /><div class="device-guide"><strong>手动配置适用于已有 agent 的电脑</strong><p>生成后复制注册码，并将它配置到电脑端的 <code>RMDEX_DEVICE_TOKEN</code>。普通的新电脑请返回上一步，直接使用 rmdex-pc 登录。</p></div><p v-if="pairError" class="create-error" role="alert">{{ pairError }}</p><div class="dialog-actions"><button type="button" class="cancel-button" @click="registerDeviceMode = 'guide'">返回</button><button type="button" class="create-button" :disabled="!selectedUserId || !deviceName.trim()" @click="registerDevice"><Plus :size="15" />生成注册码</button></div></template><div v-else class="device-secret"><strong>注册码已生成</strong><p>将它配置到手动 agent 后，设备会出现在设备列表。普通新电脑不需要使用注册码，直接在 rmdex-pc 登录即可。</p><code>{{ newDeviceToken }}</code><button class="copy-button" type="button" @click="copyValue(newDeviceToken, '已复制设备注册码')"><Copy :size="15" />复制注册码</button><small>手动配置：RMDEX_RELAY_URL=wss://code.kyeai.xyz/agent<br />RMDEX_DEVICE_TOKEN={{ newDeviceToken }}</small><div class="dialog-actions"><button type="button" class="create-button" @click="showRegisterDevice = false">完成</button></div></div></section></div>
