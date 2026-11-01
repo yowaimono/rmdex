@@ -118,6 +118,8 @@ export class PcManager {
   private readonly agentPort: number
   private readonly socketPath: string
   private readonly relayUrl: string
+  private readonly desktopMirrorPort: number
+  private desktopMirrorToken = randomUUID()
   private agent?: ChildProcess
   private desktop?: ChildProcess
   private agentLog?: WriteStream
@@ -139,6 +141,7 @@ export class PcManager {
     this.notificationCursorPath = join(this.work, 'pc-notification-cursor.json')
     this.notificationInstallationPath = join(this.work, 'pc-installation-id')
     this.agentPort = Number(process.env.RMDEX_AGENT_PORT || 18787)
+    this.desktopMirrorPort = Number(process.env.RMDEX_DESKTOP_MIRROR_PORT || 18789)
     const codexHome = process.env.CODEX_HOME || join(process.env.USERPROFILE || '', '.codex')
     this.socketPath = process.env.RMDEX_CODEX_SOCKET || join(codexHome, 'app-server-control', 'app-server-control.sock')
     this.relayUrl = process.env.RMDEX_RELAY_URL || 'wss://code.kyeai.xyz/agent'
@@ -235,6 +238,8 @@ export class PcManager {
         RMDEX_AGENT_PORT: String(this.agentPort),
         RMDEX_RELAY_URL: this.relayUrl,
         RMDEX_DEVICE_TOKEN: deviceToken,
+        RMDEX_DESKTOP_MIRROR_PORT: String(this.desktopMirrorPort),
+        RMDEX_DESKTOP_MIRROR_TOKEN: this.desktopMirrorToken,
         RMDEX_DEFAULT_PERMISSION_MODE: this.settings.permissionMode,
       },
       stdio: ['ignore', this.agentLog, errorLog],
@@ -257,7 +262,13 @@ export class PcManager {
   private startDesktop() {
     const child = spawn(process.execPath, ['--import', 'tsx', 'scripts/start-shared-desktop.ts', '--ensure-daemon', '--wait-for-desktop-exit'], {
       cwd: this.root,
-      env: { ...process.env, RMDEX_CODEX_MODE: 'shared', RMDEX_CODEX_SOCKET: this.socketPath },
+      env: {
+        ...process.env,
+        RMDEX_CODEX_MODE: 'shared',
+        RMDEX_CODEX_SOCKET: this.socketPath,
+        RMDEX_DESKTOP_MIRROR_PORT: String(this.desktopMirrorPort),
+        RMDEX_DESKTOP_MIRROR_TOKEN: this.desktopMirrorToken,
+      },
       stdio: ['ignore', this.desktopLog, this.desktopLog],
       windowsHide: false,
     })

@@ -5,7 +5,7 @@ import { App as NativeApp } from '@capacitor/app'
 import { LocalNotifications } from '@capacitor/local-notifications'
 import { CapacitorBarcodeScanner, CapacitorBarcodeScannerTypeHint } from '@capacitor/barcode-scanner'
 import MarkdownIt from 'markdown-it'
-import { Archive, ArrowLeft, ArrowUp, Bot, ChevronDown, ChevronRight, CircleAlert, CircleCheck, CornerDownRight, Ellipsis, ExternalLink, Eye, EyeOff, Folder, FolderPlus, GitFork, LoaderCircle, LogOut, Menu, MessageSquare, Monitor, MonitorCog, Moon, PanelLeftClose, Paperclip, Pencil, Pin, Plus, RefreshCw, RotateCcw, Search, Settings, ShieldAlert, Smartphone, Square, Sun, Trash2, Users, Wrench, X, QrCode, Copy } from 'lucide-vue-next'
+import { Archive, ArrowLeft, ArrowUp, Bot, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, CircleCheck, CircleHelp, CornerDownRight, Ellipsis, ExternalLink, Eye, EyeOff, Folder, FolderPlus, GitFork, LoaderCircle, LogOut, Menu, MessageSquare, Monitor, MonitorCog, Moon, PanelLeftClose, Paperclip, Pencil, Pin, Plus, RefreshCw, RotateCcw, Search, Settings, ShieldAlert, Smartphone, Square, Sun, Trash2, Users, Wrench, X, QrCode, Copy } from 'lucide-vue-next'
 import QRCode from 'qrcode'
 import logoUrl from './assets/rmdex-logo.jpg'
 import ToolEvent from './components/ToolEvent.vue'
@@ -219,6 +219,8 @@ type UserInput = { id: string; method: string; params: { threadId: string; turnI
 const pendingUserInputs = ref<UserInput[]>([])
 const userInputAnswers = ref<Record<string, Record<string, string>>>({})
 const userInputOther = ref<Record<string, string>>({})
+const userInputIndexes = ref<Record<string, number>>({})
+const userInputSkipped = ref<Record<string, Record<string, boolean>>>({})
 const answeringUserInput = ref<string | null>(null)
 let poll: ReturnType<typeof setInterval> | undefined
 let pollBusy = false
@@ -2117,22 +2119,48 @@ async function decide(approval: Approval, decision: 'accept' | 'decline') {
 function chooseUserInput(requestId: string, questionId: string, value: string) {
   const answers = userInputAnswers.value[requestId] || (userInputAnswers.value[requestId] = {})
   answers[questionId] = value
+  if (userInputSkipped.value[requestId]) delete userInputSkipped.value[requestId]![questionId]
 }
 function chosenUserInput(requestId: string, questionId: string) { return userInputAnswers.value[requestId]?.[questionId] || '' }
-async function answerUserInput(request: UserInput, skip = false) {
+function currentUserInputQuestion(request: UserInput) {
+  const index = userInputIndexes.value[request.id] || 0
+  return { index, question: request.params.questions[index] }
+}
+function userInputHasAnswer(requestId: string, question: UserInput['params']['questions'][number]) {
+  const choice = chosenUserInput(requestId, question.id)
+  return choice === '__other__' ? Boolean(userInputOther.value[`${requestId}:${question.id}`]?.trim()) : Boolean(choice)
+}
+async function advanceUserInput(request: UserInput, skip = false) {
+  const { index, question } = currentUserInputQuestion(request)
+  if (!question || answeringUserInput.value) return
+  if (skip) {
+    const skipped = userInputSkipped.value[request.id] || (userInputSkipped.value[request.id] = {})
+    skipped[question.id] = true
+    if (userInputAnswers.value[request.id]) delete userInputAnswers.value[request.id]![question.id]
+  }
+  if (index < request.params.questions.length - 1) {
+    userInputIndexes.value[request.id] = index + 1
+    return
+  }
+  await answerUserInput(request)
+}
+async function answerUserInput(request: UserInput) {
   if (answeringUserInput.value) return
   const answers: Record<string, { answers: string[] }> = {}
   for (const question of request.params.questions) {
     const choice = chosenUserInput(request.id, question.id)
     const other = userInputOther.value[`${request.id}:${question.id}`] || ''
     const customAnswer = choice === '__other__' || (!question.options?.length && !question.isOther)
-    answers[question.id] = { answers: skip ? [] : [customAnswer ? other : choice].filter(Boolean) }
+    answers[question.id] = { answers: userInputSkipped.value[request.id]?.[question.id] ? [] : [customAnswer ? other : choice].filter(Boolean) }
   }
   answeringUserInput.value = request.id
   try {
     await post(`/api/user-input/${request.id}`, { answers })
     pendingUserInputs.value = pendingUserInputs.value.filter(item => item.id !== request.id)
     delete userInputAnswers.value[request.id]
+    delete userInputIndexes.value[request.id]
+    delete userInputSkipped.value[request.id]
+    for (const question of request.params.questions) delete userInputOther.value[`${request.id}:${question.id}`]
   } catch (e) { error.value = e instanceof Error ? e.message : String(e) }
   finally { answeringUserInput.value = null }
 }
@@ -2350,7 +2378,19 @@ onUnmounted(() => { themeMediaQuery?.removeEventListener('change', handleSystemT
       <div v-if="selected && !threadLoading && !threadLoadError" class="compose-area">
         <section v-if="queuedSubmissions.length" class="queued-followups" aria-label="排队任务"><div class="queued-followups-heading"><span>排队中</span><span class="queued-count">{{ queuedSubmissions.length }}</span></div><div v-for="item in queuedSubmissions" :key="item.id" class="queued-followup"><CornerDownRight :size="15" class="queued-followup-icon" /><span class="queued-followup-text">{{ queuedText(item) }}</span><div class="queued-followup-actions"><button v-if="!isColleagueQueued(item)" type="button" class="queue-steer-button" :disabled="!!queueActionId || !activeTurnId" @click="steerQueued(item)"><CornerDownRight :size="14" />Steer</button><button type="button" class="queue-icon-button" title="删除排队任务" aria-label="删除排队任务" :disabled="!!queueActionId" @click="deleteQueued(item)"><Trash2 :size="15" /></button><button v-if="!isColleagueQueued(item)" type="button" class="queue-icon-button" title="更多操作" aria-label="更多操作" :disabled="!!queueActionId" @click="queueMenuId = queueMenuId === item.id ? null : item.id"><Ellipsis :size="16" /></button></div><div v-if="queueMenuId === item.id && !isColleagueQueued(item)" class="queued-followup-menu"><button type="button" :disabled="!!queueActionId" @click="editQueued(item)"><Pencil :size="14" />编辑消息</button></div></div></section>
         <p v-if="desktopMode" class="desktop-hint">{{ capabilities.models ? '模型与推理强度可在右侧选择；权限、审批和暂停请在 Desktop 处理。' : '当前设备未提供可识别的模型目录；模型、权限、审批和暂停请在 Desktop 处理。' }}</p><div v-for="approval in (capabilities.approvals ? pendingApprovals : [])" :key="approval.id" class="approval"><strong>{{ approval.method.includes('commandExecution') ? '命令执行需要确认' : '文件修改需要确认' }}</strong><p v-if="approval.params.reason">{{ approval.params.reason }}</p><pre v-if="approval.params.command">{{ approval.params.command }}</pre><p v-if="approval.params.cwd">工作目录：{{ approval.params.cwd }}</p><p v-if="approval.params.grantRoot">授权目录：{{ approval.params.grantRoot }}</p><details><summary>完整请求信息</summary><pre>{{ JSON.stringify(approval.params, null, 2) }}</pre></details><p v-if="approval.method.includes('fileChange')">请先在上方工具调用中查看文件变更，再决定是否允许。</p><div class="approval-actions"><button @click="decide(approval, 'decline')">拒绝</button><button @click="decide(approval, 'accept')">允许本次</button></div></div>
-        <section v-for="request in pendingUserInputs" :key="request.id" class="user-input-request" aria-live="polite"><div v-for="question in request.params.questions" :key="question.id" class="user-input-question"><div class="user-input-header"><strong>{{ question.header }}</strong><span>{{ question.isSecret ? '敏感信息' : '需要你的选择' }}</span></div><p>{{ question.question }}</p><div v-if="question.options?.length || question.isOther" class="user-input-options"><button v-for="option in question.options || []" :key="option.label" type="button" :class="{ selected: chosenUserInput(request.id, question.id) === option.label }" @click="chooseUserInput(request.id, question.id, option.label)"><strong>{{ option.label }}</strong><small>{{ option.description }}</small></button><button v-if="question.isOther" type="button" :class="{ selected: chosenUserInput(request.id, question.id) === '__other__' }" @click="chooseUserInput(request.id, question.id, '__other__')"><strong>自定义输入</strong><small>输入你自己的回答</small></button></div><textarea v-if="question.isOther && chosenUserInput(request.id, question.id) === '__other__'" v-model="userInputOther[`${request.id}:${question.id}`]" class="user-input-other" rows="2" :placeholder="question.isSecret ? '输入敏感回答' : '输入你的回答'"></textarea><textarea v-if="!question.options?.length && !question.isOther" v-model="userInputOther[`${request.id}:${question.id}`]" class="user-input-other" rows="2" :placeholder="question.isSecret ? '输入敏感回答' : '输入你的回答'"></textarea></div><div class="user-input-actions"><button type="button" class="cancel-button" :disabled="answeringUserInput === request.id" @click="answerUserInput(request, true)">跳过</button><button type="button" class="create-button" :disabled="answeringUserInput === request.id" @click="answerUserInput(request)">{{ answeringUserInput === request.id ? '提交中…' : '提交回答' }}</button></div></section>
+        <section v-for="request in pendingUserInputs" :key="request.id" class="user-input-request" aria-live="polite">
+          <div class="user-input-toolbar"><div class="user-input-title"><CircleHelp :size="15" /><span>Question</span></div><div class="user-input-pagination"><button type="button" title="上一题" aria-label="上一题" :disabled="currentUserInputQuestion(request).index === 0 || answeringUserInput === request.id" @click="userInputIndexes[request.id] = Math.max(0, currentUserInputQuestion(request).index - 1)"><ChevronLeft :size="15" /></button><span>{{ currentUserInputQuestion(request).index + 1 }} of {{ request.params.questions.length }}</span><button type="button" title="下一题" aria-label="下一题" :disabled="currentUserInputQuestion(request).index >= request.params.questions.length - 1 || answeringUserInput === request.id" @click="userInputIndexes[request.id] = Math.min(request.params.questions.length - 1, currentUserInputQuestion(request).index + 1)"><ChevronRight :size="15" /></button><button type="button" class="user-input-close" title="跳过全部问题" aria-label="跳过全部问题" :disabled="answeringUserInput === request.id" @click="request.params.questions.forEach(question => userInputSkipped[request.id] = { ...(userInputSkipped[request.id] || {}), [question.id]: true }); answerUserInput(request)"><X :size="15" /></button></div></div>
+          <template v-if="currentUserInputQuestion(request).question">
+            <div class="user-input-question">
+              <div class="user-input-prompt">{{ currentUserInputQuestion(request).question.question }}</div>
+              <div v-if="currentUserInputQuestion(request).question.options?.length" class="user-input-options">
+                <button v-for="(option, index) in currentUserInputQuestion(request).question.options || []" :key="option.label" type="button" :class="{ selected: chosenUserInput(request.id, currentUserInputQuestion(request).question.id) === option.label }" @click="chooseUserInput(request.id, currentUserInputQuestion(request).question.id, option.label)"><span class="user-input-option-index">{{ index + 1 }}</span><span class="user-input-option-copy"><strong>{{ option.label }}</strong><small v-if="option.description">{{ option.description }}</small></span></button>
+              </div>
+              <label class="user-input-custom"><Pencil :size="14" /><input v-model="userInputOther[`${request.id}:${currentUserInputQuestion(request).question.id}`]" :placeholder="currentUserInputQuestion(request).question.isSecret ? 'Write your own response' : 'Or write your own response'" :type="currentUserInputQuestion(request).question.isSecret ? 'password' : 'text'" @focus="chooseUserInput(request.id, currentUserInputQuestion(request).question.id, '__other__')" @input="chooseUserInput(request.id, currentUserInputQuestion(request).question.id, '__other__')" /></label>
+            </div>
+            <div class="user-input-actions"><button type="button" class="user-input-skip" :disabled="answeringUserInput === request.id" @click="advanceUserInput(request, true)">Skip</button><button type="button" class="user-input-next" :disabled="answeringUserInput === request.id || !userInputHasAnswer(request.id, currentUserInputQuestion(request).question)" @click="advanceUserInput(request)">{{ answeringUserInput === request.id ? 'Submitting…' : currentUserInputQuestion(request).index === request.params.questions.length - 1 ? 'Submit' : 'Next' }}</button></div>
+          </template>
+        </section>
         <form class="composer" @submit.prevent="send()">
           <div v-if="selectedAttachments.length" class="composer-attachments" aria-label="待发送附件">
             <div v-for="(file, index) in selectedAttachments" :key="`${file.name}-${file.lastModified}-${index}`" class="composer-attachment">

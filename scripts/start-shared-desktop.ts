@@ -86,7 +86,10 @@ async function runCodexDaemonStart() {
 const executable = findDesktopExecutable()
 if (waitForDesktopExit) await waitForDesktopToExit()
 if (ensureDaemon) await runCodexDaemonStart()
-const bridge = await createDesktopBridge(socket, codexExecutable)
+const mirrorPort = Number(process.env.RMDEX_DESKTOP_MIRROR_PORT || 0)
+const mirrorToken = process.env.RMDEX_DESKTOP_MIRROR_TOKEN || ''
+console.log(`Starting Desktop question mirror: ${mirrorPort && mirrorToken ? `127.0.0.1:${mirrorPort}` : 'disabled'}`)
+const bridge = await createDesktopBridge(socket, codexExecutable, mirrorPort && mirrorToken ? { mirrorPort, mirrorToken } : {})
 try {
   await new Promise<void>((resolve, reject) => {
     const ws = new WebSocket(bridge.url, { handshakeTimeout: 5000 })

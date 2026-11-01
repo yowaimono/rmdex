@@ -70,7 +70,14 @@ const liveTurns = new Map<string, LiveTurn>()
 const statusRefreshes = new Map<string, { expiresAt: number; request: Promise<void> }>()
 const approvals = new Map<string, { id: string | number; method: string; params: Record<string, unknown> }>()
 type UserInputQuestion = { header: string; id: string; question: string; options?: Array<{ label: string; description: string }> | null; isOther?: boolean; isSecret?: boolean }
-type UserInputRequest = { id: string | number; method: string; params: { threadId: string; turnId: string; itemId: string; questions: UserInputQuestion[]; isBlocking: boolean } }
+type UserInputRequest = {
+  id: string
+  rpcId: string | number
+  method: string
+  params: { threadId: string; turnId: string; itemId: string; questions: UserInputQuestion[]; isBlocking: boolean }
+  transport: 'local' | 'desktop-mirror'
+  mirrorClientId?: string
+}
 const userInputs = new Map<string, UserInputRequest>()
 function pendingUserInputs(threadId: string) {
   return [...userInputs.entries()].filter(([, request]) => request.params.threadId === threadId).map(([id, request]) => ({ id, method: request.method, params: request.params }))
@@ -211,6 +218,51 @@ function sendMessage(message: unknown, callback?: (error?: Error | null) => void
   } else if (codex?.stdin) codex.stdin.write(payload + '\n', callback)
   else callback?.(new Error('Codex app-server is not available'))
 }
+let desktopMirror: WebSocket | undefined
+let desktopMirrorReconnect: NodeJS.Timeout | undefined
+function desktopMirrorUrl() {
+  if (process.env.RMDEX_DESKTOP_MIRROR_URL) return process.env.RMDEX_DESKTOP_MIRROR_URL
+  const mirrorPort = Number(process.env.RMDEX_DESKTOP_MIRROR_PORT || 0)
+  const mirrorToken = process.env.RMDEX_DESKTOP_MIRROR_TOKEN || ''
+  return mirrorPort && mirrorToken ? `ws://127.0.0.1:${mirrorPort}/${mirrorToken}` : ''
+}
+function scheduleDesktopMirrorReconnect() {
+  if (desktopMirrorReconnect || shuttingDown || !desktopMirrorUrl()) return
+  desktopMirrorReconnect = setTimeout(() => { desktopMirrorReconnect = undefined; connectDesktopMirror() }, 1000)
+}
+function connectDesktopMirror() {
+  const url = desktopMirrorUrl()
+  if (!url || shuttingDown || (desktopMirror && [WebSocket.OPEN, WebSocket.CONNECTING].includes(desktopMirror.readyState))) return
+  const connection = new WebSocket(url)
+  desktopMirror = connection
+  connection.on('open', () => console.log(`[${timestamp()}] Desktop question mirror ready`))
+  connection.on('message', data => {
+    try {
+      const event = JSON.parse(data.toString()) as { type?: string; clientId?: string; requestId?: string; request?: { id?: string | number; method?: string; params?: UserInputRequest['params'] } }
+      if (event.type === 'request' && event.clientId && event.requestId && event.request?.id !== undefined && event.request.params?.threadId && Array.isArray(event.request.params.questions)) {
+        const id = `desktop-${event.clientId}-${event.requestId}`
+        userInputs.set(id, { id, rpcId: event.request.id, method: event.request.method || 'item/tool/requestUserInput', params: event.request.params, transport: 'desktop-mirror', mirrorClientId: event.clientId })
+      } else if (event.type === 'resolved' && event.clientId && event.requestId) {
+        userInputs.delete(`desktop-${event.clientId}-${event.requestId}`)
+      }
+    } catch { console.error('Invalid Desktop mirror event') }
+  })
+  const clear = () => {
+    if (desktopMirror === connection) desktopMirror = undefined
+    for (const [key, request] of userInputs) if (request.transport === 'desktop-mirror') userInputs.delete(key)
+    scheduleDesktopMirrorReconnect()
+  }
+  connection.on('error', clear)
+  connection.on('close', clear)
+}
+function sendUserInputResponse(request: UserInputRequest, result: unknown) {
+  if (request.transport === 'desktop-mirror') {
+    if (!desktopMirror || desktopMirror.readyState !== WebSocket.OPEN || !request.mirrorClientId) throw new Error('Codex Desktop 提问通道已断开')
+    desktopMirror.send(JSON.stringify({ type: 'response', clientId: request.mirrorClientId, requestId: String(request.rpcId), result }))
+    return
+  }
+  sendMessage({ id: request.rpcId, result })
+}
 function handleMessage(line: string) {
   try {
     const message = JSON.parse(line)
@@ -218,7 +270,8 @@ function handleMessage(line: string) {
       if (['item/commandExecution/requestApproval', 'item/fileChange/requestApproval'].includes(message.method)) {
         approvals.set(String(message.id), { id: message.id, method: message.method, params: message.params || {} })
       } else if (['item/tool/requestUserInput', 'item/tool/request_user_input'].includes(String(message.method)) && message.params?.threadId && Array.isArray(message.params?.questions)) {
-        userInputs.set(String(message.id), { id: message.id, method: message.method, params: message.params })
+        const id = String(message.id)
+        userInputs.set(id, { id, rpcId: message.id, method: message.method, params: message.params, transport: 'local' })
       } else if (!sharedMode) {
         sendMessage({ id: message.id, error: { code: -32601, message: 'This client does not support this request' } })
       } else {
@@ -255,7 +308,10 @@ function handleMessage(line: string) {
       else if (!activeTurns.has(threadId)) liveTurns.set(threadId, { id: turn.id, status: turn.status, error: turn.error, items: new Map((turn.items || []).map((item: LiveItem) => [item.id, item])) })
       if (!activeTurns.has(threadId)) for (const [key, request] of approvals) if (request.params.threadId === threadId) approvals.delete(key)
     }
-    if (message.method === 'serverRequest/resolved') { approvals.delete(String(message.params?.requestId)); userInputs.delete(String(message.params?.requestId)) }
+    if (message.method === 'serverRequest/resolved') {
+      approvals.delete(String(message.params?.requestId))
+      for (const [key, request] of userInputs) if (String(request.rpcId) === String(message.params?.requestId)) userInputs.delete(key)
+    }
     if (message.method === 'thread/reverted' && message.params?.threadId) clearThreadRuntime(message.params.threadId)
     if (typeof message.id !== 'number' || !pending.has(message.id)) return
     const request = pending.get(message.id)!
@@ -414,6 +470,7 @@ async function ensureReady() {
 
 let standaloneReady: Promise<void> | undefined
 void (sharedMode ? ensureSharedConnected() : ensureReady()).catch(error => console.error(`[${timestamp()}] Codex initialization failed: ${error.message}`))
+if (desktopMirrorUrl()) connectDesktopMirror()
 
 const messageRetries = new MessageRetryService(rpc, new OperationJournal(join(codexHome, 'rmdex-message-retries.json')), clearThreadRuntime, async (id, original) => {
   const directory = join(codexHome, 'rmdex-retry-backups')
@@ -716,8 +773,8 @@ const server = createServer(async (req, res) => {
           if (!answer || !Array.isArray(answer.answers) || answer.answers.some((value: unknown) => typeof value !== 'string')) throw new Error('问题答案格式无效')
           answers[question.id] = { answers: answer.answers }
         }
+        sendUserInputResponse(request, { answers })
         userInputs.delete(userInputMatch[1]!)
-        sendMessage({ id: request.id, result: { answers } })
         result = { ok: true }
       } else { res.writeHead(404).end(JSON.stringify({ error: 'Not found' })); return }
     } else if (url.pathname === '/api/settings') {

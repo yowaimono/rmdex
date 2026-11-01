@@ -401,20 +401,44 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .approval pre { max-height: 150px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.5 Consolas, monospace; }
 .approval-actions { display: flex; gap: 8px; justify-content: flex-end; }
 .approval-actions button { padding: 6px 10px; border: 1px solid #d4dde6; border-radius: 5px; background: white; color: #344252; }
-.user-input-request { margin-bottom: 10px; padding: 12px; border: 1px solid #b9d4f2; border-radius: 6px; background: #f7fbff; color: #263545; }
-.user-input-question + .user-input-question { margin-top: 14px; padding-top: 14px; border-top: 1px solid #dce8f4; }
-.user-input-header, .user-input-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.user-input-header span { color: #718398; font-size: 11px; }
-.user-input-question p { margin: 7px 0 9px; font-size: 13px; }
-.user-input-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 7px; }
-.user-input-options button { min-height: 48px; padding: 8px 10px; text-align: left; border: 1px solid #d4e0ec; border-radius: 5px; background: #fff; color: inherit; }
-.user-input-options button.selected { border-color: #4b8ed8; background: #eaf3ff; }
-.user-input-options small { display: block; margin-top: 3px; color: #718398; font-size: 11px; }
-.user-input-other { width: 100%; margin-top: 8px; padding: 7px; border: 1px solid #d4e0ec; border-radius: 5px; resize: vertical; background: #fff; color: inherit; }
-:root[data-theme='dark'] .user-input-request { border-color: #315b80; background: #1b2a3a; color: #e5edf5; }
-:root[data-theme='dark'] .user-input-question + .user-input-question { border-color: #2c4055; }
-:root[data-theme='dark'] .user-input-options button, :root[data-theme='dark'] .user-input-other { border-color: #3a536c; background: #223447; color: #e5edf5; }
-:root[data-theme='dark'] .user-input-options button.selected { border-color: #5d9de0; background: #24486b; }
+.user-input-request { margin-bottom: 10px; padding: 14px 16px 12px; border: 1px solid #e4e6e9; border-radius: 18px; background: #fff; color: #202124; box-shadow: 0 1px 2px rgba(25, 35, 45, .04); }
+.user-input-toolbar, .user-input-actions, .user-input-pagination, .user-input-title { display: flex; align-items: center; }
+.user-input-toolbar { justify-content: space-between; gap: 10px; }
+.user-input-title { gap: 8px; color: #59636e; font-size: 13px; }
+.user-input-pagination { gap: 5px; color: #7b848d; font-size: 12px; }
+.user-input-pagination button, .user-input-close { display: grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: #858e98; }
+.user-input-pagination button:hover:not(:disabled), .user-input-close:hover:not(:disabled) { background: #f0f2f4; color: #303942; }
+.user-input-pagination button:disabled { opacity: .35; }
+.user-input-question { padding: 14px 0 8px; }
+.user-input-prompt { margin-bottom: 13px; font-size: 14px; font-weight: 600; }
+.user-input-options { display: grid; gap: 7px; }
+.user-input-options button { display: flex; align-items: flex-start; gap: 10px; width: 100%; min-height: 42px; padding: 8px 10px; text-align: left; border: 1px solid #e3e6e9; border-radius: 7px; background: #fff; color: inherit; }
+.user-input-options button:hover { border-color: #b8c0c9; background: #fafbfc; }
+.user-input-options button.selected { border-color: #9aa4af; background: #f1f3f5; }
+.user-input-option-index { display: grid; flex: none; place-items: center; width: 20px; height: 20px; border: 1px solid #dfe3e7; border-radius: 4px; color: #7c8791; font-size: 11px; }
+.user-input-option-copy { min-width: 0; }
+.user-input-options small { display: block; margin-top: 3px; color: #7a848e; font-size: 11px; line-height: 1.35; }
+.user-input-custom { display: flex; align-items: center; gap: 8px; margin-top: 10px; color: #9aa2aa; }
+.user-input-custom input { width: 100%; min-width: 0; padding: 4px 0; border: 0; outline: 0; background: transparent; color: inherit; font: inherit; font-size: 13px; }
+.user-input-custom input::placeholder { color: #a4abb2; }
+.user-input-actions { justify-content: flex-end; gap: 8px; padding-top: 4px; }
+.user-input-skip, .user-input-next { padding: 6px 12px; border-radius: 18px; font-size: 12px; }
+.user-input-skip { border: 1px solid #e1e4e7; background: #fff; color: #434b54; }
+.user-input-next { border: 1px solid #c5cbd1; background: #c5cbd1; color: #fff; }
+.user-input-next:not(:disabled) { border-color: #202124; background: #202124; }
+.user-input-next:disabled { cursor: not-allowed; opacity: .65; }
+:root[data-theme='dark'] .user-input-request { border-color: #3b4148; background: #202225; color: #f1f3f4; box-shadow: none; }
+:root[data-theme='dark'] .user-input-title, :root[data-theme='dark'] .user-input-pagination { color: #aeb6bf; }
+:root[data-theme='dark'] .user-input-pagination button:hover:not(:disabled), :root[data-theme='dark'] .user-input-close:hover:not(:disabled) { background: #30343a; color: #f1f3f4; }
+:root[data-theme='dark'] .user-input-options button { border-color: #41474e; background: #25282c; color: #f1f3f4; }
+:root[data-theme='dark'] .user-input-options button:hover { border-color: #68717b; background: #2c3035; }
+:root[data-theme='dark'] .user-input-options button.selected { border-color: #858e98; background: #343941; }
+:root[data-theme='dark'] .user-input-option-index { border-color: #555d66; color: #aeb6bf; }
+:root[data-theme='dark'] .user-input-custom input { color: #e5e9ed; }
+:root[data-theme='dark'] .user-input-custom input::placeholder { color: #828b95; }
+:root[data-theme='dark'] .user-input-skip { border-color: #4a5159; background: #202225; color: #e8ebee; }
+:root[data-theme='dark'] .user-input-next { border-color: #4a5159; background: #4a5159; }
+:root[data-theme='dark'] .user-input-next:not(:disabled) { border-color: #f1f3f4; background: #f1f3f4; color: #202225; }
 .error { display: flex; align-items: center; gap: 8px; margin: 18px 28px 0; padding: 12px; border-radius: 6px; background: #fff3f1; color: #a25249; font-size: 13px; }
 .error span { overflow-wrap: anywhere; }
 .error button { margin-left: auto; border: 0; background: transparent; color: inherit; }
