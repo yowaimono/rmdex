@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import { ChevronRight, FileCode2, Globe, Image, TerminalSquare, Wrench } from 'lucide-vue-next'
 import { commandSummary } from '../command-summary'
+import FileDiff from './FileDiff.vue'
 
 type ToolItem = { type: string; [key: string]: unknown }
 const props = defineProps<{ item: ToolItem; imageUrl?: string }>()
@@ -85,7 +86,13 @@ const raw = computed(() => JSON.stringify(props.item, null, 2))
     </summary>
     <div class="tool-details">
       <button v-if="imageUrl" type="button" class="tool-image-preview" title="放大预览图片" @click="emit('preview', imageUrl)"><img :src="imageUrl" alt="图片预览" loading="lazy" /></button>
-      <div v-for="field in fields" :key="field.key" class="tool-field">
+      <FileDiff v-if="item.type === 'fileChange'" :item="item">
+        <div v-for="field in fields" :key="field.key" class="tool-field">
+          <div class="tool-field-label">{{ field.label }}</div>
+          <pre>{{ field.value }}</pre>
+        </div>
+      </FileDiff>
+      <div v-for="field in (item.type === 'fileChange' ? [] : fields)" :key="field.key" class="tool-field">
         <div class="tool-field-label">{{ field.label }}</div>
         <pre>{{ field.value }}</pre>
       </div>
