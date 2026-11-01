@@ -17,7 +17,7 @@ type Pairing = { codeHash: string; deviceId: string; userId: string; expiresAt: 
 type PairRequest = { id: string; deviceId: string; userId: string; name: string; platform?: string; manufacturer?: string; model?: string; createdAt: number; expiresAt: number; status: 'pending' | 'approved' | 'denied'; token?: string }
 type MessageReceipt = { messageId: string; senderId: string; recipientId: string; fingerprint: string; threadId: string; deviceId: string; status: 'dispatching' | 'queued' | 'uncertain'; createdAt: number }
 type PlanTrigger = { type: 'once' | 'interval'; at?: number; intervalMinutes?: number }
-type Plan = { id: string; userId: string; deviceId: string; name: string; prompt: string; employeeId?: string; cwd: string; trigger: PlanTrigger; overlap: 'skip' | 'queue' | 'parallel'; enabled: boolean; nextRunAt: number; createdAt: number; updatedAt: number }
+type Plan = { id: string; userId: string; deviceId: string; name: string; prompt: string; employeeId?: string; model?: string; effort?: string; cwd: string; trigger: PlanTrigger; overlap: 'skip' | 'queue' | 'parallel'; enabled: boolean; nextRunAt: number; createdAt: number; updatedAt: number }
 type PlanRun = { id: string; planId: string; userId: string; deviceId: string; employeeId?: string; threadId?: string; turnId?: string; status: 'pending' | 'running' | 'completed' | 'skipped' | 'failed' | 'cancelled'; triggeredAt: number; startedAt?: number; finishedAt?: number; summary?: string; error?: string }
 type State = { devices: Device[]; clients: Client[]; pairings: Pairing[]; pairRequests: PairRequest[]; users: User[]; sessions: AuthSession[]; pushTokens: PushToken[]; notifications: NotificationEvent[]; notificationWatches: NotificationWatch[]; employees: Employee[]; employeeMessages: MessageReceipt[]; plans: Plan[]; planRuns: PlanRun[] }
 type Credentials = { accessToken: string; refreshToken: string; expiresIn: number; user: { id: string; username: string; role?: User['role'] }; token?: string; clientToken?: string; deviceId?: string }
@@ -162,7 +162,7 @@ async function load() {
     state.notifications = Array.isArray(saved.notifications) ? saved.notifications.filter(item => item && typeof item.deviceId === 'string' && typeof item.threadId === 'string') : []
     state.notificationWatches = Array.isArray(saved.notificationWatches) ? saved.notificationWatches.filter(item => item && typeof item.deviceId === 'string' && typeof item.threadId === 'string' && typeof item.turnId === 'string').map(item => ({ deviceId: item.deviceId, threadId: item.threadId, turnId: item.turnId, name: typeof item.name === 'string' ? item.name : 'Codex 会话', createdAt: Number(item.createdAt) || Date.now() })) : []
     state.employeeMessages = Array.isArray(saved.employeeMessages) ? saved.employeeMessages.map(item => ({ ...item, status: item.status === 'dispatching' ? 'uncertain' : item.status })) : []
-    state.plans = Array.isArray(saved.plans) ? saved.plans.filter(item => item && typeof item.id === 'string' && typeof item.userId === 'string' && typeof item.deviceId === 'string' && typeof item.name === 'string' && typeof item.prompt === 'string' && item.trigger && (item.trigger.type === 'once' || item.trigger.type === 'interval') && state.users.some(user => user.id === item.userId) && state.devices.some(device => !device.revoked && device.id === item.deviceId && device.userId === item.userId)).map(item => ({ id: item.id, userId: item.userId, deviceId: item.deviceId, name: item.name, prompt: item.prompt, ...(typeof item.employeeId === 'string' ? { employeeId: item.employeeId } : {}), cwd: typeof item.cwd === 'string' ? item.cwd : '', trigger: item.trigger.type === 'once' ? { type: 'once', at: Number(item.trigger.at) || Date.now() } : { type: 'interval', intervalMinutes: Math.max(1, Number(item.trigger.intervalMinutes) || 60) }, overlap: ['skip', 'queue', 'parallel'].includes(item.overlap) ? item.overlap : 'skip', enabled: item.enabled !== false, nextRunAt: Number(item.nextRunAt) || Date.now(), createdAt: Number(item.createdAt) || Date.now(), updatedAt: Number(item.updatedAt) || Date.now() })) : []
+    state.plans = Array.isArray(saved.plans) ? saved.plans.filter(item => item && typeof item.id === 'string' && typeof item.userId === 'string' && typeof item.deviceId === 'string' && typeof item.name === 'string' && typeof item.prompt === 'string' && item.trigger && (item.trigger.type === 'once' || item.trigger.type === 'interval') && state.users.some(user => user.id === item.userId) && state.devices.some(device => !device.revoked && device.id === item.deviceId && device.userId === item.userId)).map(item => ({ id: item.id, userId: item.userId, deviceId: item.deviceId, name: item.name, prompt: item.prompt, ...(typeof item.employeeId === 'string' ? { employeeId: item.employeeId } : {}), ...(typeof item.model === 'string' && item.model ? { model: item.model } : {}), ...(typeof item.effort === 'string' && item.effort ? { effort: item.effort } : {}), cwd: typeof item.cwd === 'string' ? item.cwd : '', trigger: item.trigger.type === 'once' ? { type: 'once', at: Number(item.trigger.at) || Date.now() } : { type: 'interval', intervalMinutes: Math.max(1, Number(item.trigger.intervalMinutes) || 60) }, overlap: ['skip', 'queue', 'parallel'].includes(item.overlap) ? item.overlap : 'skip', enabled: item.enabled !== false, nextRunAt: Number(item.nextRunAt) || Date.now(), createdAt: Number(item.createdAt) || Date.now(), updatedAt: Number(item.updatedAt) || Date.now() })) : []
     state.planRuns = Array.isArray(saved.planRuns) ? saved.planRuns.filter(item => item && typeof item.id === 'string' && typeof item.planId === 'string' && typeof item.userId === 'string' && typeof item.deviceId === 'string' && state.users.some(user => user.id === item.userId) && state.plans.some(plan => plan.id === item.planId)).map(item => ({ ...item, status: ['pending', 'running', 'completed', 'skipped', 'failed', 'cancelled'].includes(item.status) ? item.status : 'failed' })) : []
     state.employees = Array.isArray(saved.employees) ? saved.employees.filter(item => item && typeof item.id === 'string' && typeof item.userId === 'string' && typeof item.name === 'string' && typeof item.deviceId === 'string' && typeof item.projectPath === 'string' && state.users.some(user => user.id === item.userId)).map(item => ({
       id: item.id, userId: item.userId, name: item.name, role: typeof item.role === 'string' ? item.role : '', instructions: typeof item.instructions === 'string' ? item.instructions : '', ...(typeof item.legacyMemory === 'string' && item.legacyMemory.trim() ? { legacyMemory: item.legacyMemory } : typeof item.memory === 'string' && item.memory.trim() ? { legacyMemory: item.memory } : {}), deviceId: item.deviceId, projectPath: item.projectPath, ...(typeof item.threadId === 'string' ? { threadId: item.threadId } : {}), ...(Number.isInteger(item.assetContextVersion) && typeof item.initializedThreadId === 'string' ? { initializedThreadId: item.initializedThreadId, assetContextVersion: item.assetContextVersion } : {}), createdAt: Number(item.createdAt) || Date.now(), updatedAt: Number(item.updatedAt) || Date.now(), ...(item.archived ? { archived: true } : {}),
@@ -277,8 +277,9 @@ async function communicate(req: import('node:http').IncomingMessage, res: import
     const intervalMinutes = Math.max(1, Math.min(60 * 24 * 365, Number(data.intervalMinutes) || 60))
     if (!name || !prompt || !cwd) { json(res, 400, { error: '需要填写计划名称和任务内容' }); return }
     if (triggerType === 'once' && (!Number.isFinite(at) || at < Date.now() - 60_000)) { json(res, 400, { error: '一次性计划时间无效' }); return }
+    const model = await resolvePlanModel(sender.deviceId)
     const now = Date.now()
-    const plan: Plan = { id: randomToken(12), userId: sender.userId, deviceId: sender.deviceId, name, prompt, employeeId: sender.id, cwd, trigger: triggerType === 'once' ? { type: 'once', at } : { type: 'interval', intervalMinutes }, overlap: ['skip', 'queue', 'parallel'].includes(String(data.overlap)) ? data.overlap as Plan['overlap'] : 'skip', enabled: true, nextRunAt: triggerType === 'once' ? at : now + intervalMinutes * 60_000, createdAt: now, updatedAt: now }
+    const plan: Plan = { id: randomToken(12), userId: sender.userId, deviceId: sender.deviceId, name, prompt, employeeId: sender.id, ...model, cwd, trigger: triggerType === 'once' ? { type: 'once', at } : { type: 'interval', intervalMinutes }, overlap: ['skip', 'queue', 'parallel'].includes(String(data.overlap)) ? data.overlap as Plan['overlap'] : 'skip', enabled: true, nextRunAt: triggerType === 'once' ? at : now + intervalMinutes * 60_000, createdAt: now, updatedAt: now }
     state.plans.push(plan)
     await persist()
     json(res, 201, { plan: planView(plan), createdBy: sender.id }); return
@@ -341,6 +342,21 @@ function employeeContext(employee: Employee, assets: { assetPath: string; skillP
 function planView(plan: Plan) {
   const employee = plan.employeeId ? state.employees.find(item => item.id === plan.employeeId && !item.archived) : undefined
   return { ...plan, ...(employee ? { employee: { id: employee.id, name: employee.name, threadId: employee.threadId || null } } : {}) }
+}
+async function resolvePlanModel(deviceId: string, requestedModel?: unknown, requestedEffort?: unknown) {
+  const result = await rpc(deviceId, '/api/models', 'GET') as { data?: Array<{ id?: string; isDefault?: boolean; defaultReasoningEffort?: string; supportedReasoningEfforts?: Array<{ reasoningEffort?: string }> }> }
+  const models = Array.isArray(result.data) ? result.data.filter(item => item && typeof item.id === 'string') : []
+  if (!models.length) {
+    if (requestedModel || requestedEffort) throw new Error('当前设备没有可用模型')
+    return {}
+  }
+  const modelId = typeof requestedModel === 'string' && requestedModel.trim() ? requestedModel.trim() : (models.find(item => item.isDefault)?.id || models[0]!.id!)
+  const model = models.find(item => item.id === modelId)
+  if (!model) throw new Error('所选模型不在当前设备的模型列表中')
+  const efforts = Array.isArray(model.supportedReasoningEfforts) ? model.supportedReasoningEfforts.map(item => item.reasoningEffort).filter((item): item is string => typeof item === 'string') : []
+  const effort = typeof requestedEffort === 'string' && requestedEffort ? requestedEffort : model.defaultReasoningEffort
+  if (effort && efforts.length && !efforts.includes(effort)) throw new Error('所选推理强度不受当前模型支持')
+  return { model: modelId, ...(effort ? { effort } : {}) }
 }
 function planRunView(run: PlanRun) {
   const plan = state.plans.find(item => item.id === run.planId)
@@ -407,7 +423,8 @@ async function startPlanRun(run: PlanRun) {
     const assets = employee ? await employeeAssets(employee) : undefined
     const envelope = `<rmdex_plan_execution>\n${JSON.stringify({ planId: plan.id, planRunId: run.id, planName: plan.name, employeeId: employee?.id || null })}\n</rmdex_plan_execution>`
     const text = employee && assets && needsEmployeeContext(employee) ? `${employeeContext(employee, assets)}\n${envelope}\n${plan.prompt}\n</rmdex_user_request>` : `${envelope}\n${plan.prompt}`
-    const queued = await rpc(run.deviceId, `/api/threads/${threadId}/queue`, 'POST', { text, clientUserMessageId: run.id }) as { turn?: { id?: string }; activeTurnId?: string | null }
+    const model = await resolvePlanModel(run.deviceId, plan.model, plan.effort)
+    const queued = await rpc(run.deviceId, `/api/threads/${threadId}/queue`, 'POST', { text, clientUserMessageId: run.id, ...model }) as { turn?: { id?: string }; activeTurnId?: string | null }
     run.turnId = queued.turn?.id && queued.turn.id !== previousLastTurnId ? queued.turn.id : (queued.activeTurnId && queued.activeTurnId !== previousLastTurnId ? queued.activeTurnId : run.turnId)
     if (employee) { employee.initializedThreadId = threadId; employee.assetContextVersion = ASSET_CONTEXT_VERSION }
     await persist()
@@ -853,8 +870,9 @@ const server = createServer(async (req, res) => {
         const employee = employeeId ? employeeFor(employeeId, userId) : undefined
         if (!name || !prompt || !cwd || (employeeId && (!employee || employee.deviceId !== device.id))) { json(res, 400, { error: '计划名称、任务内容、工作目录或员工绑定无效' }); return }
         if (triggerType === 'once' && (!Number.isFinite(at) || at < Date.now() - 60_000)) { json(res, 400, { error: '一次性计划时间无效' }); return }
+        const model = await resolvePlanModel(device.id, data.model, data.effort)
         const now = Date.now()
-        const created: Plan = { id: randomToken(12), userId, deviceId: device.id, name, prompt, ...(employeeId ? { employeeId } : {}), cwd, trigger: triggerType === 'once' ? { type: 'once', at } : { type: 'interval', intervalMinutes }, overlap: ['skip', 'queue', 'parallel'].includes(String(data.overlap)) ? data.overlap as Plan['overlap'] : 'skip', enabled: true, nextRunAt: triggerType === 'once' ? at : now + intervalMinutes * 60_000, createdAt: now, updatedAt: now }
+        const created: Plan = { id: randomToken(12), userId, deviceId: device.id, name, prompt, ...(employeeId ? { employeeId } : {}), ...model, cwd, trigger: triggerType === 'once' ? { type: 'once', at } : { type: 'interval', intervalMinutes }, overlap: ['skip', 'queue', 'parallel'].includes(String(data.overlap)) ? data.overlap as Plan['overlap'] : 'skip', enabled: true, nextRunAt: triggerType === 'once' ? at : now + intervalMinutes * 60_000, createdAt: now, updatedAt: now }
         state.plans.push(created); await persist(); json(res, 201, { plan: planView(created) }); return
       }
       if (!plan) { json(res, 404, { error: '计划不存在' }); return }

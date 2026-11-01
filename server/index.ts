@@ -678,14 +678,15 @@ const server = createServer(async (req, res) => {
         if (sharedMode && !newThreads.has(threadId)) await subscribeToThread(threadId)
         const input = [{ type: 'text', text: data.text, text_elements: [] }]
         if (queueMatch[2] === 'queue') {
-          const queued = await rpc('thread/queue/add', { threadId, input, clientUserMessageId: typeof data.clientUserMessageId === 'string' ? data.clientUserMessageId : randomUUID() })
+          const queueOptions = data.model !== undefined || data.effort !== undefined ? await turnOptions(data) : {}
+          const queued = await rpc('thread/queue/add', { threadId, input, ...queueOptions, clientUserMessageId: typeof data.clientUserMessageId === 'string' ? data.clientUserMessageId : randomUUID() })
           // add alone persists an idle submission but does not start it. Read
           // native state as shared Desktop turns may predate our subscription.
           const metadata = await rpc('thread/read', { threadId, includeTurns: false }) as { thread?: { status?: { type?: string } } }
           const running = metadata.thread?.status?.type === 'active' || activeTurns.has(threadId)
           let started: unknown
           if (!running) {
-            try { started = await rpc('thread/queue/start', { threadId }) }
+            try { started = await rpc('thread/queue/start', { threadId, ...queueOptions }) }
             catch (error) {
               // The app-server may consume queue/add between our status read
               // and queue/start. Do not turn an accepted submission into a
