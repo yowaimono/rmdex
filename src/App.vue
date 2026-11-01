@@ -126,6 +126,7 @@ const archivedThreads = ref<Thread[]>([])
 const pinnedThreads = ref<string[]>([])
 const showArchivedThreads = ref(false)
 const swipeOpenId = ref<string | null>(null)
+const employeeSwipeOpenId = ref<string | null>(null)
 let touchStartX = 0
 let touchCurrentX = 0
 let touchThreadId = ''
@@ -1134,9 +1135,30 @@ function handleThreadTouchEnd(thread: Thread) {
   }
   touchThreadId = ''
 }
+function handleEmployeeTouchStart(employee: Employee, event: TouchEvent) {
+  touchThreadId = `employee:${employee.id}`
+  touchStartX = event.touches[0]?.clientX || 0
+  touchCurrentX = touchStartX
+  touchMoved = false
+  clearThreadLongPress()
+}
+function handleEmployeeTouchMove(employee: Employee, event: TouchEvent) {
+  if (touchThreadId !== `employee:${employee.id}`) return
+  touchCurrentX = event.touches[0]?.clientX || touchCurrentX
+  if (Math.abs(touchCurrentX - touchStartX) > 8) touchMoved = true
+  if (touchStartX - touchCurrentX > 8) employeeSwipeOpenId.value = employee.id
+  else if (touchCurrentX - touchStartX > 8 && employeeSwipeOpenId.value === employee.id) employeeSwipeOpenId.value = null
+}
+function handleEmployeeTouchEnd(employee: Employee) {
+  if (touchThreadId === `employee:${employee.id}` && touchMoved && Math.abs(touchCurrentX - touchStartX) > 8) {
+    employeeSwipeOpenId.value = touchStartX - touchCurrentX > 45 ? employee.id : null
+  }
+  touchThreadId = ''
+}
 function closeThreadMenus() {
   threadMenuId.value = null
   swipeOpenId.value = null
+  employeeSwipeOpenId.value = null
 }
 function selectThread(thread: Thread) {
   if (touchMoved) { touchMoved = false; return }
@@ -2289,9 +2311,11 @@ onUnmounted(() => { themeMediaQuery?.removeEventListener('change', handleSystemT
       <label class="search"><Search :size="16" /><input v-model="query" placeholder="搜索会话" aria-label="搜索会话" /></label>
         <div v-if="remoteMode" class="employee-section">
           <div class="section-label"><span>AI 员工 <span class="count">{{ employees.length }}</span></span><button class="icon-button" type="button" title="新建 AI 员工" aria-label="新建 AI 员工" @click="openEmployeeEditor()"><Plus :size="15" /></button></div>
-          <div v-for="employee in employees" :key="employee.id" class="employee-row" :class="{ selected: activeEmployeeId === employee.id }">
-            <button class="employee-select" type="button" @click="openEmployee(employee)"><span class="employee-icon"><Bot :size="15" /></span><span class="employee-copy"><strong>{{ employee.name }}</strong><small>{{ employee.role || employee.projectPath }}</small></span></button>
-            <button class="employee-action" type="button" title="编辑员工" aria-label="编辑员工" @click.stop="openEmployeeEditor(employee)"><Pencil :size="14" /></button><button class="employee-action" type="button" title="换绑 Thread" aria-label="换绑 Thread" :disabled="employeeResetting === employee.id" @click.stop="requestEmployeeThreadReset(employee)"><RotateCcw :size="14" :class="{ spin: employeeResetting === employee.id }" /></button>
+          <div v-for="employee in employees" :key="employee.id" class="employee-row" :class="{ selected: activeEmployeeId === employee.id, 'is-swipe-open': employeeSwipeOpenId === employee.id }" @touchstart.passive="handleEmployeeTouchStart(employee, $event)" @touchmove.passive="handleEmployeeTouchMove(employee, $event)" @touchend="handleEmployeeTouchEnd(employee)">
+            <div class="employee-row-content" :style="{ transform: employeeSwipeOpenId === employee.id ? 'translateX(-102px)' : 'translateX(0)' }">
+              <button class="employee-select" type="button" @click="openEmployee(employee)"><span class="employee-icon"><Bot :size="15" /></span><span class="employee-copy"><strong>{{ employee.name }}</strong><small>{{ employee.role || employee.projectPath }}</small></span></button>
+            </div>
+            <div class="employee-swipe-actions" aria-label="AI 员工快捷操作"><button type="button" title="编辑员工" aria-label="编辑员工" @click.stop="openEmployeeEditor(employee)"><Pencil :size="15" /></button><button type="button" title="换绑 Thread" aria-label="换绑 Thread" :disabled="employeeResetting === employee.id" @click.stop="requestEmployeeThreadReset(employee)"><RotateCcw :size="15" :class="{ spin: employeeResetting === employee.id }" /></button></div>
           </div>
           <p v-if="!employees.length" class="employee-empty">创建一个有固定身份和长期记忆的 Codex 员工。</p>
         </div>

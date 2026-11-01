@@ -104,17 +104,19 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .section-label { display: flex; align-items: center; justify-content: space-between; margin: 21px 17px 5px 20px; color: #778594; font-size: 12px; font-weight: 600; }
 .employee-section { margin-top: 2px; padding-bottom: 5px; border-bottom: 1px solid #e8edf2; }
 .employee-section .section-label { margin-top: 8px; }
-.employee-row { display: flex; align-items: center; gap: 3px; min-height: 43px; margin: 0 10px; border-radius: 6px; color: #445465; }
+.employee-row { position: relative; display: flex; align-items: stretch; min-height: 43px; margin: 0 10px; overflow: hidden; border-radius: 6px; color: #445465; }
 .employee-row:hover, .employee-row.selected { background: #eef5fd; }
+.employee-row-content { position: relative; z-index: 1; min-width: 100%; display: flex; align-items: stretch; background: #fff; transition: transform .18s ease; }
 .employee-select { min-width: 0; flex: 1; display: flex; align-items: center; gap: 9px; padding: 7px; border: 0; border-radius: 5px; color: inherit; background: transparent; text-align: left; }
 .employee-icon { width: 27px; height: 27px; flex: none; display: grid; place-items: center; border-radius: 6px; color: #0879f9; background: #e5f0ff; }
 .employee-copy { min-width: 0; display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
 .employee-copy strong, .employee-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .employee-copy strong { color: #344252; font-size: 12px; font-weight: 600; }
 .employee-copy small { color: #93a0ad; font-size: 10px; }
-.employee-action { width: 29px; height: 29px; flex: none; display: grid; place-items: center; border: 0; border-radius: 5px; color: #8b99a7; background: transparent; }
-.employee-action:hover { color: #0879f9; background: #e1edf9; }
-.employee-action:disabled { opacity: .55; }
+.employee-swipe-actions { position: absolute; z-index: 0; inset: 0 0 0 auto; width: 102px; display: flex; align-items: stretch; background: #eef3f8; }
+.employee-swipe-actions button { width: 51px; display: grid; place-items: center; border: 0; color: #657789; background: transparent; }
+.employee-swipe-actions button:hover { color: #0879f9; background: #e0ecfa; }
+.employee-swipe-actions button:disabled { opacity: .55; cursor: wait; }
 .employee-empty { margin: 0 16px 7px; color: #9aa6b2; font-size: 11px; line-height: 1.45; }
 .section-actions { display: flex; align-items: center; gap: 2px; }
 .archive-toggle { display: inline-flex; align-items: center; gap: 4px; height: 28px; padding: 0 6px; border: 0; border-radius: 5px; color: #8b99a7; background: transparent; font-size: 11px; }
@@ -717,6 +719,10 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 :root[data-theme='dark'] .icon-button { color: #91a3b5; }
 :root[data-theme='dark'] .icon-button:hover { color: #72b2ff; background: #21354b; }
 :root[data-theme='dark'] .device, :root[data-theme='dark'] .search, :root[data-theme='dark'] .composer, :root[data-theme='dark'] .queued-followups { border-color: #2c3d4f; background: #192432; }
+:root[data-theme='dark'] .employee-row-content, :root[data-theme='dark'] .thread-row-content { background: #17222e; }
+:root[data-theme='dark'] .employee-swipe-actions, :root[data-theme='dark'] .thread-swipe-actions { background: #223243; }
+:root[data-theme='dark'] .employee-swipe-actions button, :root[data-theme='dark'] .thread-swipe-actions button { color: #9aafc2; }
+:root[data-theme='dark'] .employee-swipe-actions button:hover, :root[data-theme='dark'] .thread-swipe-actions button:hover { color: #72b2ff; background: #29445f; }
 :root[data-theme='dark'] .device-icon, :root[data-theme='dark'] .welcome-icon, :root[data-theme='dark'] .employee-icon { color: #72b2ff; background: #1d3855; }
 :root[data-theme='dark'] .device-copy strong, :root[data-theme='dark'] .employee-copy strong, :root[data-theme='dark'] .project-tree-name span, :root[data-theme='dark'] .thread-title { color: #d5e0eb; }
 :root[data-theme='dark'] .device-copy small, :root[data-theme='dark'] .employee-copy small, :root[data-theme='dark'] .project-tree-name small, :root[data-theme='dark'] .pair-entry-hint, :root[data-theme='dark'] .thread-meta { color: #8193a6; }
