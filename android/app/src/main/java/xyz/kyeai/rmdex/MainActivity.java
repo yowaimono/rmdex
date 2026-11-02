@@ -10,6 +10,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(RmdexBackgroundServicePlugin.class);
         registerPlugin(RmdexDeviceInfoPlugin.class);
         registerPlugin(RmdexBrowserPlugin.class);
+        registerPlugin(RmdexFileDownloadPlugin.class);
         super.onCreate(savedInstanceState);
     }
 }

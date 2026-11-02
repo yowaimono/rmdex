@@ -35,6 +35,7 @@ const apiBase = Capacitor.isNativePlatform() ? 'https://code.kyeai.xyz' : ''
 const apiUrl = (path: string) => path.startsWith('http://') || path.startsWith('https://') ? path : `${apiBase}${path}`
 const RmdexBackgroundService = registerPlugin<{ start(options: { relayUrl: string; pushToken: string; cursor?: number }): Promise<void>; stop(): Promise<void> }>('RmdexBackgroundService')
 const RmdexDeviceInfo = registerPlugin<{ getInfo(): Promise<{ platform?: string; manufacturer?: string; model?: string }> }>('RmdexDeviceInfo')
+const RmdexFileDownload = registerPlugin<{ enqueue(options: { url: string; fileName: string; mimeType: string; authorization?: string }): Promise<{ id: number }>; status(options: { id: number }): Promise<{ status: string; loaded: number; total: number }>; openDownloads(): Promise<void> }>('RmdexFileDownload')
 let appUrlListener: { remove: () => Promise<void> } | undefined
 const threads = ref<Thread[]>([])
 const employees = ref<Employee[]>([])
@@ -273,6 +274,11 @@ type ThreadStatus = {
   live?: { turnId: string; status: string; error?: { message?: string }; sentText?: string; items: Turn['items'] } | null
 }
 const artifactLoading = ref<string | null>(null)
+const artifactDownloadState = ref<{ artifactId: string; loaded: number; total: number; phase: 'downloading' | 'saving' } | null>(null)
+const downloadedArtifacts = ref<Record<string, boolean>>({})
+const savedArtifactIds = new Map<string, number | string>()
+const pcArtifactApp = computed(() => !!props.pcLogin)
+const artifactDownloadConfirm = ref<Artifact | null>(null)
 const artifactPreview = ref<Artifact | null>(null)
 const artifactPreviewUrl = ref('')
 const artifactImageUrls = ref<Record<string, string>>({})
@@ -678,15 +684,66 @@ function formatArtifactSize(value: number) {
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
   return `${(value / 1024 / 1024).toFixed(1)} MB`
 }
+async function readArtifactResponse(response: Response, artifact: Artifact) {
+  const total = Number(response.headers.get('content-length')) || artifact.size || 0
+  if (!response.body) {
+    const blob = await response.blob()
+    artifactDownloadState.value = { artifactId: artifact.id, loaded: blob.size, total: total || blob.size, phase: 'downloading' }
+    return blob
+  }
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let loaded = 0
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (!value) continue
+    chunks.push(value)
+    loaded += value.byteLength
+    artifactDownloadState.value = { artifactId: artifact.id, loaded, total: total || loaded, phase: 'downloading' }
+  }
+  const data = new Uint8Array(loaded)
+  let offset = 0
+  for (const chunk of chunks) { data.set(chunk, offset); offset += chunk.byteLength }
+  return new Blob([data.buffer], { type: response.headers.get('content-type') || artifact.mimeType })
+}
 async function downloadArtifact(artifact: Artifact) {
   artifactLoading.value = artifact.id
+  artifactDownloadState.value = { artifactId: artifact.id, loaded: 0, total: artifact.size || 0, phase: 'downloading' }
   try {
+    if (Capacitor.isNativePlatform()) {
+      const result = await RmdexFileDownload.enqueue({ url: apiUrl(artifactUrl(artifact, 'content')), fileName: artifact.name, mimeType: artifact.mimeType, ...(clientToken.value ? { authorization: `Bearer ${clientToken.value}` } : {}) })
+      savedArtifactIds.set(artifact.id, result.id)
+      let finished = false
+      while (!finished) {
+        const status = await RmdexFileDownload.status({ id: result.id })
+        const total = status.total || artifact.size || 0
+        artifactDownloadState.value = { artifactId: artifact.id, loaded: status.loaded || 0, total, phase: 'downloading' }
+        finished = status.status === 'completed' || status.status === 'failed' || status.status === 'cancelled'
+        if (!finished) await new Promise(resolve => setTimeout(resolve, 350))
+        if (status.status === 'failed' || status.status === 'cancelled') throw new Error('系统下载失败')
+      }
+      downloadedArtifacts.value = { ...downloadedArtifacts.value, [artifact.id]: true }
+      artifactDownloadState.value = null
+      return
+    }
     const response = await authenticatedFetch(artifactUrl(artifact, 'content'), {}, 'client')
     if (!response.ok) {
       const result = await readJsonResponse(response, '下载文件失败')
       throw new Error(result?.error || '下载文件失败')
     }
-    const url = URL.createObjectURL(await response.blob())
+    const blob = await readArtifactResponse(response, artifact)
+    if (pcArtifactApp.value) {
+      artifactDownloadState.value = { artifactId: artifact.id, loaded: blob.size, total: blob.size, phase: 'saving' }
+      const saved = await fetch('/pc-api/files', { method: 'POST', headers: { 'Content-Type': artifact.mimeType, 'X-Rmdex-File-Name': encodeURIComponent(artifact.name), 'X-Rmdex-Mime-Type': artifact.mimeType }, body: blob })
+      const savedResult = await readJsonResponse(saved, '保存文件失败')
+      if (!saved.ok || !savedResult.fileId) throw new Error(savedResult?.error || '保存文件失败')
+      savedArtifactIds.set(artifact.id, savedResult.fileId)
+      downloadedArtifacts.value = { ...downloadedArtifacts.value, [artifact.id]: true }
+      artifactDownloadState.value = null
+      return
+    }
+    const url = URL.createObjectURL(blob)
     const anchor = document.createElement('a')
     anchor.href = url
     anchor.download = artifact.name
@@ -694,9 +751,41 @@ async function downloadArtifact(artifact: Artifact) {
     anchor.click()
     anchor.remove()
     setTimeout(() => URL.revokeObjectURL(url), 60_000)
+    downloadedArtifacts.value = { ...downloadedArtifacts.value, [artifact.id]: true }
+    artifactDownloadState.value = null
   } catch (cause) {
     error.value = `下载 ${artifact.name} 失败：${cause instanceof Error ? cause.message : String(cause)}`
+    artifactDownloadState.value = null
   } finally { if (artifactLoading.value === artifact.id) artifactLoading.value = null }
+}
+function requestArtifactDownload(artifact: Artifact) {
+  if (artifactLoading.value) return
+  artifactDownloadConfirm.value = artifact
+}
+function cancelArtifactDownload() {
+  if (!artifactLoading.value) artifactDownloadConfirm.value = null
+}
+async function confirmArtifactDownload() {
+  const artifact = artifactDownloadConfirm.value
+  if (!artifact || artifactLoading.value) return
+  artifactDownloadConfirm.value = null
+  await downloadArtifact(artifact)
+}
+async function openArtifactLocation(artifact: Artifact) {
+  if (!downloadedArtifacts.value[artifact.id]) return
+  try {
+    if (Capacitor.isNativePlatform()) {
+      await RmdexFileDownload.openDownloads()
+      return
+    }
+    if (pcArtifactApp.value) {
+      const fileId = savedArtifactIds.get(artifact.id)
+      if (typeof fileId !== 'string') throw new Error('下载文件记录不存在，请重新下载')
+      const response = await fetch('/pc-api/files/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ fileId }) })
+      const result = await readJsonResponse(response, '打开文件位置失败')
+      if (!response.ok) throw new Error(result?.error || '打开文件位置失败')
+    }
+  } catch (cause) { error.value = `打开 ${artifact.name} 位置失败：${cause instanceof Error ? cause.message : String(cause)}` }
 }
 async function previewArtifact(artifact: Artifact) {
   clearArtifactPreview()
@@ -2569,7 +2658,7 @@ onUnmounted(() => { themeMediaQuery?.removeEventListener('change', handleSystemT
               <div v-if="message.images.length" class="attachments"><template v-for="(image, index) in message.images" :key="index"><button v-if="imageSource(image)" type="button" class="attachment" title="放大预览图片" aria-label="放大预览图片" @click="showImagePreview(imageSource(image) || '')"><img :src="imageSource(image)" alt="图片附件" loading="lazy" /></button><span v-else class="attachment-unavailable">图片附件不可用</span></template></div>
               <div v-if="message.text" class="message-text markdown" v-html="markdown.render(message.text)"></div>
             </MessageBubble>
-            <ArtifactStrip v-if="message.role === 'agent' && message.forkable && message.artifacts?.length" :artifacts="message.artifacts" :loading="artifactLoading" :image-urls="artifactImageUrls" @download="downloadArtifact" @preview="previewArtifact" @load-thumbnail="loadArtifactThumbnail" />
+            <ArtifactStrip v-if="message.role === 'agent' && message.forkable && message.artifacts?.length" :artifacts="message.artifacts" :loading="artifactLoading" :download-state="artifactDownloadState" :downloaded="downloadedArtifacts" :can-open-location="Capacitor.isNativePlatform() || pcArtifactApp" :open-location-label="Capacitor.isNativePlatform() ? '打开下载目录' : '在资源管理器中打开'" :image-urls="artifactImageUrls" @download="requestArtifactDownload" @preview="previewArtifact" @load-thumbnail="loadArtifactThumbnail" @open-location="openArtifactLocation" />
           </template>
         </template>
         <MessageBubble v-for="failed in (failedMessages[selected.id] || [])" :key="failed.id" role="user" :copy-text="userText(failed.text)" :retryable="capabilities.send" :retry-disabled="working || retrying" failed @copy="copyValue($event, '已复制消息')" @retry="retryMessage(failed)">
@@ -2624,7 +2713,8 @@ onUnmounted(() => { themeMediaQuery?.removeEventListener('change', handleSystemT
     <div v-if="employeeResetTarget" class="modal-backdrop" @click.self="closeEmployeeThreadResetConfirm"><section class="create-dialog delete-dialog employee-reset-dialog" role="dialog" aria-modal="true" aria-labelledby="employee-reset-title" @keydown.esc="closeEmployeeThreadResetConfirm"><header><div><h2 id="employee-reset-title">换绑员工 Thread</h2><p>为“{{ employeeResetTarget.name }}”创建新的执行会话。</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" :disabled="!!employeeResetting" @click="closeEmployeeThreadResetConfirm"><X :size="18" /></button></header><p class="delete-copy">当前 Thread 将被归档并创建新的 Thread。员工的长期记忆、SOP 和本地资产会保留，正在执行或排队的任务需要先结束。</p><p v-if="employeeResetError" class="create-error" role="alert">{{ employeeResetError }}</p><div class="dialog-actions"><button type="button" class="cancel-button" :disabled="!!employeeResetting" @click="closeEmployeeThreadResetConfirm">取消</button><button type="button" class="danger-confirm-button" :disabled="!!employeeResetting" @click="confirmEmployeeThreadReset">{{ employeeResetting ? '换绑中…' : '确认换绑' }}</button></div></section></div>
     <div v-if="copyFeedback" class="copy-toast" role="status" aria-live="polite">{{ copyFeedback }}</div>
     <div v-if="previewImageUrl" class="image-preview-backdrop" @click.self="closeImagePreview"><section class="image-preview-dialog" role="dialog" aria-modal="true" aria-label="图片预览"><button class="icon-button image-preview-close" type="button" title="关闭图片预览" aria-label="关闭图片预览" @click="closeImagePreview"><X :size="18" /></button><img :src="previewImageUrl" alt="图片大图预览" /></section></div>
-    <div v-if="artifactPreview" class="artifact-preview-backdrop" @click.self="clearArtifactPreview"><section class="artifact-preview-dialog" role="dialog" aria-modal="true" :aria-label="`预览 ${artifactPreview.name}`"><header><div><strong>{{ artifactPreview.name }}</strong><small>{{ artifactPreview.name.split('.').pop()?.toUpperCase() || 'FILE' }} · {{ formatArtifactSize(artifactPreview.size) }}</small></div><button type="button" class="icon-button" title="关闭预览" aria-label="关闭预览" @click="clearArtifactPreview"><X :size="18" /></button></header><img v-if="artifactPreview.mimeType.startsWith('image/') && artifactPreviewUrl" :src="artifactPreviewUrl" :alt="artifactPreview.name" /><iframe v-else-if="artifactPreview.mimeType === 'application/pdf' && artifactPreviewUrl" :src="artifactPreviewUrl" title="PDF 预览"></iframe><pre v-else-if="artifactPreviewText">{{ artifactPreviewText }}</pre><div v-else-if="artifactPreviewError" class="artifact-preview-error">预览失败：{{ artifactPreviewError }}<button type="button" @click="downloadArtifact(artifactPreview!)">下载文件</button></div><div v-else class="artifact-preview-loading">{{ artifactLoading === artifactPreview.id ? '正在准备预览…' : '暂无可用预览' }}</div></section></div>
+    <div v-if="artifactPreview" class="artifact-preview-backdrop" @click.self="clearArtifactPreview"><section class="artifact-preview-dialog" role="dialog" aria-modal="true" :aria-label="`预览 ${artifactPreview.name}`"><header><div><strong>{{ artifactPreview.name }}</strong><small>{{ artifactPreview.name.split('.').pop()?.toUpperCase() || 'FILE' }} · {{ formatArtifactSize(artifactPreview.size) }}</small></div><button type="button" class="icon-button" title="关闭预览" aria-label="关闭预览" @click="clearArtifactPreview"><X :size="18" /></button></header><img v-if="artifactPreview.mimeType.startsWith('image/') && artifactPreviewUrl" :src="artifactPreviewUrl" :alt="artifactPreview.name" /><iframe v-else-if="artifactPreview.mimeType === 'application/pdf' && artifactPreviewUrl" :src="artifactPreviewUrl" title="PDF 预览"></iframe><pre v-else-if="artifactPreviewText">{{ artifactPreviewText }}</pre><div v-else-if="artifactPreviewError" class="artifact-preview-error">预览失败：{{ artifactPreviewError }}<button type="button" @click="requestArtifactDownload(artifactPreview!)">下载文件</button></div><div v-else class="artifact-preview-loading">{{ artifactLoading === artifactPreview.id ? '正在准备预览…' : '暂无可用预览' }}</div></section></div>
+    <div v-if="artifactDownloadConfirm" class="modal-backdrop" @click.self="cancelArtifactDownload"><section class="create-dialog artifact-download-confirm" role="dialog" aria-modal="true" aria-labelledby="artifact-download-title" @keydown.esc="cancelArtifactDownload"><header><div><h2 id="artifact-download-title">确认下载</h2><p>文件将从当前绑定设备读取。</p></div><button class="icon-button" type="button" title="取消下载" aria-label="取消下载" @click="cancelArtifactDownload"><X :size="18" /></button></header><div class="artifact-download-summary"><strong>{{ artifactDownloadConfirm.name }}</strong><small>{{ artifactDownloadConfirm.name.split('.').pop()?.toUpperCase() || 'FILE' }} · {{ formatArtifactSize(artifactDownloadConfirm.size) }}</small></div><p class="delete-copy">确定下载这个文件吗？</p><div class="dialog-actions"><button type="button" class="cancel-button" @click="cancelArtifactDownload">取消</button><button type="button" class="create-button" @click="confirmArtifactDownload">确认下载</button></div></section></div>
     <div v-if="showFullAccessConfirm" class="modal-backdrop" @click.self="showFullAccessConfirm = false"><section class="create-dialog risk-dialog" role="dialog" aria-modal="true" aria-labelledby="full-access-title" @keydown.esc="showFullAccessConfirm = false"><header><div class="risk-heading"><span class="risk-icon"><ShieldAlert :size="19" /></span><div><h2 id="full-access-title">确认使用完全访问</h2><p>这次消息将跳过 Codex 审批。</p></div></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" @click="showFullAccessConfirm = false"><X :size="18" /></button></header><div class="risk-copy"><p>完全访问模式允许 Codex 直接执行命令、修改工作目录中的文件，并访问电脑上的网络资源。</p><p>只在你明确知道这条消息会做什么时继续。你也可以取消后切换为“请求审批”。</p></div><label class="risk-checkbox"><input v-model="skipFullAccessConfirm" type="checkbox" /> <span>不再提醒</span></label><div class="dialog-actions"><button type="button" class="cancel-button" @click="showFullAccessConfirm = false">取消</button><button type="button" class="danger-confirm-button" @click="confirmFullAccess">继续发送</button></div></section></div>
      <div v-if="showCreate" class="modal-backdrop" @click.self="!creating && (showCreate = false)"><section class="create-dialog" role="dialog" aria-modal="true" aria-labelledby="create-title" @keydown.esc="!creating && (showCreate = false)"><header><h2 id="create-title">新建对话</h2><button class="icon-button" type="button" title="关闭" aria-label="关闭" :disabled="creating" @click="showCreate = false"><X :size="18" /></button></header><form @submit.prevent="createThread"><label for="new-thread-project">Project</label><ProjectMenu v-model="createProject" :projects="projects" :desktop-mode="desktopMode" :disabled="creating" @update:model-value="syncCreateProjectPath" /><template v-if="!desktopMode && !createProject"><label for="working-directory">工作目录</label><input id="working-directory" v-model="createPath" required autocomplete="off" placeholder="例如 D:\WorkSpace\rmdex" /></template><p v-else-if="createProject" class="project-path-hint">{{ projects.find(project => project.id === createProject)?.path }}</p><p v-if="createError" class="create-error" role="alert">{{ createError }}</p><div class="dialog-actions"><button type="button" class="cancel-button" :disabled="creating" @click="showCreate = false">取消</button><button type="submit" class="create-button" :disabled="creating || (!desktopMode && !createProject && !createPath.trim())">{{ creating ? '创建中…' : '创建对话' }}</button></div></form></section></div>
      <div v-if="employeeEditor" class="modal-backdrop" @click.self="!employeeSaving && (employeeEditor = false)"><section class="create-dialog employee-dialog" role="dialog" aria-modal="true" aria-labelledby="employee-title" @keydown.esc="!employeeSaving && (employeeEditor = false)"><header><div><h2 id="employee-title">{{ editingEmployeeId ? '编辑 AI 员工' : '新建 AI 员工' }}</h2><p>员工会使用绑定电脑上的 Codex Thread 工作。</p></div><button class="icon-button" type="button" title="关闭" aria-label="关闭" :disabled="employeeSaving" @click="employeeEditor = false"><X :size="18" /></button></header><form @submit.prevent="saveEmployee"><label for="employee-name">名称</label><input id="employee-name" v-model="employeeName" maxlength="80" required placeholder="例如：回归测试员" /><label for="employee-role">职位</label><input id="employee-role" v-model="employeeRole" maxlength="120" placeholder="例如：负责运行测试并分析失败" /><label for="employee-project-path">Project 路径</label><input id="employee-project-path" v-model="employeeProjectPath" maxlength="1000" required placeholder="例如：D:\WorkSpace\rmdex" /><label for="employee-instructions">员工职责与沟通方式</label><textarea id="employee-instructions" v-model="employeeInstructions" rows="5" maxlength="12000" placeholder="描述它应该如何工作、如何汇报结果。"></textarea><p v-if="employeeError" class="create-error" role="alert">{{ employeeError }}</p><div class="dialog-actions"><button type="button" class="cancel-button" :disabled="employeeSaving" @click="employeeEditor = false">取消</button><button type="submit" class="create-button" :disabled="employeeSaving || !employeeName.trim() || !employeeProjectPath.trim()">{{ employeeSaving ? '保存中…' : '保存员工' }}</button></div></form></section></div>

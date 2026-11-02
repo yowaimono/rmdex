@@ -1,6 +1,11 @@
-import { readFile } from 'node:fs/promises'
+import { createWriteStream } from 'node:fs'
+import { mkdir, unlink } from 'node:fs/promises'
 import { createServer } from 'node:http'
-import { extname, join, normalize } from 'node:path'
+import { basename, dirname, extname, join, normalize } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { spawn } from 'node:child_process'
+import { readFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { PcManager, type PermissionMode } from './manager.ts'
 import { proxyAgentRequest } from './api-proxy.ts'
@@ -10,9 +15,11 @@ const root = join(fileURLToPath(new URL('.', import.meta.url)), '..')
 const port = Number(process.env.RMDEX_PC_PORT || 18788)
 const agentPort = Number(process.env.RMDEX_AGENT_PORT || 18787)
 const dist = join(root, 'dist-pc')
+const downloadsRoot = join(process.env.USERPROFILE || homedir(), 'Downloads', 'rmdex')
 const manager = new PcManager(root)
 await manager.init()
 const relayOrigin = relayHttpOrigin(process.env.RMDEX_RELAY_URL || 'wss://code.kyeai.xyz/agent')
+const downloadedFiles = new Map<string, string>()
 
 function json(res: import('node:http').ServerResponse, status: number, value: unknown) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' })
@@ -26,6 +33,36 @@ async function body(req: import('node:http').IncomingMessage) {
     if (raw.length > 16_384) throw new Error('请求过大')
   }
   return raw ? JSON.parse(raw) as Record<string, unknown> : {}
+}
+
+function safeDownloadName(value: string) {
+  const name = basename(value || 'download').replace(/[\\/:*?"<>|\r\n]/g, '_').trim() || 'download'
+  return name.length > 180 ? name.slice(0, 180) : name
+}
+
+async function saveDownload(req: import('node:http').IncomingMessage, path: string) {
+  await mkdir(dirname(path), { recursive: true })
+  const output = createWriteStream(path, { flags: 'wx' })
+  let size = 0
+  try {
+    await new Promise<void>((resolve, reject) => {
+      req.on('data', chunk => { size += Buffer.byteLength(chunk); output.write(chunk) })
+      req.on('end', () => { output.end(resolve) })
+      req.on('error', reject)
+      output.on('error', reject)
+    })
+    return size
+  } catch (error) {
+    output.destroy()
+    await unlink(path).catch(() => {})
+    throw error
+  }
+}
+
+function openDownloadedFile(path: string) {
+  if (process.platform === 'win32') spawn('explorer.exe', [`/select,${path}`], { detached: true, stdio: 'ignore' }).unref()
+  else if (process.platform === 'darwin') spawn('open', ['-R', path], { detached: true, stdio: 'ignore' }).unref()
+  else spawn('xdg-open', [dirname(path)], { detached: true, stdio: 'ignore' }).unref()
 }
 
 async function staticFile(pathname: string) {
@@ -42,8 +79,9 @@ const server = createServer(async (req, res) => {
     const host = req.headers.host || ''
     const origin = req.headers.origin
     if (![ `localhost:${port}`, `127.0.0.1:${port}` ].includes(host) || (origin && ![ `http://localhost:${port}`, `http://127.0.0.1:${port}` ].includes(origin))) { json(res, 403, { error: 'Forbidden' }); return }
-    if (req.method === 'POST' && (!origin || !/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] || ''))) { json(res, 403, { error: 'Forbidden' }); return }
     const url = new URL(req.url || '/', `http://127.0.0.1:${port}`)
+    const isFileUpload = req.method === 'POST' && url.pathname === '/pc-api/files'
+    if (req.method === 'POST' && (!origin || (!isFileUpload && !/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] || '')))) { json(res, 403, { error: 'Forbidden' }); return }
     if (url.pathname.startsWith('/pc-api/')) {
       if (!['GET', 'POST'].includes(req.method || '')) { json(res, 405, { error: 'Method not allowed' }); return }
       if (req.method === 'GET' && url.pathname === '/pc-api/status') { json(res, 200, await manager.status()); return }
@@ -68,6 +106,23 @@ const server = createServer(async (req, res) => {
       if (req.method === 'POST' && url.pathname === '/pc-api/settings') {
         const data = await body(req)
         json(res, 200, await manager.setPermissionMode(String(data.permissionMode) as PermissionMode))
+        return
+      }
+      if (req.method === 'POST' && url.pathname === '/pc-api/files') {
+        const fileId = randomUUID()
+        const filePath = join(downloadsRoot, `${fileId}-${safeDownloadName(decodeURIComponent(req.headers['x-rmdex-file-name'] || 'download'))}`)
+        const size = await saveDownload(req, filePath)
+        downloadedFiles.set(fileId, filePath)
+        json(res, 201, { fileId, size })
+        return
+      }
+      if (req.method === 'POST' && url.pathname === '/pc-api/files/open') {
+        const data = await body(req)
+        const fileId = typeof data.fileId === 'string' ? data.fileId : ''
+        const filePath = downloadedFiles.get(fileId)
+        if (!filePath) { json(res, 404, { error: '下载文件不存在，请重新下载' }); return }
+        openDownloadedFile(filePath)
+        json(res, 200, { ok: true })
         return
       }
       json(res, 404, { error: 'Not found' }); return

@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { ChevronDown, ChevronUp, Download, FileArchive, FileCode2, FileImage, FileSpreadsheet, FileText, FileType, Presentation } from 'lucide-vue-next'
+import { ChevronDown, ChevronUp, Download, FileArchive, FileCode2, FileImage, FileSpreadsheet, FileText, FileType, FolderOpen, Presentation } from 'lucide-vue-next'
 import { computed, ref, watch } from 'vue'
 
 export type Artifact = { id: string; threadId: string; turnId: string; sourceItemId?: string; name: string; mimeType: string; size: number; previewMode: 'thumbnail' | 'inline' | 'downloadOnly' }
-const emit = defineEmits<{ download: [artifact: Artifact]; preview: [artifact: Artifact]; 'load-thumbnail': [artifact: Artifact] }>()
 const expanded = ref(false)
-const props = defineProps<{ artifacts: Artifact[]; loading?: string | null; imageUrls?: Record<string, string> }>()
+const emit = defineEmits<{ download: [artifact: Artifact]; preview: [artifact: Artifact]; 'load-thumbnail': [artifact: Artifact]; 'open-location': [artifact: Artifact] }>()
+const props = defineProps<{ artifacts: Artifact[]; loading?: string | null; imageUrls?: Record<string, string>; downloadState?: { artifactId: string; loaded: number; total: number; phase: 'downloading' | 'saving' } | null; downloaded?: Record<string, boolean>; canOpenLocation?: boolean; openLocationLabel?: string }>()
 const visibleArtifacts = computed(() => expanded.value ? props.artifacts : props.artifacts.slice(0, 3))
 const hiddenCount = computed(() => Math.max(0, props.artifacts.length - 3))
 watch(visibleArtifacts, artifacts => {
@@ -33,6 +33,12 @@ function openPreview(artifact: Artifact) {
   if (artifact.previewMode === 'downloadOnly') return emit('download', artifact)
   emit('preview', artifact)
 }
+function progress(artifact: Artifact) {
+  const state = props.downloadState
+  if (!state || state.artifactId !== artifact.id) return 0
+  if (!state.total) return 0
+  return Math.min(100, Math.round(state.loaded / state.total * 100))
+}
 </script>
 
 <template>
@@ -45,7 +51,11 @@ function openPreview(artifact: Artifact) {
           <component v-else :is="icon(artifact)" :size="20" class="artifact-icon" />
           <span class="artifact-info"><strong>{{ artifact.name }}</strong><small>{{ typeLabel(artifact) }} · {{ size(artifact.size) }}</small></span>
         </button>
-        <button type="button" class="artifact-download" title="下载文件" aria-label="下载文件" :disabled="props.loading === artifact.id" @click="emit('download', artifact)"><Download :size="16" /></button>
+        <div class="artifact-actions">
+          <button type="button" class="artifact-download" title="下载文件" aria-label="下载文件" :disabled="props.loading === artifact.id || props.downloadState?.artifactId === artifact.id" @click="emit('download', artifact)"><Download :size="16" /></button>
+          <button v-if="props.canOpenLocation" type="button" class="artifact-download artifact-open-location" :disabled="!props.downloaded?.[artifact.id]" :title="props.openLocationLabel || '打开文件位置'" :aria-label="props.openLocationLabel || '打开文件位置'" @click="emit('open-location', artifact)"><FolderOpen :size="15" /><span>打开位置</span></button>
+        </div>
+        <div v-if="props.downloadState?.artifactId === artifact.id" class="artifact-progress" role="status" :aria-label="`正在下载 ${artifact.name}，${progress(artifact)}%`"><div class="artifact-progress-track"><span :style="{ width: `${progress(artifact)}%` }"></span></div><small>{{ props.downloadState.phase === 'saving' ? '正在保存…' : `${progress(artifact)}%` }}</small></div>
       </article>
     </div>
     <button v-if="hiddenCount" type="button" class="artifact-more" :aria-expanded="expanded" @click="expanded = !expanded">{{ expanded ? '收起其他产物' : `显示其他 ${hiddenCount} 个产物` }}<ChevronUp v-if="expanded" :size="14" /><ChevronDown v-else :size="14" /></button>

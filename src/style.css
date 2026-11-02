@@ -234,7 +234,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .artifact-strip-heading { display: flex; align-items: center; gap: 7px; margin-bottom: 7px; color: #7f8b97; font-size: 11px; font-weight: 600; }
 .artifact-count { min-width: 17px; height: 17px; display: inline-grid; place-items: center; padding: 0 5px; border-radius: 9px; color: #718090; background: #eef2f5; font-size: 10px; }
 .artifact-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 250px), 1fr)); gap: 7px; }
-.artifact-card { min-width: 0; min-height: 56px; display: flex; align-items: center; gap: 4px; padding: 5px 7px 5px 9px; border: 1px solid #e2e8ee; border-radius: 6px; background: #fff; }
+.artifact-card { position: relative; min-width: 0; min-height: 56px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 5px 7px 8px 9px; border: 1px solid #e2e8ee; border-radius: 6px; background: #fff; }
 .artifact-main { min-width: 0; flex: 1; display: flex; align-items: center; gap: 9px; padding: 3px 0; border: 0; color: inherit; background: transparent; text-align: left; }
 .artifact-icon { flex: none; color: #65819b; }
 .artifact-thumbnail { width: 76px; height: 56px; flex: none; border-radius: 4px; object-fit: cover; background: #edf1f4; }
@@ -244,6 +244,17 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 .artifact-download { width: 30px; height: 30px; flex: none; display: grid; place-items: center; border: 0; border-radius: 5px; color: #718293; background: transparent; }
 .artifact-download:hover:not(:disabled) { color: #0879f9; background: #edf5fd; }
 .artifact-download:disabled { opacity: .5; cursor: wait; }
+.artifact-actions { display: flex; align-items: center; gap: 1px; flex: none; }
+.artifact-open-location { width: auto; gap: 4px; padding: 0 7px; font-size: 11px; }
+.artifact-open-location:not(:disabled) { color: #607f98; }
+.artifact-progress { width: 100%; display: flex; align-items: center; gap: 7px; padding: 2px 2px 0 1px; }
+.artifact-progress-track { min-width: 0; height: 3px; flex: 1; overflow: hidden; border-radius: 3px; background: #e8edf1; }
+.artifact-progress-track span { display: block; height: 100%; border-radius: inherit; background: #0879f9; transition: width .18s ease; }
+.artifact-progress small { flex: none; min-width: 34px; color: #738495; font-size: 10px; text-align: right; }
+.artifact-download-confirm { width: min(100%, 420px); }
+.artifact-download-summary { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 14px; padding: 10px 12px; border: 1px solid #e2e8ee; border-radius: 6px; background: #f7f9fb; }
+.artifact-download-summary strong { overflow: hidden; color: #354657; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.artifact-download-summary small { color: #8493a0; font-size: 11px; }
 .artifact-more { display: inline-flex; align-items: center; gap: 5px; margin-top: 7px; padding: 4px 0; border: 0; color: #738495; background: transparent; font-size: 11px; }
 .artifact-more:hover { color: #0879f9; }
 .artifact-preview-backdrop { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 20px; background: rgba(15, 23, 32, .74); }
@@ -834,6 +845,12 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
 :root[data-theme='dark'] .artifact-info small { color: #91a1af; }
 :root[data-theme='dark'] .artifact-download { color: #a0b0bf; }
 :root[data-theme='dark'] .artifact-download:hover:not(:disabled) { color: #8fc4ff; background: #243a50; }
+:root[data-theme='dark'] .artifact-open-location:not(:disabled) { color: #9dbbd3; }
+:root[data-theme='dark'] .artifact-progress-track { background: #344657; }
+:root[data-theme='dark'] .artifact-progress small { color: #a0b0bf; }
+:root[data-theme='dark'] .artifact-download-summary { border-color: #405366; background: #202f3d; }
+:root[data-theme='dark'] .artifact-download-summary strong { color: #e0e8ef; }
+:root[data-theme='dark'] .artifact-download-summary small { color: #a0b0bf; }
 :root[data-theme='dark'] .artifact-more { color: #9aabba; }
 :root[data-theme='dark'] .artifact-more:hover { color: #8fc4ff; }
 :root[data-theme='dark'] .artifact-preview-dialog { border-color: #3b4c5e; background: #17222e; }
