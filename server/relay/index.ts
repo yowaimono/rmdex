@@ -859,7 +859,8 @@ const server = createServer(async (req, res) => {
       const mode = typeof data.mode === 'string' ? data.mode : ''
       const planId = typeof data.id === 'string' ? data.id : ''
       const plan = planId ? state.plans.find(item => item.id === planId && item.userId === userId && item.deviceId === device.id) : undefined
-      if (mode === 'create') {
+      if (mode === 'create' || mode === 'edit') {
+        if (mode === 'edit' && !plan) { json(res, 404, { error: '计划不存在' }); return }
         const name = typeof data.name === 'string' ? data.name.trim().slice(0, 120) : ''
         const prompt = typeof data.prompt === 'string' ? data.prompt.trim().slice(0, 20_000) : ''
         const cwd = typeof data.cwd === 'string' ? data.cwd.trim().slice(0, 1000) : ''
@@ -872,7 +873,13 @@ const server = createServer(async (req, res) => {
         if (triggerType === 'once' && (!Number.isFinite(at) || at < Date.now() - 60_000)) { json(res, 400, { error: '一次性计划时间无效' }); return }
         const model = await resolvePlanModel(device.id, data.model, data.effort)
         const now = Date.now()
-        const created: Plan = { id: randomToken(12), userId, deviceId: device.id, name, prompt, ...(employeeId ? { employeeId } : {}), ...model, cwd, trigger: triggerType === 'once' ? { type: 'once', at } : { type: 'interval', intervalMinutes }, overlap: ['skip', 'queue', 'parallel'].includes(String(data.overlap)) ? data.overlap as Plan['overlap'] : 'skip', enabled: true, nextRunAt: triggerType === 'once' ? at : now + intervalMinutes * 60_000, createdAt: now, updatedAt: now }
+        const overlap = ['skip', 'queue', 'parallel'].includes(String(data.overlap)) ? data.overlap as Plan['overlap'] : 'skip'
+        const trigger = triggerType === 'once' ? { type: 'once' as const, at } : { type: 'interval' as const, intervalMinutes }
+        if (mode === 'edit' && plan) {
+          plan.name = name; plan.prompt = prompt; plan.cwd = cwd; plan.trigger = trigger; plan.overlap = overlap; plan.employeeId = employeeId; plan.model = model.model; plan.effort = model.effort; plan.nextRunAt = triggerType === 'once' ? at : now + intervalMinutes * 60_000; plan.updatedAt = now
+          await persist(); json(res, 200, { plan: planView(plan) }); return
+        }
+        const created: Plan = { id: randomToken(12), userId, deviceId: device.id, name, prompt, ...(employeeId ? { employeeId } : {}), ...model, cwd, trigger, overlap, enabled: true, nextRunAt: triggerType === 'once' ? at : now + intervalMinutes * 60_000, createdAt: now, updatedAt: now }
         state.plans.push(created); await persist(); json(res, 201, { plan: planView(created) }); return
       }
       if (!plan) { json(res, 404, { error: '计划不存在' }); return }
