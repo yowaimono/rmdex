@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { DesktopMcp } from './desktop-mcp.ts'
 import { DesktopAdapter, OperationJournal, adaptRead } from './desktop-adapter.ts'
 import { desktopModels } from './desktop-models.ts'
-import { colleagueMessage, finalAnswer, messageRequest, normalizeItem, timeline } from '../src/conversation.ts'
+import { colleagueMessage, finalAnswer, messageRequest, normalizeItem, planExecutionMessage, timeline } from '../src/conversation.ts'
 import { webLink } from '../src/in-app-browser.ts'
 
 const fixture = fileURLToPath(new URL('./desktop-test-fixture.mjs', import.meta.url))
@@ -72,6 +72,15 @@ test('employee messages show only their body and remain copyable without user re
   assert.equal(entry.text, '请核对首页文案')
   assert.equal(entry.copyText, '请核对首页文案')
   assert.equal(entry.colleagueName, '文案员工')
+})
+test('scheduled plan executions render as a compact user card and hide the envelope', () => {
+  const envelope = '<rmdex_plan_execution>\n{"planId":"plan-1","planRunId":"run-1","planName":"ETH 4小时走势分析","employeeId":"employee-1"}\n</rmdex_plan_execution>\nAt trigger time, analyze ETH.'
+  assert.deepEqual(planExecutionMessage(envelope), { planId: 'plan-1', planRunId: 'run-1', planName: 'ETH 4小时走势分析', employeeId: 'employee-1' })
+  const [entry] = timeline([{ id: 'plan-turn', status: 'inProgress', items: [{ type: 'userMessage', content: [{ type: 'text', text: envelope }] }] }])
+  assert.equal(entry.role, 'user')
+  assert.equal(entry.text, 'At trigger time, analyze ETH.')
+  assert.equal(entry.copyText, 'At trigger time, analyze ETH.')
+  assert.deepEqual(entry.planExecution, { planId: 'plan-1', planRunId: 'run-1', planName: 'ETH 4小时走势分析', employeeId: 'employee-1' })
 })
 test('in-app browser accepts only credential-free HTTP(S) links', () => {
   assert.equal(webLink('https://example.com/path?q=1'), 'https://example.com/path?q=1')

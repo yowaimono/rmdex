@@ -53,7 +53,7 @@ function progress(artifact: Artifact) {
         </button>
         <div class="artifact-actions">
           <button type="button" class="artifact-download" title="下载文件" aria-label="下载文件" :disabled="props.loading === artifact.id || props.downloadState?.artifactId === artifact.id" @click="emit('download', artifact)"><Download :size="16" /></button>
-          <button v-if="props.canOpenLocation" type="button" class="artifact-download artifact-open-location" :disabled="!props.downloaded?.[artifact.id]" :title="props.openLocationLabel || '打开文件位置'" :aria-label="props.openLocationLabel || '打开文件位置'" @click="emit('open-location', artifact)"><FolderOpen :size="15" /><span>打开位置</span></button>
+          <button v-if="props.canOpenLocation" type="button" class="artifact-download artifact-open-location" :disabled="!props.downloaded?.[artifact.id]" :title="props.openLocationLabel || '打开文件位置'" :aria-label="props.openLocationLabel || '打开文件位置'" @click="emit('open-location', artifact)"><FolderOpen :size="15" /></button>
         </div>
         <div v-if="props.downloadState?.artifactId === artifact.id" class="artifact-progress" role="status" :aria-label="`正在下载 ${artifact.name}，${progress(artifact)}%`"><div class="artifact-progress-track"><span :style="{ width: `${progress(artifact)}%` }"></span></div><small>{{ props.downloadState.phase === 'saving' ? '正在保存…' : `${progress(artifact)}%` }}</small></div>
       </article>

@@ -11,6 +11,7 @@ import logoUrl from './assets/rmdex-logo.jpg'
 import ToolEvent from './components/ToolEvent.vue'
 import ArtifactStrip from './components/ArtifactStrip.vue'
 import MessageBubble from './components/MessageBubble.vue'
+import PlanExecutionCard from './components/PlanExecutionCard.vue'
 import PermissionMenu from './components/PermissionMenu.vue'
 import ModelMenu, { type ModelOption } from './components/ModelMenu.vue'
 import ProjectMenu from './components/ProjectMenu.vue'
@@ -35,7 +36,7 @@ const apiBase = Capacitor.isNativePlatform() ? 'https://code.kyeai.xyz' : ''
 const apiUrl = (path: string) => path.startsWith('http://') || path.startsWith('https://') ? path : `${apiBase}${path}`
 const RmdexBackgroundService = registerPlugin<{ start(options: { relayUrl: string; pushToken: string; cursor?: number }): Promise<void>; stop(): Promise<void> }>('RmdexBackgroundService')
 const RmdexDeviceInfo = registerPlugin<{ getInfo(): Promise<{ platform?: string; manufacturer?: string; model?: string }> }>('RmdexDeviceInfo')
-const RmdexFileDownload = registerPlugin<{ enqueue(options: { url: string; fileName: string; mimeType: string; authorization?: string }): Promise<{ id: number }>; status(options: { id: number }): Promise<{ status: string; loaded: number; total: number }>; openDownloads(): Promise<void> }>('RmdexFileDownload')
+const RmdexFileDownload = registerPlugin<{ enqueue(options: { url: string; fileName: string; mimeType: string; authorization?: string }): Promise<{ id: string }>; status(options: { id: string }): Promise<{ status: string; loaded: number; total: number }>; openDownloads(): Promise<void> }>('RmdexFileDownload')
 let appUrlListener: { remove: () => Promise<void> } | undefined
 const threads = ref<Thread[]>([])
 const employees = ref<Employee[]>([])
@@ -716,7 +717,7 @@ async function downloadArtifact(artifact: Artifact) {
       savedArtifactIds.set(artifact.id, result.id)
       let finished = false
       while (!finished) {
-        const status = await RmdexFileDownload.status({ id: result.id })
+        const status = await RmdexFileDownload.status({ id: String(result.id) })
         const total = status.total || artifact.size || 0
         artifactDownloadState.value = { artifactId: artifact.id, loaded: status.loaded || 0, total, phase: 'downloading' }
         finished = status.status === 'completed' || status.status === 'failed' || status.status === 'cancelled'
@@ -2655,8 +2656,9 @@ onUnmounted(() => { themeMediaQuery?.removeEventListener('change', handleSystemT
           <template v-else>
             <MessageBubble :role="message.role" :copy-text="message.copyText" :retryable="message.role === 'user' && !message.colleagueName && capabilities.retry" :retry-disabled="working || retrying" :retry-label="message.turnId === selected.turns?.at(-1)?.id ? '重试' : '从这里重试（新会话）'" :forkable="message.role === 'agent' && message.forkable && capabilities.fork" @copy="copyValue($event, '已复制消息')" @retry="retryMessage(message)" @fork="forkMessage(message)">
               <div v-if="message.colleagueName" class="colleague-message-source">来自员工 · {{ message.colleagueName }}</div>
+              <PlanExecutionCard v-if="message.planExecution" :execution="message.planExecution" :prompt="message.text" />
               <div v-if="message.images.length" class="attachments"><template v-for="(image, index) in message.images" :key="index"><button v-if="imageSource(image)" type="button" class="attachment" title="放大预览图片" aria-label="放大预览图片" @click="showImagePreview(imageSource(image) || '')"><img :src="imageSource(image)" alt="图片附件" loading="lazy" /></button><span v-else class="attachment-unavailable">图片附件不可用</span></template></div>
-              <div v-if="message.text" class="message-text markdown" v-html="markdown.render(message.text)"></div>
+              <div v-if="message.text && !message.planExecution" class="message-text markdown" v-html="markdown.render(message.text)"></div>
             </MessageBubble>
             <ArtifactStrip v-if="message.role === 'agent' && message.forkable && message.artifacts?.length" :artifacts="message.artifacts" :loading="artifactLoading" :download-state="artifactDownloadState" :downloaded="downloadedArtifacts" :can-open-location="Capacitor.isNativePlatform() || pcArtifactApp" :open-location-label="Capacitor.isNativePlatform() ? '打开下载目录' : '在资源管理器中打开'" :image-urls="artifactImageUrls" @download="requestArtifactDownload" @preview="previewArtifact" @load-thumbnail="loadArtifactThumbnail" @open-location="openArtifactLocation" />
           </template>

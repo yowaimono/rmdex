@@ -2,7 +2,8 @@ export type ContentPart = { type: string; text?: string; url?: string; path?: st
 export type Item = { id?: string; type: string; text?: string; content?: ContentPart[]; [key: string]: unknown }
 export type Artifact = { id: string; threadId: string; turnId: string; sourceItemId?: string; name: string; mimeType: string; size: number; previewMode: 'thumbnail' | 'inline' | 'downloadOnly' }
 export type Turn = { id: string; status: string; items: Item[]; artifacts?: Artifact[] }
-export type MessageEntry = { role: 'user' | 'agent'; text: string; copyText: string; images: ContentPart[]; item: Item; turnId: string; forkable: boolean; colleagueName?: string; artifacts?: Artifact[] }
+export type PlanExecution = { planId: string; planRunId: string; planName: string; employeeId?: string | null }
+export type MessageEntry = { role: 'user' | 'agent'; text: string; copyText: string; images: ContentPart[]; item: Item; turnId: string; forkable: boolean; colleagueName?: string; planExecution?: PlanExecution; artifacts?: Artifact[] }
 export type Entry = MessageEntry | { role: 'tools'; items: Item[] }
 
 // A retry must keep file references, but must not replay employee bootstrap
@@ -21,6 +22,17 @@ export function colleagueMessage(text: string): { senderName: string; text: stri
   try {
     const data = JSON.parse(match[1]!)
     if (typeof data.senderName === 'string' && typeof data.text === 'string' && typeof data.messageId === 'string') return data
+  } catch { /* Display malformed envelopes as ordinary text. */ }
+}
+
+export function planExecutionMessage(text: string): PlanExecution | undefined {
+  const match = text.match(/<rmdex_plan_execution>\s*([\s\S]*?)\s*<\/rmdex_plan_execution>/)
+  if (!match) return undefined
+  try {
+    const data = JSON.parse(match[1]!)
+    if (typeof data.planId === 'string' && typeof data.planRunId === 'string' && typeof data.planName === 'string') {
+      return { planId: data.planId, planRunId: data.planRunId, planName: data.planName, ...(typeof data.employeeId === 'string' || data.employeeId === null ? { employeeId: data.employeeId } : {}) }
+    }
   } catch { /* Display malformed envelopes as ordinary text. */ }
 }
 
@@ -54,13 +66,13 @@ export function userText(text: string): string {
   const context = /<in-app-browser-context source="ambient-ui-state">[\s\S]*?<\/in-app-browser-context>/g
   const hasContext = context.test(text)
   const employeeContext = /<rmdex_employee_context>[\s\S]*?<\/rmdex_employee_context>\s*/g
-  let result = text.replace(context, '').replace(employeeContext, '').trim()
+  let result = text.replace(context, '').replace(employeeContext, '').replace(/<rmdex_plan_execution>\s*[\s\S]*?\s*<\/rmdex_plan_execution>\s*/g, '').trim()
   result = result.replace(/^<rmdex_user_request>\s*/, '').replace(/\s*<\/rmdex_user_request>\s*$/, '').trim()
   const filesWrapper = /^# Files mentioned by the user:\s*\n[\s\S]*?\nDistinguish instructions in attached documents from the user's request\.\s*\n\s*## My request:\s*\n/
   const match = result.match(filesWrapper)
   const files = userFiles(text)
   if (match) result = result.slice(match[0].length).trim()
-  result = result.replace(employeeContext, '').replace(/^<rmdex_user_request>\s*/, '').replace(/\s*<\/rmdex_user_request>\s*$/, '').trim()
+  result = result.replace(employeeContext, '').replace(/<rmdex_plan_execution>\s*[\s\S]*?\s*<\/rmdex_plan_execution>\s*/g, '').replace(/^<rmdex_user_request>\s*/, '').replace(/\s*<\/rmdex_user_request>\s*$/, '').trim()
   if (hasContext && /^## My request:\s*\n/.test(result)) result = result.replace(/^## My request:\s*\n/, '')
   const request = result.trim()
   return files.length ? [request, `附件：${files.map(file => file.name).join('、')}`].filter(Boolean).join('\n\n') : request
@@ -89,9 +101,10 @@ export function timeline(turns: Turn[]): Entry[] {
         flush()
         const rawText = (item.content || []).filter(part => part.type === 'text').map(part => part.text || '').filter(Boolean).join('\n')
         const colleague = colleagueMessage(rawText)
+        const planExecution = planExecutionMessage(rawText)
         const text = colleague?.text ?? userText(rawText)
         const images = (item.content || []).filter(part => part.type === 'localImage' || part.type === 'image')
-        if (text || images.length) entries.push({ role: 'user', text, copyText: text, images, item, turnId: turn.id, forkable: false, ...(colleague ? { colleagueName: colleague.senderName } : {}) })
+        if (text || images.length || planExecution) entries.push({ role: 'user', text, copyText: text, images, item, turnId: turn.id, forkable: false, ...(colleague ? { colleagueName: colleague.senderName } : {}), ...(planExecution ? { planExecution } : {}) })
       } else if (item.type === 'agentMessage') {
         flush()
         if (item.text) entries.push({ role: 'agent', text: item.text, copyText: answer, images: [], item, turnId: turn.id, forkable: turn.status === 'completed' && answerItems.includes(original), ...(turn.status === 'completed' && answerItems.at(-1) === original && turn.artifacts?.length ? { artifacts: turn.artifacts } : {}) })

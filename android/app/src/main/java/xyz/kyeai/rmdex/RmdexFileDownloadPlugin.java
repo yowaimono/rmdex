@@ -6,7 +6,9 @@ import android.content.Context;
 import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Environment;
+import android.provider.DocumentsContract;
 
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -50,7 +52,9 @@ public class RmdexFileDownloadPlugin extends Plugin {
             long id = manager.enqueue(request);
             synchronized (downloads) { downloads.add(id); }
             JSObject result = new JSObject();
-            result.put("id", id);
+            // Keep DownloadManager ids as strings across the Capacitor bridge.
+            // Some Android WebViews do not preserve Java long values reliably as JS numbers.
+            result.put("id", String.valueOf(id));
             call.resolve(result);
         } catch (RuntimeException error) {
             call.reject("无法开始系统下载", error);
@@ -59,7 +63,7 @@ public class RmdexFileDownloadPlugin extends Plugin {
 
     @PluginMethod
     public void status(PluginCall call) {
-        long id = call.getLong("id", -1L);
+        long id = readDownloadId(call);
         if (id < 0) {
             call.reject("下载任务无效");
             return;
@@ -93,18 +97,32 @@ public class RmdexFileDownloadPlugin extends Plugin {
         }
     }
 
+    private static long readDownloadId(PluginCall call) {
+        Object raw = call.getData().opt("id");
+        if (raw instanceof Number) return ((Number) raw).longValue();
+        if (raw instanceof String) {
+            try { return Long.parseLong((String) raw); } catch (NumberFormatException ignored) { return -1L; }
+        }
+        return -1L;
+    }
+
     @PluginMethod
     public void openDownloads(PluginCall call) {
         getActivity().runOnUiThread(() -> {
+            Intent fallback = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
             try {
-                Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse("content://com.android.providers.downloads.documents/root/downloads"));
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-                getContext().startActivity(intent);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    fallback.putExtra(DocumentsContract.EXTRA_INITIAL_URI, DocumentsContract.buildDocumentUri(
+                            "com.android.externalstorage.documents", "primary:Download"));
+                }
+                getContext().startActivity(fallback);
                 call.resolve();
             } catch (ActivityNotFoundException error) {
                 try {
-                    Intent fallback = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*");
-                    getContext().startActivity(fallback);
+                    Intent generic = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+                    getContext().startActivity(generic);
                     call.resolve();
                 } catch (RuntimeException fallbackError) { call.reject("没有可用的文件管理器", fallbackError); }
             } catch (RuntimeException error) { call.reject("无法打开下载目录", error); }
