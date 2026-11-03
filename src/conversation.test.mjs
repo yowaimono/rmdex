@@ -1,6 +1,17 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { timeline } from './conversation.ts'
+import { timeline, voiceMessage } from './conversation.ts'
+
+test('voice replies show a bubble without exposing a marker or spoken text', () => {
+  const id = '53f016d0-aed5-4bf1-a97a-1d1b02e1e733'
+  const marker = `<rmdex_voice employee="employee_1" id="${id}" />`
+  const entry = timeline([{ id: 'turn', status: 'completed', items: [{ id: 'reply', type: 'agentMessage', phase: 'final_answer', text: marker }] }])[0]
+  assert.deepEqual(entry.voice, { employeeId: 'employee_1', id })
+  assert.equal(entry.text, '')
+  assert.equal(entry.copyText, '')
+  assert.equal(voiceMessage(`${marker} extra`), undefined)
+  assert.equal(voiceMessage('<rmdex_voice employee="../other" id="bad" />'), undefined)
+})
 
 test('artifacts appear only below the final answer in their completed turn', () => {
   const artifacts = [{ id: 'artifact-1', threadId: 'thread-1', turnId: 'turn-1', name: 'report.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', size: 12, previewMode: 'downloadOnly' }]

@@ -3,8 +3,14 @@ export type Item = { id?: string; type: string; text?: string; content?: Content
 export type Artifact = { id: string; threadId: string; turnId: string; sourceItemId?: string; name: string; mimeType: string; size: number; previewMode: 'thumbnail' | 'inline' | 'downloadOnly' }
 export type Turn = { id: string; status: string; items: Item[]; artifacts?: Artifact[] }
 export type PlanExecution = { planId: string; planRunId: string; planName: string; employeeId?: string | null }
-export type MessageEntry = { role: 'user' | 'agent'; text: string; copyText: string; images: ContentPart[]; item: Item; turnId: string; forkable: boolean; colleagueName?: string; planExecution?: PlanExecution; artifacts?: Artifact[] }
+export type VoiceMessage = { employeeId: string; id: string }
+export type MessageEntry = { role: 'user' | 'agent'; text: string; copyText: string; images: ContentPart[]; item: Item; turnId: string; forkable: boolean; colleagueName?: string; planExecution?: PlanExecution; artifacts?: Artifact[]; voice?: VoiceMessage }
 export type Entry = MessageEntry | { role: 'tools'; items: Item[] }
+
+export function voiceMessage(text: string): VoiceMessage | undefined {
+  const match = text.trim().match(/^<rmdex_voice employee="([A-Za-z0-9_-]{1,128})" id="([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})"\s*\/>$/i)
+  return match ? { employeeId: match[1]!, id: match[2]! } : undefined
+}
 
 // A retry must keep file references, but must not replay employee bootstrap
 // instructions or ambient browser context from the original turn.
@@ -107,7 +113,10 @@ export function timeline(turns: Turn[]): Entry[] {
         if (text || images.length || planExecution) entries.push({ role: 'user', text, copyText: text, images, item, turnId: turn.id, forkable: false, ...(colleague ? { colleagueName: colleague.senderName } : {}), ...(planExecution ? { planExecution } : {}) })
       } else if (item.type === 'agentMessage') {
         flush()
-        if (item.text) entries.push({ role: 'agent', text: item.text, copyText: answer, images: [], item, turnId: turn.id, forkable: turn.status === 'completed' && answerItems.includes(original), ...(turn.status === 'completed' && answerItems.at(-1) === original && turn.artifacts?.length ? { artifacts: turn.artifacts } : {}) })
+        if (item.text) {
+          const voice = voiceMessage(item.text)
+          entries.push({ role: 'agent', text: voice ? '' : item.text, copyText: voice ? '' : answer, images: [], item, turnId: turn.id, forkable: turn.status === 'completed' && answerItems.includes(original), ...(voice ? { voice } : {}), ...(turn.status === 'completed' && answerItems.at(-1) === original && turn.artifacts?.length ? { artifacts: turn.artifacts } : {}) })
+        }
       } else group.push(item)
     }
     flush()

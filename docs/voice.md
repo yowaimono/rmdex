@@ -1,0 +1,11 @@
+# Employee voice replies
+
+Employees may use the managed `rmdex-employee` skill and their own `voice.mjs` helper to synthesize a short voice reply. The helper writes the WAV file and metadata under that employee's local asset directory. The final reply contains an opaque voice marker; rmdex renders a player instead of the marker. The local employee device must be online for remote playback.
+
+The first provider is Xiaomi MiMo. Before generating audio, configure `MIMO_API_KEY` in the environment of the Codex process running the employee. Do not put the key in the conversation, a command argument, repository, logs, or the employee skill. On Windows, setting the user environment variable normally requires restarting the process that launches Codex so it inherits the new environment.
+
+After configuration, the employee may run `node "<employee-asset-directory>/voice.mjs" design` to create `voice/sample.wav`. This calls the remote voice-design model and does not overwrite an existing sample. Listen to the sample before using it; replacing an existing sample requires an explicit user decision. The `send` command accepts a UTF-8 text file and a stable UUID as documented in the skill. It uses the sample with MiMo's voice-clone model and prints only the marker on success. Retrying the same UUID with the same text and thread reuses the audio. A UUID cannot be reused for different text or a different thread.
+
+Audio and its metadata remain on the employee device. They are served through the device relay to clients authenticated for the same user's employee and device, and checked against the original thread. Switching or resetting the employee thread does not transfer audio to a different device. Original text can still exist in Codex context or the temporary input file; a voice bubble is not a privacy boundary. If synthesis fails before a marker is emitted, the employee reports the failure in text and may retry the same UUID; the UI retry button handles audio playback failures only.
+
+Model availability, quotas and charges are controlled by the provider. No real provider request is required by the test suite. A real first-use check requires a configured key, a generated sample, and an authorized release of the Web/relay and device agent; building the source alone does not update installed clients.

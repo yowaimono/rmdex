@@ -14,6 +14,7 @@ import { installEmployeeSkill } from './employee-assets.ts'
 import { OperationJournal } from './desktop-adapter.ts'
 import { MessageRetryService } from './message-retry.ts'
 import { ArtifactRegistry } from './artifacts.ts'
+import { readEmployeeVoice } from './voice-store.ts'
 import './remote-agent.ts'
 
 await installEmployeeSkill().catch(error => console.error('[rmdex] Employee skill installation failed:', error.message))
@@ -544,6 +545,13 @@ const server = createServer(async (req, res) => {
       res.writeHead(ready ? 200 : 503)
       res.end(JSON.stringify({ ok: ready, state: sharedMode ? sharedConnectionState : 'ready', error: ready ? undefined : sharedConnectionError }))
       return
+    }
+    const voiceMatch = url.pathname.match(/^\/api\/voice\/([A-Za-z0-9_-]{1,128})\/([A-Za-z0-9_-]{1,128})\/([a-zA-Z0-9-]+)\/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/i)
+    if (req.method === 'GET' && voiceMatch) {
+      const audio = await readEmployeeVoice(codexHome, voiceMatch[1]!, voiceMatch[2]!, voiceMatch[3]!, voiceMatch[4]!)
+      if (!audio) { res.writeHead(404).end(JSON.stringify({ error: '语音不可用' })); return }
+      res.writeHead(200, { 'Content-Type': 'audio/wav', 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' })
+      res.end(audio); return
     }
     const artifactMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/artifacts\/([a-zA-Z0-9-]+)\/(content|preview)$/)
     if (req.method === 'GET' && artifactMatch) {

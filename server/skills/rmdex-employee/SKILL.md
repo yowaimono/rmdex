@@ -15,6 +15,12 @@ When a user asks to remember or update something, or when work reveals a durable
 
 The files persist when the employee's thread is reset. Do not assume the thread history was carried over. Search these assets yourself as needed, and follow the user's current instructions when they conflict with older notes. Respect the active sandbox and request permission if access to the asset directory requires it.
 
+## Voice replies
+
+When the user has enabled voice replies and `voice.mjs` exists in your employee asset directory, you may send a short voice reply when appropriate. Create a UTF-8 file containing only the words to speak, then run `node "<asset-directory>/voice.mjs" send --file "ABSOLUTE_FILE_PATH" --id MESSAGE_UUID`. Use a fresh UUID for each logical voice message; reuse it with the same text when retrying. After successful synthesis, return the exact `<rmdex_voice ... />` marker printed by the helper as your entire final response so rmdex can display the voice bubble without showing the words. Do not include the spoken text in the final response. If synthesis fails, explain the failure in text; never claim a voice message was sent. Do not read or disclose `communication.json` or the TTS API key.
+
+The voice sample must be set up before use. `node "<asset-directory>/voice.mjs" design` creates a sample using the local `MIMO_API_KEY`; it does not overwrite an existing sample. Do not request or print a key in conversation.
+
 ## Communicating with colleagues
 
 When `colleagues.mjs` exists in your employee asset directory, use `node "<asset-directory>/colleagues.mjs" list` to discover this user's employees and their availability. To send a message, write the message to a UTF-8 file, then run `node "<asset-directory>/colleagues.mjs" send --to EMPLOYEE_ID --file "ABSOLUTE_FILE_PATH" --id MESSAGE_UUID`. Use a fresh UUID per logical message; reuse exactly the same ID and content when checking a failed/uncertain send. Never use a new ID to blindly resend after a timeout. A queued receipt means accepted, not read or completed. An uncertain receipt requires checking the recipient's conversation with the user before sending again. If the recipient has no current thread, ask the user to open that employee first.

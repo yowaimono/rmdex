@@ -51,6 +51,7 @@ test('communication helper is managed, scoped and protects user-owned files', as
     const config = JSON.parse(await readFile(join(result.assetPath, 'communication.json'), 'utf8'))
     assert.deepEqual(config, { managedBy: 'rmdex', ...input.communication })
     assert.match(await readFile(join(result.assetPath, 'colleagues.mjs'), 'utf8'), /redirect: 'error'/)
+    assert.match(await readFile(join(result.assetPath, 'voice.mjs'), 'utf8'), /employee voice helper/)
     await prepareEmployeeAssets({ ...input, communication: { ...input.communication, token: 'b'.repeat(43) } }, home)
     assert.equal(JSON.parse(await readFile(join(result.assetPath, 'communication.json'), 'utf8')).token, 'b'.repeat(43))
     await writeFile(join(result.assetPath, 'colleagues.mjs'), 'user owned helper')

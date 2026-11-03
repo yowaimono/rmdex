@@ -2,7 +2,7 @@
 import { nextTick, onUnmounted, ref, watch } from 'vue'
 import { Copy, GitFork, RotateCcw } from 'lucide-vue-next'
 
-const props = defineProps<{ role: 'user' | 'agent'; copyText: string; retryable?: boolean; retryDisabled?: boolean; retryLabel?: string; forkable?: boolean; failed?: boolean }>()
+const props = defineProps<{ role: 'user' | 'agent'; copyText: string; retryable?: boolean; retryDisabled?: boolean; retryLabel?: string; forkable?: boolean; failed?: boolean; voice?: boolean }>()
 const emit = defineEmits<{ copy: [text: string]; retry: []; fork: [] }>()
 const open = ref(false)
 const target = ref<HTMLElement | null>(null)
@@ -153,9 +153,9 @@ onUnmounted(() => { cancelPress(); removeListeners() })
       <section v-if="open" ref="menu" class="message-action-menu" :class="`message-action-menu--${placement}`" :style="{ ...position, visibility: positioned ? 'visible' : 'hidden' }" role="menu" tabindex="-1" :aria-label="role === 'user' ? '用户消息操作' : 'AI 回复操作'" @pointerdown.capture="actionPointerStarted = true" @click.capture="actionClick" @contextmenu.prevent>
         <button v-if="retryable" type="button" role="menuitem" tabindex="-1" class="message-action-option" :disabled="retryDisabled" @click="choose('retry')"><RotateCcw :size="17" /><span>{{ retryLabel || '重试' }}</span></button>
         <button v-if="forkable" type="button" role="menuitem" tabindex="-1" class="message-action-option" @click="choose('fork')"><GitFork :size="17" /><span>从这里分叉</span></button>
-        <button type="button" role="menuitem" tabindex="-1" class="message-action-option" :disabled="!copyText" @click="choose('copy')"><Copy :size="17" /><span>{{ role === 'user' ? '复制消息' : '复制最终回答' }}</span></button>
+        <button v-if="!voice" type="button" role="menuitem" tabindex="-1" class="message-action-option" :disabled="!copyText" @click="choose('copy')"><Copy :size="17" /><span>{{ role === 'user' ? '复制消息' : '复制最终回答' }}</span></button>
         <p v-if="retryable && retryDisabled">当前任务结束后可重试</p>
-        <p v-if="role === 'agent' && !copyText">最终回答生成后可复制</p>
+        <p v-if="role === 'agent' && !copyText && !voice">最终回答生成后可复制</p>
       </section>
     </Teleport>
   </article>

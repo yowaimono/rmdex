@@ -67,8 +67,9 @@ if (relayUrl && deviceToken) {
                 return
               }
               const isAttachmentUpload = message.method === 'POST' && message.path === '/api/attachments'
+              const isVoice = message.method === 'GET' && /^\/api\/voice\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+\/[a-zA-Z0-9-]+\/[a-f0-9-]{36}$/i.test(message.path)
               const isProjectMutation = message.method === 'POST' && /^\/api\/projects(?:\/[a-zA-Z0-9-]+\/(?:update|delete))?$/.test(message.path)
-              const allowed = isAttachmentUpload || isProjectMutation || (message.method === 'GET'
+              const allowed = isAttachmentUpload || isProjectMutation || isVoice || (message.method === 'GET'
                 ? /^\/api\/(?:models|projects|settings|threads(?:\/[a-zA-Z0-9-]+(?:\/(?:status|incremental|queue|artifacts\/[a-zA-Z0-9-]+\/(?:content|preview)))?)?|images\/[a-f0-9-]+)$/.test(message.path)
                 : /^\/api\/(?:settings|threads|threads\/[a-zA-Z0-9-]+\/(?:send|retry|stop|history|name|fork|archive|unarchive|delete|queue|steer)|threads\/[a-zA-Z0-9-]+\/queue\/[^/]+(?:\/(?:steer|delete))?|approvals\/[a-zA-Z0-9-]+|user-input\/[a-zA-Z0-9-]+)$/.test(message.path))
               if (!allowed) { socket?.send(JSON.stringify({ type: 'response', id: message.id, error: 'Forbidden' })); return }
@@ -79,12 +80,12 @@ if (relayUrl && deviceToken) {
                   body: message.method === 'POST' ? JSON.stringify(message.data ?? {}) : undefined,
                   signal: AbortSignal.timeout(35000),
                 })
-                if (message.path.startsWith('/api/images/')) {
+                if (message.path.startsWith('/api/images/') || isVoice) {
                   if (!response.ok) throw new Error('图片不可用')
                   const contentType = response.headers.get('content-type') || 'application/octet-stream'
-                  if (!/^image\/(?:png|jpeg|gif|webp)$/.test(contentType)) throw new Error('Unsupported image type')
+                  if (isVoice ? contentType !== 'audio/wav' : !/^image\/(?:png|jpeg|gif|webp)$/.test(contentType)) throw new Error('Unsupported media type')
                   const bytes = Buffer.from(await response.arrayBuffer())
-                  if (bytes.length > 5 * 1024 * 1024) throw new Error('图片过大，暂不支持远程预览')
+                  if (bytes.length > (isVoice ? 10 : 5) * 1024 * 1024) throw new Error('文件过大，暂不支持远程预览')
                   socket?.send(JSON.stringify({ type: 'response', id: message.id, result: { __rmdexBinary: true, contentType, data: bytes.toString('base64') } }))
                   return
                 }

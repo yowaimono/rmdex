@@ -60,6 +60,8 @@ test('colleague communication routes current threads, isolates identity and pers
         if (msg.path === '/api/employee-assets/prepare') {
           enteredPrepare?.(); if (prepareGate) await prepareGate
           result = await prepareEmployeeAssets(msg.data, join(dir, device))
+        } else if (msg.path.startsWith('/api/voice/')) {
+          result = { __rmdexBinary: true, contentType: 'audio/wav', data: Buffer.from('test audio').toString('base64') }
         } else if (msg.path.endsWith('/queue')) {
           if (failQueue) throw new Error('Lost response after enqueue')
           result = { outcome: 'queued', queuedSubmission: { id: randomUUID() } }
@@ -77,6 +79,16 @@ test('colleague communication routes current threads, isolates identity and pers
     assert.equal((await call('/api/threads/sender-thread/send', json({ text: 'Initialize communication', employeeId: 'sender' }, userToken))).status, 200)
     const configPath = join(dir, 'source', 'rmdex', 'employees', 'user', 'sender', 'communication.json')
     const { token } = JSON.parse(await readFile(configPath, 'utf8'))
+    const context = await call('/api/employee-communication/voice-context', { headers: { Authorization: `Bearer ${token}` } })
+    assert.deepEqual(context.data, { userId: 'user', employeeId: 'sender', threadId: 'sender-thread' })
+    const voiceId = randomUUID()
+    const voice = await fetch(`${origin}/api/threads/sender-thread/voice/sender/${voiceId}`, { headers: { Authorization: `Bearer ${userToken}` } })
+    assert.equal(voice.status, 200)
+    assert.equal(voice.headers.get('content-type'), 'audio/wav')
+    assert.equal(await voice.text(), 'test audio')
+    assert.equal((await fetch(`${origin}/api/threads/sender-thread/voice/foreign-employee/${voiceId}`, { headers: { Authorization: `Bearer ${userToken}` } })).status, 404)
+    assert.equal((await fetch(`${origin}/api/threads/sender-thread/voice/recipient/${voiceId}`, { headers: { Authorization: `Bearer ${userToken}` } })).status, 404)
+    assert.equal((await fetch(`${origin}/api/threads/sender-thread/voice/sender/${voiceId}`)).status, 401)
     const send = body => call('/api/employee-communication/messages', json(body, token))
     const list = await call('/api/employee-communication/colleagues', { headers: { Authorization: `Bearer ${token}` } })
     assert.deepEqual(list.data.data.map(item => item.id), ['recipient', 'unopened'])

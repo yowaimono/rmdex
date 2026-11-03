@@ -61,6 +61,7 @@ export async function prepareEmployeeAssets(value: { userId?: unknown; employeeI
     if (typeof value.communication.token !== 'string' || !/^[A-Za-z0-9_-]{32,128}$/.test(value.communication.token)) throw new Error('Invalid communication token')
     const files = [
       ['colleagues.mjs', await readFile(new URL('./skills/rmdex-employee/colleagues.mjs', import.meta.url), 'utf8')],
+      ['voice.mjs', await readFile(new URL('./skills/rmdex-employee/voice.mjs', import.meta.url), 'utf8')],
       ['communication.json', JSON.stringify({ managedBy: 'rmdex', origin: origin.origin, token: value.communication.token })],
     ]
     for (const [name, content] of files) {
@@ -69,7 +70,8 @@ export async function prepareEmployeeAssets(value: { userId?: unknown; employeeI
       if (existing && (!existing.isFile() || existing.isSymbolicLink())) throw new Error('Communication asset is not a regular file')
       if (existing) {
         const old = await readFile(path, 'utf8')
-        if (name === 'communication.json' ? JSON.parse(old).managedBy !== 'rmdex' : !old.startsWith('// Managed by rmdex: employee communication helper')) throw new Error('User-managed communication asset already exists')
+        const marker = name === 'voice.mjs' ? '// Managed by rmdex: employee voice helper' : '// Managed by rmdex: employee communication helper'
+        if (name === 'communication.json' ? JSON.parse(old).managedBy !== 'rmdex' : !old.startsWith(marker)) throw new Error('User-managed communication asset already exists')
       }
       await writeFile(path, content!, { mode: 0o600, ...(existing ? {} : { flag: 'wx' }) })
     }

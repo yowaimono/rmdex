@@ -249,6 +249,9 @@ async function communicate(req: import('node:http').IncomingMessage, res: import
   const token = bearer(req)
   const sender = token && state.employees.find(item => !item.archived && userForId(item.userId) && communicationToken(item) && equalHash(token, hash(communicationToken(item))))
   if (!sender) { json(res, 401, { error: '员工通信凭证已失效，请在员工当前会话中发送一条消息以刷新' }); return }
+  if (req.method === 'GET' && pathname === '/api/employee-communication/voice-context') {
+    json(res, 200, { userId: sender.userId, employeeId: sender.id, threadId: sender.threadId }); return
+  }
   if (req.method === 'GET' && pathname === '/api/employee-communication/colleagues') {
     json(res, 200, { data: state.employees.filter(item => !item.archived && item.userId === sender.userId && item.id !== sender.id).map(item => ({ id: item.id, name: item.name, role: item.role, hasCurrentThread: Boolean(item.threadId), online: deviceSockets.get(item.deviceId)?.readyState === WebSocket.OPEN })) }); return
   }
@@ -843,6 +846,15 @@ const server = createServer(async (req, res) => {
     const device = state.devices.find(item => item.id === client.deviceId && !item.revoked)
     if (!device) { json(res, 401, { error: '设备已撤销' }); return }
     const userId = device.userId
+    const voiceMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/voice\/([a-zA-Z0-9_-]+)\/([a-f0-9-]{36})$/i)
+    if (req.method === 'GET' && voiceMatch && !url.search) {
+      const employee = employeeFor(voiceMatch[2]!, userId)
+      if (!employee || employee.deviceId !== device.id) { json(res, 404, { error: '语音不可用' }); return }
+      const result = await rpc(device.id, `/api/voice/${userId}/${employee.id}/${voiceMatch[1]}/${voiceMatch[3]}`, 'GET') as { __rmdexBinary?: boolean; contentType?: string; data?: string }
+      if (!result?.__rmdexBinary || result.contentType !== 'audio/wav' || typeof result.data !== 'string') { json(res, 404, { error: '语音不可用' }); return }
+      res.writeHead(200, { 'Content-Type': 'audio/wav', 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' })
+      res.end(Buffer.from(result.data, 'base64')); return
+    }
     if (req.method === 'GET' && url.pathname === '/api/employees') {
       json(res, 200, { data: state.employees.filter(item => !item.archived && item.userId === userId && item.deviceId === device.id).map(employeeView) }); return
     }

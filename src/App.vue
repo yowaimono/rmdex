@@ -11,6 +11,7 @@ import logoUrl from './assets/rmdex-logo.jpg'
 import ToolEvent from './components/ToolEvent.vue'
 import ArtifactStrip from './components/ArtifactStrip.vue'
 import MessageBubble from './components/MessageBubble.vue'
+import VoiceMessage from './components/VoiceMessage.vue'
 import PlanExecutionCard from './components/PlanExecutionCard.vue'
 import PermissionMenu from './components/PermissionMenu.vue'
 import ModelMenu, { type ModelOption } from './components/ModelMenu.vue'
@@ -906,6 +907,12 @@ async function get<T>(path: string): Promise<T> {
   const data = await readJsonResponse(response, `加载 ${path} 失败`)
   if (!response.ok) throw new Error(data?.error || 'Request failed')
   return data as T
+}
+async function loadVoice(threadId: string, employeeId: string, id: string) {
+  const response = await authenticatedFetch(`/api/threads/${threadId}/voice/${employeeId}/${id}`, {}, 'client')
+  if (!response.ok) throw new Error('语音暂不可用，请确认员工设备在线后重试')
+  if (!/^audio\/wav(?:;|$)/i.test(response.headers.get('content-type') || '')) throw new Error('语音格式无效')
+  return response.blob()
 }
 async function bindOnlineDevice() {
   if (!adminToken.value) return false
@@ -2679,9 +2686,10 @@ onUnmounted(() => { themeMediaQuery?.removeEventListener('change', handleSystemT
             <div class="tool-group-content"><ToolEvent v-for="(item, index) in message.items" :key="item.id || index" :item="item" :image-url="toolImageSource(item)" @preview="showImagePreview" /></div>
           </details>
           <template v-else>
-            <MessageBubble :role="message.role" :copy-text="message.copyText" :retryable="message.role === 'user' && !message.colleagueName && capabilities.retry" :retry-disabled="working || retrying" :retry-label="message.turnId === selected.turns?.at(-1)?.id ? '重试' : '从这里重试（新会话）'" :forkable="message.role === 'agent' && message.forkable && capabilities.fork" @copy="copyValue($event, '已复制消息')" @retry="retryMessage(message)" @fork="forkMessage(message)">
+            <MessageBubble :role="message.role" :copy-text="message.copyText" :voice="!!message.voice" :retryable="message.role === 'user' && !message.colleagueName && capabilities.retry" :retry-disabled="working || retrying" :retry-label="message.turnId === selected.turns?.at(-1)?.id ? '重试' : '从这里重试（新会话）'" :forkable="message.role === 'agent' && message.forkable && capabilities.fork" @copy="copyValue($event, '已复制消息')" @retry="retryMessage(message)" @fork="forkMessage(message)">
               <div v-if="message.colleagueName" class="colleague-message-source">来自员工 · {{ message.colleagueName }}</div>
               <PlanExecutionCard v-if="message.planExecution" :execution="message.planExecution" :prompt="message.text" />
+              <VoiceMessage v-if="message.voice" :load="() => loadVoice(selected!.id, message.voice!.employeeId, message.voice!.id)" />
               <div v-if="message.images.length" class="attachments"><template v-for="(image, index) in message.images" :key="index"><button v-if="imageSource(image)" type="button" class="attachment" title="放大预览图片" aria-label="放大预览图片" @click="showImagePreview(imageSource(image) || '')"><img :src="imageSource(image)" alt="图片附件" loading="lazy" /></button><span v-else class="attachment-unavailable">图片附件不可用</span></template></div>
               <div v-if="message.text && !message.planExecution" class="message-text markdown" v-html="markdown.render(message.text)"></div>
             </MessageBubble>

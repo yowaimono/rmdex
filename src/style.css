@@ -936,3 +936,6 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
   .settings-account-card { align-items: flex-start; flex-direction: column; }
   .settings-logout-button { width: 100%; }
 }
+.voice-message{display:flex;align-items:center;gap:9px;min-width:190px;max-width:260px;min-height:38px;flex-wrap:wrap}
+.voice-play{width:34px;height:34px;display:grid;place-items:center;flex:none;border:0;border-radius:50%;background:#1685e5;color:#fff;cursor:pointer}
+.voice-play:disabled{opacity:.65}.voice-icon{flex:none;color:#6c8498}.voice-seek{width:90px;min-width:50px;flex:1;accent-color:#1685e5}.voice-time{min-width:28px;color:#6c8498;font-size:12px;font-variant-numeric:tabular-nums}.voice-error{width:100%;display:flex;align-items:center;gap:4px;color:#c24f49;font-size:12px;overflow-wrap:anywhere}
