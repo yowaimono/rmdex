@@ -67,3 +67,16 @@ test('registers explicitly linked delivery files outside the project directory',
     assert.equal(artifacts.find(artifact => artifact.name === 'desktop-shot.png').previewMode, 'thumbnail')
   } finally { await rm(screenshot, { force: true }) }
 })
+
+test('registers explicitly linked delivery files when the thread has no working directory', async () => {
+  const { root, threadId, result } = await fixture()
+  const screenshot = join(root, '..', 'session-image.png')
+  await writeFile(screenshot, 'image-data')
+  try {
+    delete result.thread.cwd
+    result.thread.turns[0].items = [{ id: 'answer-1', type: 'agentMessage', phase: 'final_answer', text: `图片已附上：[查看二维码](${screenshot})` }]
+    const artifacts = await new ArtifactRegistry().register(result, threadId)
+    assert.deepEqual(artifacts.map(artifact => artifact.name), ['session-image.png'])
+    assert.equal(artifacts[0].previewMode, 'thumbnail')
+  } finally { await rm(screenshot, { force: true }) }
+})

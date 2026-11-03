@@ -67,13 +67,13 @@ export class ArtifactRegistry {
 
   async register(result: unknown, threadId: string) {
     const root = typeof (result as any)?.thread?.cwd === 'string' ? (result as any).thread.cwd : ''
-    if (!root || !isAbsolute(root)) return this.list(threadId)
     const turns = Array.isArray((result as any)?.thread?.turns) ? (result as any).thread.turns : []
     for (const turn of turns) {
       if (!turn || turn.status !== 'completed' || typeof turn.id !== 'string' || !Array.isArray(turn.items)) continue
       const candidates: Array<{ path: string; sourceItemId?: string }> = []
       const changedPaths = new Set<string>()
       const addChangedPath = (value: string) => {
+        if (!root || !isAbsolute(root)) return
         let file = value.trim().replaceAll('/', sep).replace(/^[ab]\\/, '')
         if (!file) return
         if (isAbsolute(file)) {
@@ -105,8 +105,9 @@ export class ArtifactRegistry {
         for (const path of [item.path, item.savedPath]) if (typeof path === 'string') candidates.push({ path, sourceItemId: item.id, explicitlyLinked: true })
       }
       for (const candidate of candidates) {
+        if (!isAbsolute(candidate.path) && (!root || !isAbsolute(root))) continue
         const resolved = isAbsolute(candidate.path) ? resolve(candidate.path) : resolve(root, candidate.path)
-        if (changedPaths.has(relative(root, resolved).toLowerCase())) continue
+        if (root && isAbsolute(root) && changedPaths.has(relative(root, resolved).toLowerCase())) continue
         await this.registerFile(threadId, turn.id, root, candidate.path, candidate.sourceItemId, candidate.explicitlyLinked)
       }
     }
@@ -115,12 +116,13 @@ export class ArtifactRegistry {
 
   private async registerFile(threadId: string, turnId: string, root: string, rawPath: string, sourceItemId?: string, explicitlyLinked = false) {
     const path = trimPath(rawPath)
+    if (!isAbsolute(path) && (!root || !isAbsolute(root))) return
     const target = isAbsolute(path) ? path : resolve(root, path)
-    if (!explicitlyLinked && !within(root, target)) return
+    if (!explicitlyLinked && (!root || !within(root, target))) return
     const extension = extname(path).toLowerCase()
     if (sourceExtensions.has(extension) && extension !== '.md') return
-    const [canonicalRoot, canonicalTarget] = await Promise.all([realpath(root).catch(() => ''), realpath(target).catch(() => '')])
-    if (!canonicalRoot || !canonicalTarget || (!explicitlyLinked && !within(canonicalRoot, canonicalTarget))) return
+    const [canonicalRoot, canonicalTarget] = await Promise.all([root ? realpath(root).catch(() => '') : Promise.resolve(''), realpath(target).catch(() => '')])
+    if (!canonicalTarget || (!explicitlyLinked && (!canonicalRoot || !within(canonicalRoot, canonicalTarget)))) return
     const info = await stat(canonicalTarget).catch(() => null)
     if (!info?.isFile() || info.size > 512 * 1024 * 1024) return
     const key = `${threadId}:${turnId}:${canonicalTarget}:${info.size}:${info.mtimeMs}`
