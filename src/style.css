@@ -936,5 +936,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid #0879f9; outline-
   .settings-account-card { align-items: flex-start; flex-direction: column; }
   .settings-logout-button { width: 100%; }
 }
-.voice-message{position:relative;width:max-content;max-width:min(260px,100%);min-width:78px;min-height:36px;display:flex;align-items:center;gap:7px;padding:0 12px;background:#edf0f3;border-radius:7px;color:#27323a}
+.voice-message{position:relative;width:max-content;max-width:min(320px,100%);min-width:112px;min-height:36px;display:flex;align-items:center;gap:7px;padding:0 12px;background:#edf0f3;border-radius:7px;color:#27323a}
 .message--agent .voice-message{background:#edf0f3}.voice-play{width:20px;height:26px;display:grid;place-items:center;flex:none;padding:0;border:0;background:transparent;color:#3a444c;cursor:pointer}.voice-play:disabled{opacity:.65}.voice-time{color:#424b52;font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap}.voice-unread{position:absolute;right:-12px;top:50%;width:6px;height:6px;transform:translateY(-50%);border-radius:50%;background:#ed4b4b}.voice-message.is-playing .voice-play{color:#1685e5}.voice-error{position:absolute;top:calc(100% + 4px);left:0;display:flex;align-items:center;gap:4px;max-width:240px;color:#c24f49;font-size:11px;overflow-wrap:anywhere}
+:root[data-theme='dark'] .voice-message,:root[data-theme='dark'] .message--agent .voice-message{background:#273544;color:#d3dee8}
+:root[data-theme='dark'] .voice-play,:root[data-theme='dark'] .voice-time{color:#c1ceda}
+:root[data-theme='dark'] .voice-message.is-playing .voice-play{color:#7bbaff}
