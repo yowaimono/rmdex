@@ -35,7 +35,7 @@ const employeeSkill = await readFile(process.env.RMDEX_EMPLOYEE_SKILL || join(pr
 const state: State = { devices: [], clients: [], pairings: [], pairRequests: [], users: [], sessions: [], pushTokens: [], notifications: [], notificationWatches: [], employees: [], employeeMessages: [], plans: [], planRuns: [] }
 const employeeDeliveries = new Set<string>()
 const messageDeliveries = new Set<string>()
-const ASSET_CONTEXT_VERSION = 2
+const ASSET_CONTEXT_VERSION = 3
 const approvedPairTokens = new Map<string, Credentials>()
 const deviceSockets = new Map<string, WebSocket>()
 const devicePending = new Map<string, Map<string, Pending>>()
@@ -235,7 +235,7 @@ function communicationToken(employee: Employee) {
 }
 async function employeeAssets(employee: Employee) {
   const assets = await rpc(employee.deviceId, '/api/employee-assets/prepare', 'POST', {
-    userId: employee.userId, employeeId: employee.id,
+    userId: employee.userId, employeeId: employee.id, threadId: employee.threadId,
     communication: { origin: publicOrigin, token: communicationToken(employee) },
     ...(employee.legacyMemory ? { legacyMemory: employee.legacyMemory, legacyMemoryDate: new Date(employee.createdAt).toISOString().slice(0, 10) } : {}),
   }) as { assetPath?: unknown; skillPath?: unknown }

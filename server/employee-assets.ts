@@ -47,7 +47,7 @@ async function ensureDirectory(path: string) {
   await mkdir(path, { recursive: true })
 }
 
-export async function prepareEmployeeAssets(value: { userId?: unknown; employeeId?: unknown; legacyMemory?: unknown; legacyMemoryDate?: unknown; communication?: { origin: string; token: string } }, home = codexHome()) {
+export async function prepareEmployeeAssets(value: { userId?: unknown; employeeId?: unknown; threadId?: unknown; legacyMemory?: unknown; legacyMemoryDate?: unknown; communication?: { origin: string; token: string } }, home = codexHome()) {
   const userId = identifier(value.userId)
   const employeeId = identifier(value.employeeId)
   if (value.legacyMemory !== undefined && (typeof value.legacyMemory !== 'string' || value.legacyMemory.length > 20_000)) throw new Error('Invalid previous employee memory')
@@ -55,6 +55,24 @@ export async function prepareEmployeeAssets(value: { userId?: unknown; employeeI
   const assetPath = join(home, 'rmdex', 'employees', userId, employeeId)
   const memories = join(assetPath, 'memories')
   for (const path of [join(home, 'rmdex'), join(home, 'rmdex', 'employees'), join(home, 'rmdex', 'employees', userId), assetPath, memories, join(assetPath, 'sops')]) await ensureDirectory(path)
+  const artifactFiles = [['artifacts.mjs', await readFile(new URL('./skills/rmdex-employee/artifacts.mjs', import.meta.url), 'utf8')]]
+  if (value.threadId !== undefined) {
+    if (typeof value.threadId !== 'string' || !/^[A-Za-z0-9-]{1,128}$/.test(value.threadId)) throw new Error('Invalid employee artifact thread identifier')
+    const agentPort = Number(process.env.RMDEX_AGENT_PORT || 18787)
+    if (!Number.isInteger(agentPort) || agentPort < 1 || agentPort > 65535) throw new Error('Invalid employee artifact agent port')
+    artifactFiles.push(['artifact-context.json', JSON.stringify({ managedBy: 'rmdex', userId, employeeId, threadId: value.threadId, agentOrigin: `http://127.0.0.1:${agentPort}` })])
+  }
+  for (const [name, content] of artifactFiles) {
+    const path = join(assetPath, name!)
+    const existing = await lstat(path).catch(error => { if (error.code === 'ENOENT') return undefined; throw error })
+    if (existing && (!existing.isFile() || existing.isSymbolicLink())) throw new Error('Employee artifact asset is not a regular file')
+    if (existing) {
+      const old = await readFile(path, 'utf8')
+      if (name === 'artifact-context.json' ? JSON.parse(old).managedBy !== 'rmdex' : !old.startsWith('// Managed by rmdex: employee artifact helper')) throw new Error('User-managed artifact asset already exists')
+      if (old === content) continue
+    }
+    await writeFile(path, content!, { mode: 0o600, ...(existing ? {} : { flag: 'wx' }) })
+  }
   if (value.communication) {
     const origin = new URL(value.communication.origin)
     if (origin.protocol !== 'https:' && !(origin.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(origin.hostname))) throw new Error('Invalid communication origin')

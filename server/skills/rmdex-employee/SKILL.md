@@ -1,6 +1,6 @@
 ---
 name: rmdex-employee
-description: Maintain and consult the local memories and SOPs of an rmdex employee while working in that employee's thread.
+description: Work in an rmdex employee thread, consult and maintain its local memories and SOPs, and explicitly register files delivered to the user.
 ---
 
 <!-- Managed by rmdex: rmdex-employee -->
@@ -14,6 +14,22 @@ Before relevant work, search the employee's `memories/` and `sops/` for useful c
 When a user asks to remember or update something, or when work reveals a durable, useful fact, preference, decision, lesson, or repeatable procedure, maintain the appropriate local asset. Use `memories/` for individual dated Markdown memories and `sops/` for reusable procedures. Prefer filenames beginning with `YYYY-MM-DD` and a meaningful title. Update existing material when appropriate; avoid redundant entries, temporary task details, unsupported conclusions, and secrets. Record dates and useful context, distinguish verified facts from uncertainty, and preserve prior information when updating it. Keep SOPs practical and revise them as the workflow changes.
 
 The files persist when the employee's thread is reset. Do not assume the thread history was carried over. Search these assets yourself as needed, and follow the user's current instructions when they conflict with older notes. Respect the active sandbox and request permission if access to the asset directory requires it.
+
+## Delivering files
+
+When you create a file for the user to receive (a report, image, screenshot, spreadsheet, video, archive, or another requested deliverable), register it before your final reply using the employee's `artifacts.mjs`:
+
+```text
+node "<asset-directory>/artifacts.mjs" attach --file "ABSOLUTE_FILE_PATH" --id ARTIFACT_UUID
+node "<asset-directory>/artifacts.mjs" list
+node "<asset-directory>/artifacts.mjs" detach --id ARTIFACT_UUID
+```
+
+Use a fresh UUID for each logical delivery, and reuse the same UUID and unchanged file when retrying. An optional `--name "report.pdf"` sets the display filename. The helper binds the delivery to this employee's configured thread and its current or latest turn, validates the file, and saves a durable record on the device. Wait for `status: "attached"` before claiming registration succeeded. If the result is uncertain, check `list` and retry with the same ID; never create duplicates to work around a timeout. Changed file contents require a new ID. Register multiple deliverables individually.
+
+Registered files appear as conversation artifact cards without a special marker or a Markdown path in the final reply. You may describe the result normally, including with a voice reply. Register completed files even if the remaining task fails. Files must already exist and be at most 512 MB; registration retains their location without copying them, so keep delivered files in a stable output directory. A later edit, move or deletion can make that delivery unavailable; register the final version again with a new ID.
+
+Use `detach` to withdraw an incorrect delivery; it only removes its card and preserves the source file. Ordinary code edits, input files, internal notes, credentials and working files are not deliverables. Register source code only when the user actually requested that file as an output. Do not edit the registration manifests or `artifact-context.json` yourself. If the helper or its context is missing, or registration fails, report the actual failure; a link or image-view tool result alone does not confirm registration.
 
 ## Voice replies
 

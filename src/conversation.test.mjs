@@ -29,3 +29,23 @@ test('in-progress turns do not expose artifact cards', () => {
   ] }])
   assert.equal(entries.find(entry => entry.role === 'agent').artifacts, undefined)
 })
+
+for (const status of ['inProgress', 'failed', 'interrupted', 'completed']) test(`registered deliveries stay visible without a final answer in ${status} turns`, () => {
+  const registered = { id: 'registered', source: 'registered' }
+  const entries = timeline([{ id: 'turn', status, artifacts: [registered, { id: 'inferred' }], items: [] }])
+  assert.equal(entries.length, 1)
+  assert.equal(entries[0].item.type, 'artifactDelivery')
+  assert.equal(entries[0].forkable, false)
+  assert.deepEqual(entries[0].artifacts, [registered])
+})
+
+test('registered deliveries move under the final voice bubble without duplication', () => {
+  const id = '53f016d0-aed5-4bf1-a97a-1d1b02e1e733'
+  const artifacts = [{ id: 'registered', source: 'registered' }]
+  const entries = timeline([{ id: 'turn', status: 'completed', artifacts, items: [
+    { id: 'final', type: 'agentMessage', phase: 'final_answer', text: `<rmdex_voice employee="employee_1" id="${id}" />` },
+  ] }])
+  assert.equal(entries.length, 1)
+  assert.equal(entries[0].voice.id, id)
+  assert.deepEqual(entries[0].artifacts, artifacts)
+})

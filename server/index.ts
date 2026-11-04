@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { homedir } from 'node:os'
 import { extname, isAbsolute, join } from 'node:path'
@@ -65,7 +65,7 @@ const disconnectedConnections = new WeakSet<WebSocket>()
 const images = new Map<string, string>()
 const imageIds = new Map<string, string>()
 const attachmentStore = new AttachmentStore()
-const artifactRegistry = new ArtifactRegistry()
+const artifactRegistry = new ArtifactRegistry(codexHome)
 const threadCwds = new Map<string, string>()
 const activeTurns = new Map<string, string>()
 type LiveItem = { id: string; type: string; [key: string]: unknown }
@@ -555,11 +555,13 @@ const server = createServer(async (req, res) => {
     }
     const artifactMatch = url.pathname.match(/^\/api\/threads\/([a-zA-Z0-9-]+)\/artifacts\/([a-zA-Z0-9-]+)\/(content|preview)$/)
     if (req.method === 'GET' && artifactMatch) {
-      const artifact = artifactRegistry.resolve(artifactMatch[2]!)
+      await artifactRegistry.restore(artifactMatch[1]!)
+      const artifact = artifactRegistry.resolve(artifactMatch[2]!, artifactMatch[1]!)
       if (artifact?.threadId !== artifactMatch[1]) { res.writeHead(404).end(JSON.stringify({ error: 'Artifact not found' })); return }
       if (!artifact) { res.writeHead(404).end(JSON.stringify({ error: 'Artifact not found' })); return }
       const info = await stat(artifact.path).catch(() => null)
       if (!info?.isFile() || info.size !== artifact.size) { res.writeHead(404).end(JSON.stringify({ error: 'Artifact unavailable' })); return }
+      if (artifact.source === 'registered' && (info.mtimeMs !== artifact.mtimeMs || await realpath(artifact.path).catch(() => '') !== artifact.path)) { res.writeHead(404).end(JSON.stringify({ error: '交付文件已修改或移动，请重新登记最终版本' })); return }
       if (artifactMatch[3] === 'preview' && artifact.previewMode === 'downloadOnly') { res.writeHead(415).end(JSON.stringify({ error: '此文件类型仅支持下载' })); return }
       const range = req.headers.range?.match(/^bytes=(\d*)-(\d*)$/)
       let start = 0; let end = info.size - 1; let status = 200
@@ -868,7 +870,7 @@ const server = createServer(async (req, res) => {
       const threadId = url.pathname.split('/')[3]!
       await refreshThreadStatus(threadId)
       const live = liveTurns.get(threadId)
-      const statusArtifacts = live ? await artifactRegistry.register({ thread: { cwd: threadCwds.get(threadId), turns: [{ id: live.id, status: live.status, items: [...live.items.values()] }] } }, threadId) : []
+      const statusArtifacts = await artifactRegistry.register({ thread: { cwd: threadCwds.get(threadId), turns: live ? [{ id: live.id, status: live.status, items: [...live.items.values()] }] : [] } }, threadId)
       result = {
         threadId,
         activeTurnId: activeTurns.get(threadId) || null,

@@ -37,12 +37,67 @@ test('registers generated office files as download-only and excludes changed sou
   assert.equal(registry.resolve(artifacts[0].id).path, join(root, 'out', 'report.docx'))
 })
 
+test('registers an absolute file path mentioned inline before Chinese sentence punctuation', async () => {
+  const { root, threadId, result } = await fixture()
+  result.thread.turns[0].items.at(-1).text = `报告已生成在 ${join(root, 'out', 'report.docx')}，可以点击下载查看。`
+  const artifacts = await new ArtifactRegistry().register(result, threadId)
+  assert.deepEqual(artifacts.map(artifact => artifact.name), ['report.docx'])
+})
+
+test('registers Codex Markdown delivery links with Windows drive prefixes and source locations', async () => {
+  const { root, threadId, result } = await fixture()
+  const file = join(root, 'out', 'account-playbook.md')
+  await writeFile(file, '# Delivery')
+  const target = process.platform === 'win32' ? `/${file.replaceAll('\\', '/')}` : file
+  delete result.thread.cwd
+  result.thread.turns[0].items = [{ id: 'answer-1', type: 'agentMessage', phase: 'final_answer', text: `已交付：[运营底稿](<${target}:12>)` }]
+  const artifacts = await new ArtifactRegistry().register(result, threadId)
+  assert.deepEqual(artifacts.map(artifact => artifact.name), ['account-playbook.md'])
+})
+
+test('registers encoded Markdown and file URL links with spaces, parentheses and Unicode filenames', async () => {
+  const { root, threadId, result } = await fixture()
+  const file = join(root, 'out', '交付 (最终).pdf')
+  await writeFile(file, 'pdf-data')
+  delete result.thread.cwd
+  const { pathToFileURL } = await import('node:url')
+  for (const target of [file.replaceAll('\\', '/'), pathToFileURL(file).href]) {
+    result.thread.turns[0].items.at(-1).text = `已交付：[下载报告](<${target}>)`
+    const artifacts = await new ArtifactRegistry().register(result, threadId)
+    assert.deepEqual(artifacts.map(artifact => artifact.name), ['交付 (最终).pdf'])
+  }
+})
+
+test('registers an explicitly linked video with its correct media type', async () => {
+  const { root, threadId, result } = await fixture()
+  const file = join(root, 'out', 'intro.mp4')
+  await writeFile(file, 'video-data')
+  const target = process.platform === 'win32' ? `/${file.replaceAll('\\', '/')}` : file
+  result.thread.turns[0].items.at(-1).text = `样片已完成：[查看视频](<${target}>)`
+  const artifacts = await new ArtifactRegistry().register(result, threadId)
+  assert.equal(artifacts.length, 1)
+  assert.equal(artifacts[0].name, 'intro.mp4')
+  assert.equal(artifacts[0].mimeType, 'video/mp4')
+  assert.equal(artifacts[0].previewMode, 'downloadOnly')
+})
+
+test('keeps explicitly delivered Markdown created by fileChange while excluding code and config diffs', async () => {
+  const { root, threadId, result } = await fixture()
+  const file = join(root, 'out', 'account-playbook.md')
+  await writeFile(file, '# Delivered document')
+  result.thread.turns[0].items.unshift({ id: 'document-change', type: 'fileChange', changes: [{ path: file }] })
+  const target = path => process.platform === 'win32' ? `/${path.replaceAll('\\', '/')}` : path
+  result.thread.turns[0].items.at(-1).text = `已交付：[运营底稿](<${target(file)}>)\n代码：[App](<${target(join(root, 'App.vue'))}>)\n配置：[配置](<${target(join(root, 'settings.json'))}>)`
+  const artifacts = await new ArtifactRegistry().register(result, threadId)
+  assert.deepEqual(artifacts.map(artifact => artifact.name), ['account-playbook.md'])
+})
+
 test('rejects paths outside the thread working directory', async () => {
   const { root, threadId, result } = await fixture()
   const outside = join(root, '..', 'outside.pdf')
   await writeFile(outside, 'private')
   try {
-    result.thread.turns[0].items[1].text = `文件：${outside}`
+    result.thread.turns[0].items.at(-1).text += `\n文件：${outside}`
     const artifacts = await new ArtifactRegistry().register(result, threadId)
     assert.deepEqual(artifacts.map(artifact => artifact.name), ['report.docx'])
   } finally { await rm(outside, { force: true }) }

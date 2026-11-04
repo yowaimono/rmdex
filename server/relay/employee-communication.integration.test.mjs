@@ -77,6 +77,10 @@ test('colleague communication routes current threads, isolates identity and pers
     const client = await call('/api/devices/source/web-client', json({}, login.data.accessToken))
     const userToken = client.data.accessToken
     assert.equal((await call('/api/threads/sender-thread/send', json({ text: 'Initialize communication', employeeId: 'sender' }, userToken))).status, 200)
+    assert.equal(requests.find(item => item.path === '/api/employee-assets/prepare' && item.data.employeeId === 'sender').data.threadId, 'sender-thread')
+    const artifactContext = JSON.parse(await readFile(join(dir, 'source', 'rmdex', 'employees', 'user', 'sender', 'artifact-context.json'), 'utf8'))
+    assert.equal(artifactContext.threadId, 'sender-thread')
+    assert.equal(artifactContext.employeeId, 'sender')
     const configPath = join(dir, 'source', 'rmdex', 'employees', 'user', 'sender', 'communication.json')
     const { token } = JSON.parse(await readFile(configPath, 'utf8'))
     const context = await call('/api/employee-communication/voice-context', { headers: { Authorization: `Bearer ${token}` } })

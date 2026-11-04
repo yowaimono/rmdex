@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile, mkdir, symlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { test } from 'node:test'
@@ -59,4 +59,46 @@ test('communication helper is managed, scoped and protects user-owned files', as
     assert.equal(await readFile(join(result.assetPath, 'colleagues.mjs'), 'utf8'), 'user owned helper')
     await assert.rejects(prepareEmployeeAssets({ ...input, communication: { ...input.communication, origin: 'http://insecure.example' } }, home), /origin/)
   } finally { await rm(home, { recursive: true, force: true }) }
+})
+
+test('artifact helper is installed without communication credentials and follows thread resets', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'rmdex-artifact-assets-'))
+  t.after(() => rm(home, { recursive: true, force: true }))
+  const input = { userId: 'user', employeeId: 'employee', threadId: 'old-thread' }
+  const { assetPath } = await prepareEmployeeAssets(input, home)
+  const helper = join(assetPath, 'artifacts.mjs'), contextPath = join(assetPath, 'artifact-context.json')
+  const source = await readFile(new URL('./skills/rmdex-employee/artifacts.mjs', import.meta.url), 'utf8')
+  assert.equal(await readFile(helper, 'utf8'), source)
+  let context = JSON.parse(await readFile(contextPath, 'utf8'))
+  assert.equal(context.userId, input.userId)
+  assert.equal(context.employeeId, input.employeeId)
+  assert.equal(context.threadId, 'old-thread')
+  assert.deepEqual(Object.keys(context).sort(), ['agentOrigin', 'employeeId', 'managedBy', 'threadId', 'userId'])
+  await prepareEmployeeAssets({ ...input, threadId: 'new-thread' }, home)
+  context = JSON.parse(await readFile(contextPath, 'utf8'))
+  assert.equal(context.threadId, 'new-thread')
+  await assert.rejects(prepareEmployeeAssets({ ...input, threadId: '../bad' }, home), /thread identifier/)
+  assert.equal(JSON.parse(await readFile(contextPath, 'utf8')).threadId, 'new-thread')
+  await writeFile(helper, 'user owned helper')
+  await assert.rejects(prepareEmployeeAssets(input, home), /User-managed/)
+  assert.equal(await readFile(helper, 'utf8'), 'user owned helper')
+  await writeFile(helper, source)
+  await writeFile(contextPath, JSON.stringify({ managedBy: 'user' }))
+  await assert.rejects(prepareEmployeeAssets(input, home), /User-managed/)
+  assert.equal(JSON.parse(await readFile(contextPath, 'utf8')).managedBy, 'user')
+})
+
+test('artifact installation refuses linked helpers', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'rmdex-artifact-link-'))
+  t.after(() => rm(home, { recursive: true, force: true }))
+  const directory = join(home, 'rmdex', 'employees', 'user', 'employee')
+  await mkdir(directory, { recursive: true })
+  const target = join(home, 'owned.mjs')
+  await writeFile(target, 'user file')
+  try { await symlink(target, join(directory, 'artifacts.mjs')) } catch (error) {
+    if (error.code === 'EPERM') { t.skip('File symlinks require Windows developer mode'); return }
+    throw error
+  }
+  await assert.rejects(prepareEmployeeAssets({ userId: 'user', employeeId: 'employee', threadId: 'thread' }, home), /regular file/)
+  assert.equal(await readFile(target, 'utf8'), 'user file')
 })

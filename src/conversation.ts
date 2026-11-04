@@ -1,6 +1,6 @@
 export type ContentPart = { type: string; text?: string; url?: string; path?: string; assetUrl?: string }
 export type Item = { id?: string; type: string; text?: string; content?: ContentPart[]; [key: string]: unknown }
-export type Artifact = { id: string; threadId: string; turnId: string; sourceItemId?: string; name: string; mimeType: string; size: number; previewMode: 'thumbnail' | 'inline' | 'downloadOnly' }
+export type Artifact = { id: string; threadId: string; turnId: string; sourceItemId?: string; name: string; mimeType: string; size: number; previewMode: 'thumbnail' | 'inline' | 'downloadOnly'; source?: 'registered'; sha256?: string; createdAt?: number }
 export type Turn = { id: string; status: string; items: Item[]; artifacts?: Artifact[] }
 export type PlanExecution = { planId: string; planRunId: string; planName: string; employeeId?: string | null }
 export type VoiceMessage = { employeeId: string; id: string; seconds: number }
@@ -98,6 +98,8 @@ export function timeline(turns: Turn[]): Entry[] {
   for (const turn of turns) {
     const answerItems = finalAnswerItems(turn)
     const answer = answerItems.map(item => item.text!).join('\n\n')
+    const artifactReply = turn.status === 'completed' ? answerItems.at(-1) : undefined
+    const visibleArtifacts = artifactReply ? turn.artifacts || [] : (turn.artifacts || []).filter(artifact => artifact.source === 'registered')
     let group: Item[] = []
     const flush = () => { if (group.length) entries.push({ role: 'tools', items: group }); group = [] }
     for (const original of turn.items || []) {
@@ -115,11 +117,12 @@ export function timeline(turns: Turn[]): Entry[] {
         flush()
         if (item.text) {
           const voice = voiceMessage(item.text)
-          entries.push({ role: 'agent', text: voice ? '' : item.text, copyText: voice ? '' : answer, images: [], item, turnId: turn.id, forkable: turn.status === 'completed' && answerItems.includes(original), ...(voice ? { voice } : {}), ...(turn.status === 'completed' && answerItems.at(-1) === original && turn.artifacts?.length ? { artifacts: turn.artifacts } : {}) })
+          entries.push({ role: 'agent', text: voice ? '' : item.text, copyText: voice ? '' : answer, images: [], item, turnId: turn.id, forkable: turn.status === 'completed' && answerItems.includes(original), ...(voice ? { voice } : {}), ...(artifactReply === original && visibleArtifacts.length ? { artifacts: visibleArtifacts } : {}) })
         }
       } else group.push(item)
     }
     flush()
+    if (!artifactReply && visibleArtifacts.length) entries.push({ role: 'agent', text: '', copyText: '', images: [], item: { id: `rmdex-artifacts-${turn.id}`, type: 'artifactDelivery' }, turnId: turn.id, forkable: false, artifacts: visibleArtifacts })
   }
   return entries
 }
