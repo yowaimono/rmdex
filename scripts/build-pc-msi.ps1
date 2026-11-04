@@ -37,9 +37,9 @@ if ($LASTEXITCODE -gt 7) { throw 'Failed to copy node_modules.' }
 # Android and Gradle packages can contain generated build trees that change or
 # disappear while the installer manifest is being generated. They are not
 # needed by the desktop runtime, so remove them from the isolated MSI payload.
-$transientNames = @('build', '.transforms', '.gradle', '.cache')
+$transientNames = @('.transforms', '.gradle', '.cache')
 Get-ChildItem -LiteralPath (Join-Path $stage 'node_modules') -Directory -Recurse -Force |
-  Where-Object { $transientNames -contains $_.Name } |
+  Where-Object { ($transientNames -contains $_.Name) -or ($_.Name -eq 'build' -and (($_.FullName -split '[\\/]') -contains 'android')) } |
   Sort-Object FullName -Descending |
   Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 Copy-Item -LiteralPath (Join-Path $project 'package.json') -Destination $stage -Force
@@ -54,7 +54,7 @@ Copy-Item -LiteralPath 'D:\bin\nodejs\node.exe' -Destination $runtime -Force
 $files = Get-ChildItem -LiteralPath $stage -File -Recurse | Where-Object {
   $relative = $_.FullName.Substring($stage.Length + 1)
   $segments = $relative -split '[\\/]'
-  -not (($segments -contains 'build') -or ($segments -contains '.transforms') -or ($segments -contains '.gradle') -or ($segments -contains '.cache'))
+  -not ((($segments -contains 'android') -and ($segments -contains 'build')) -or ($segments -contains '.transforms') -or ($segments -contains '.gradle') -or ($segments -contains '.cache'))
 }
 $components = New-Object System.Text.StringBuilder
 $dirMap = @{ '' = 'INSTALLFOLDER' }
