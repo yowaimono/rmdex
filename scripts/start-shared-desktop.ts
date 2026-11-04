@@ -72,7 +72,12 @@ async function waitForDesktopToExit() {
 
 async function runCodexDaemonStart() {
   await new Promise<void>((resolve, reject) => {
-    const child = spawn(codexExecutable, ['app-server', 'daemon', 'start'], { stdio: 'inherit', windowsHide: true })
+    // Windows npm shims need cmd.exe; spawning a .cmd/.bat directly throws EINVAL.
+    const args = ['app-server', 'daemon', 'start']
+    const useShell = process.platform === 'win32' && /\.(cmd|bat)$/i.test(codexExecutable)
+    const child = useShell
+      ? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/c', codexExecutable, ...args], { stdio: 'inherit', windowsHide: true })
+      : spawn(codexExecutable, args, { stdio: 'inherit', windowsHide: true })
     child.once('error', reject)
     child.once('exit', code => code === 0 ? resolve() : reject(new Error(`Codex managed daemon failed to start (exit ${code ?? 'unknown'})`)))
   })
